@@ -3,13 +3,13 @@ Multi-modality utils
 """
 
 import copy
-import hashlib
 import pickle
 from abc import abstractmethod
 from collections import defaultdict
 from multiprocessing import shared_memory
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
+import blake3
 import numpy as np
 import torch
 from torch import nn
@@ -26,7 +26,12 @@ from sglang.srt.mem_cache.multimodal_cache import EmbeddingResult, MultiModalSta
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.multimodal.evs import EVSEmbeddingResult
 from sglang.srt.server_args import get_global_server_args
-from sglang.srt.utils import flatten_nested_list, is_npu, print_warning_once
+from sglang.srt.utils import (
+    flatten_nested_list,
+    is_cuda_alike,
+    is_npu,
+    print_warning_once,
+)
 from sglang.utils import logger
 
 _is_npu = is_npu()
@@ -1330,7 +1335,7 @@ def get_multimodal_data_bounds(
 
 
 def data_hash(data) -> int:
-    hash_bytes = hashlib.sha256(data).digest()[:8]
+    hash_bytes = blake3.blake3(data).digest()[:8]
     return int.from_bytes(hash_bytes, byteorder="big", signed=False)
 
 
@@ -1345,11 +1350,11 @@ def tensor_hash(tensor_list) -> int:
             x.flatten() if isinstance(x, torch.Tensor) else x for x in tensor_list
         ]
         # GPU path: concat + triton hash (unchanged)
-        if any(isinstance(t, torch.Tensor) and t.is_cuda for t in tensors):
+        if any(isinstance(t, torch.Tensor) and is_cuda_alike(t) for t in tensors):
             tensor = torch.concat(tensors)
             return gpu_tensor_hash(tensor.cuda())
         # CPU path: hash each tensor incrementally without concat
-        hasher = hashlib.sha256()
+        hasher = blake3.blake3()
         for t in tensors:
             t = t.detach().contiguous()
             hasher.update(memoryview(t.view(torch.uint8).numpy()))
@@ -1357,10 +1362,10 @@ def tensor_hash(tensor_list) -> int:
         return int.from_bytes(hash_bytes, byteorder="big", signed=False)
 
     # Single tensor
-    if tensor.is_cuda:
+    if is_cuda_alike(tensor):
         return gpu_tensor_hash(tensor.cuda())
     tensor = tensor.detach().contiguous()
-    hasher = hashlib.sha256()
+    hasher = blake3.blake3()
     hasher.update(memoryview(tensor.view(torch.uint8).numpy()))
     hash_bytes = hasher.digest()[:8]
     return int.from_bytes(hash_bytes, byteorder="big", signed=False)
@@ -1373,7 +1378,7 @@ def hash_feature(f):
         return data_hash(tuple(flatten_nested_list(f)))
     elif isinstance(f, np.ndarray):
         arr = np.ascontiguousarray(f)
-        hasher = hashlib.sha256()
+        hasher = blake3.blake3()
         hasher.update(memoryview(arr))
         hash_bytes = hasher.digest()[:8]
         return int.from_bytes(hash_bytes, byteorder="big", signed=False)
