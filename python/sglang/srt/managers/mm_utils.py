@@ -28,7 +28,6 @@ from sglang.srt.multimodal.evs import EVSEmbeddingResult
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import (
     flatten_nested_list,
-    is_cuda_alike,
     is_npu,
     print_warning_once,
 )
@@ -1350,7 +1349,7 @@ def tensor_hash(tensor_list) -> int:
             x.flatten() if isinstance(x, torch.Tensor) else x for x in tensor_list
         ]
         # GPU path: concat + triton hash (unchanged)
-        if any(isinstance(t, torch.Tensor) and is_cuda_alike(t) for t in tensors):
+        if any(isinstance(t, torch.Tensor) and t.is_cuda for t in tensors):
             tensor = torch.concat(tensors)
             return gpu_tensor_hash(tensor.cuda())
         # CPU path: hash each tensor incrementally without concat
@@ -1362,7 +1361,7 @@ def tensor_hash(tensor_list) -> int:
         return int.from_bytes(hash_bytes, byteorder="big", signed=False)
 
     # Single tensor
-    if is_cuda_alike(tensor):
+    if tensor.is_cuda:
         return gpu_tensor_hash(tensor.cuda())
     tensor = tensor.detach().contiguous()
     hasher = blake3.blake3()
