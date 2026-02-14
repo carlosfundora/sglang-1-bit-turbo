@@ -920,6 +920,7 @@ class ModelConfig:
             "gemlite",
             "gemlite_awq",
             "gemlite_gptq",
+            "torchao",
         ]
         optimized_quantization_methods = [
             "fp8",

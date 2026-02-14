@@ -35,6 +35,7 @@ from sglang.srt.layers.quantization.mxfp4 import Mxfp4Config
 from sglang.srt.layers.quantization.petit import PetitNvFp4Config
 from sglang.srt.layers.quantization.qoq import QoQConfig
 from sglang.srt.layers.quantization.quark.quark import QuarkConfig
+from sglang.srt.layers.quantization.torchao import TorchAOConfig
 from sglang.srt.layers.quantization.turboquant import TurboquantConfig
 
 try:
@@ -99,6 +100,7 @@ BASE_QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "quark": QuarkConfig,
     "auto-round": AutoRoundConfig,
     "turboquant": TurboquantConfig,
+    "torchao": TorchAOConfig,
 }
 
 if GemLiteConfig is not None:
