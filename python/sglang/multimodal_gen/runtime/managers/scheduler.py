@@ -4,13 +4,11 @@
 import asyncio
 import os
 import pickle
+import threading
 from collections import deque
 from typing import Any, List
 
 import zmq
-import threading
-from typing import Any, Dict, Optional
-
 
 from sglang.multimodal_gen.configs.pipeline_configs.base import ModelTaskType
 from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
@@ -39,12 +37,10 @@ from sglang.multimodal_gen.runtime.server_args import (
 from sglang.multimodal_gen.runtime.utils.common import get_zmq_socket
 from sglang.multimodal_gen.runtime.utils.distributed import broadcast_pyobj
 from sglang.multimodal_gen.runtime.utils.logging_utils import GREEN, RESET, init_logger
-
 from sglang.srt.managers.io_struct import (
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
 )
-
 
 logger = init_logger(__name__)
 
@@ -124,7 +120,7 @@ class Scheduler:
         self._max_consecutive_errors = 3
         self._consecutive_error_count = 0
 
-        #sleeping status
+        # sleeping status
         self._sleep_lock = threading.Lock()
         self._sleeping: bool = False
 
@@ -172,7 +168,9 @@ class Scheduler:
 
     def _handle_generation(self, reqs: List[Req]):
         if self._sleeping:
-            return OutputBatch(error="Engine is sleeping. Call resume_memory_occupation first.")
+            return OutputBatch(
+                error="Engine is sleeping. Call resume_memory_occupation first."
+            )
         warmup_reqs = [req for req in reqs if req.is_warmup]
         if warmup_reqs:
             self._warmup_processed += len(warmup_reqs)
@@ -456,7 +454,9 @@ class Scheduler:
         req = reqs[0]
         with self._sleep_lock:
             if self._sleeping:
-                return OutputBatch(output={"sleeping": True, "note": "already sleeping"})
+                return OutputBatch(
+                    output={"sleeping": True, "note": "already sleeping"}
+                )
             # become sleeping，and stall generation
             self._sleeping = True
 

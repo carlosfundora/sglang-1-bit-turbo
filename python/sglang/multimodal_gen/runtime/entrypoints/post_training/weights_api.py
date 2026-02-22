@@ -8,7 +8,6 @@ from sglang.multimodal_gen.runtime.entrypoints.post_training.io_struct import (
     UpdateWeightFromDiskReqInput,
 )
 from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
-
 from sglang.srt.managers.io_struct import (
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
@@ -65,6 +64,7 @@ async def get_weights_checksum(request: Request):
         return ORJSONResponse({"error": str(e)}, status_code=500)
 
     return ORJSONResponse(response.output, status_code=200)
+
 
 @router.post("/release_memory_occupation")
 async def release_memory_occupation(request: Request):
