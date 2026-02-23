@@ -461,42 +461,33 @@ class GPUWorker:
             )
         return checksums
 
-    def release_memory_occupation(
-        self, tags: Optional[List[str]] = None
-    ) -> Dict[str, Any]:
-        logger.info(
-            f"[SLEEP] GPUWorker.release_memory_occupation rank={self.rank} tags={tags}"
-        )
+    def _move_pipeline_modules(self, device: str) -> tuple[list[str], list[str]]:
+        """Move all updatable nn.Module components of the pipeline to a device."""
+        moved: list[str] = []
+        skipped: list[str] = []
+
+        if self.pipeline is None:
+            return moved, skipped
+
+        modules = get_updatable_modules(self.pipeline)  # dict[name, nn.Module]
+        for name, m in modules.items():
+            try:
+                # Only torch.nn.Module guaranteed here, but still best-effort
+                m.to(device)
+                moved.append(name)
+            except Exception:
+                skipped.append(name)
+
+        return moved, skipped
+    
+    def release_memory_occupation(self) -> Dict[str, Any]:
+        logger.info(f"[SLEEP] GPUWorker.release_memory_occupation rank={self.rank}")
         if self._sleeping:
-            return {"note": "already sleeping"}
+            return {"success": True, "sleeping": True, "message": "already sleeping"}
 
-        tags = tags or ["weights", "cache"]
+        moved, skipped = self._move_pipeline_modules("cpu")
 
-        # 1) Offload / unload modules at the pipeline level
-        if self.pipeline is not None:
-            if hasattr(self.pipeline, "sleep"):
-                self.pipeline.sleep(tags=tags)
-            else:
-                # Most conservative fallback: move all accessible modules to CPU
-                for name in [
-                    "transformer",
-                    "transformer_2",
-                    "video_dit",
-                    "video_dit_2",
-                    "audio_dit",
-                    "vae",
-                    "text_encoder",
-                    "text_encoder_2",
-                    "image_encoder",
-                ]:
-                    try:
-                        m = self.pipeline.get_module(name)
-                        if m is not None and hasattr(m, "to"):
-                            m.to("cpu")
-                    except Exception:
-                        pass
-
-        # 2) Clear CUDA allocator and Python GC
+        # Clear CUDA allocator and Python GC (best-effort)
         try:
             torch.cuda.synchronize()
         except Exception:
@@ -504,56 +495,48 @@ class GPUWorker:
         gc.collect()
         try:
             torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
         except Exception:
             pass
 
         self._sleeping = True
-        return {"released": True, "tags": tags}
-
-    def resume_memory_occupation(
-        self, tags: Optional[List[str]] = None
-    ) -> Dict[str, Any]:
-        logger.info(
-            f"[WAKE ] GPUWorker.resume_memory_occupation rank={self.rank} tags={tags}"
-        )
+        return {
+            "success": True,
+            "sleeping": True,
+            "message": "released GPU memory (moved pipeline modules to CPU)",
+            "moved": moved,
+            "skipped": skipped,
+        }
+    
+    def resume_memory_occupation(self) -> Dict[str, Any]:
+        logger.info(f"[WAKE ] GPUWorker.resume_memory_occupation rank={self.rank}")
         if not self._sleeping:
-            return {"note": "already awake"}
+            return {"success": True, "sleeping": False, "message": "already awake"}
 
-        tags = tags or ["weights"]
+        if not torch.cuda.is_available():
+            self._sleeping = False
+            return {
+                "success": False,
+                "sleeping": False,
+                "message": "CUDA is not available; cannot move modules back to GPU",
+            }
 
-        if self.pipeline is not None:
-            if hasattr(self.pipeline, "wake"):
-                self.pipeline.wake(tags=tags)
-            else:
-                for name in [
-                    "transformer",
-                    "transformer_2",
-                    "video_dit",
-                    "video_dit_2",
-                    "audio_dit",
-                    "vae",
-                    "text_encoder",
-                    "text_encoder_2",
-                    "image_encoder",
-                ]:
-                    try:
-                        m = self.pipeline.get_module(name)
-                        if m is not None and hasattr(m, "to"):
-                            m.to("cuda")
-                    except Exception:
-                        pass
+        device = f"cuda:{self.local_rank}"
+        moved, skipped = self._move_pipeline_modules(device)
 
-            # Warmup note:
-            # Your server already has a warmup mechanism
-            # (e.g., inserting a warmup request into the waiting queue).
-            # For this MVP, we do NOT warm up inside the worker;
-            # warmup is deferred to the scheduler or the user's next request.
-            # If worker-side warmup is required, a request must be constructed
-            # and pipeline.forward should be explicitly invoked.
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            pass
 
         self._sleeping = False
-        return {"resumed": True, "tags": tags}
-
+        return {
+            "success": True,
+            "sleeping": False,
+            "message": "resumed GPU memory (moved pipeline modules to GPU)",
+            "moved": moved,
+            "skipped": skipped,
+        }
 
 OOM_MSG = f"""
 OOM detected. Possible solutions:
