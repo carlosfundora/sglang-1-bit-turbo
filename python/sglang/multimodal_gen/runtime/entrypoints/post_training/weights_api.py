@@ -6,12 +6,10 @@ from fastapi.responses import ORJSONResponse
 from sglang.multimodal_gen.runtime.entrypoints.post_training.io_struct import (
     GetWeightsChecksumReqInput,
     UpdateWeightFromDiskReqInput,
-)
-from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
-from sglang.srt.managers.io_struct import (
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
 )
+from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
 
 router = APIRouter()
 
@@ -70,17 +68,14 @@ async def get_weights_checksum(request: Request):
 async def release_memory_occupation(request: Request):
     """Release GPU memory occupation (sleep the engine)."""
     body = await request.json()
-    tags = body.get("tags")
 
-    req = ReleaseMemoryOccupationReqInput(tags=tags)
+    req = ReleaseMemoryOccupationReqInput()
 
     try:
         response = await async_scheduler_client.forward(req)
     except Exception as e:
         return ORJSONResponse({"success": False, "message": str(e)}, status_code=500)
 
-    # The structure of response.output depends on how your Scheduler/GPUWorker returns it.
-    # Perform a robust handling here that is compatible with both dict and non-dict outputs.
     out = response.output
     if isinstance(out, dict):
         return ORJSONResponse(out, status_code=200 if out.get("success", True) else 400)
@@ -91,9 +86,8 @@ async def release_memory_occupation(request: Request):
 async def resume_memory_occupation(request: Request):
     """Resume GPU memory occupation (wake the engine)."""
     body = await request.json()
-    tags = body.get("tags")
 
-    req = ResumeMemoryOccupationReqInput(tags=tags)
+    req = ResumeMemoryOccupationReqInput()
 
     try:
         response = await async_scheduler_client.forward(req)

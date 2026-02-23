@@ -17,3 +17,15 @@ class GetWeightsChecksumReqInput:
     """Compute SHA-256 checksum of loaded module weights for verification."""
 
     module_names: list[str] | None = None
+
+
+@dataclass
+class ReleaseMemoryOccupationReqInput:
+    """Request to release (sleep) GPU memory occupation for the diffusion engine."""
+    pass
+
+
+@dataclass
+class ResumeMemoryOccupationReqInput:
+    """Request to resume (wake) GPU memory occupation for the diffusion engine."""
+    pass
