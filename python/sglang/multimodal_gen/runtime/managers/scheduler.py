@@ -18,6 +18,8 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
 from sglang.multimodal_gen.runtime.entrypoints.post_training.io_struct import (
     GetWeightsChecksumReqInput,
     UpdateWeightFromDiskReqInput,
+    ReleaseMemoryOccupationReqInput,
+    ResumeMemoryOccupationReqInput,
 )
 from sglang.multimodal_gen.runtime.entrypoints.utils import (
     ListLorasReq,
@@ -37,10 +39,6 @@ from sglang.multimodal_gen.runtime.server_args import (
 from sglang.multimodal_gen.runtime.utils.common import get_zmq_socket
 from sglang.multimodal_gen.runtime.utils.distributed import broadcast_pyobj
 from sglang.multimodal_gen.runtime.utils.logging_utils import GREEN, RESET, init_logger
-from sglang.srt.managers.io_struct import (
-    ReleaseMemoryOccupationReqInput,
-    ResumeMemoryOccupationReqInput,
-)
 
 logger = init_logger(__name__)
 
@@ -461,7 +459,7 @@ class Scheduler:
             self._sleeping = True
 
         # release gpu memory (every rank will execute their own worker)
-        detail = self.worker.release_memory_occupation(tags=getattr(req, "tags", None))
+        detail = self.worker.release_memory_occupation()
 
         return OutputBatch(output={"sleeping": True, "detail": detail})
 
@@ -472,7 +470,7 @@ class Scheduler:
             if not self._sleeping:
                 return OutputBatch(output={"sleeping": False, "note": "already awake"})
 
-        detail = self.worker.resume_memory_occupation(tags=getattr(req, "tags", None))
+        detail = self.worker.resume_memory_occupation()
 
         with self._sleep_lock:
             self._sleeping = False
