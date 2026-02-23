@@ -5,9 +5,9 @@ from fastapi.responses import ORJSONResponse
 
 from sglang.multimodal_gen.runtime.entrypoints.post_training.io_struct import (
     GetWeightsChecksumReqInput,
-    UpdateWeightFromDiskReqInput,
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
+    UpdateWeightFromDiskReqInput,
 )
 from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
 

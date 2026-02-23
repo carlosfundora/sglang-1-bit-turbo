@@ -22,10 +22,12 @@ class GetWeightsChecksumReqInput:
 @dataclass
 class ReleaseMemoryOccupationReqInput:
     """Request to release (sleep) GPU memory occupation for the diffusion engine."""
+
     pass
 
 
 @dataclass
 class ResumeMemoryOccupationReqInput:
     """Request to resume (wake) GPU memory occupation for the diffusion engine."""
+
     pass
