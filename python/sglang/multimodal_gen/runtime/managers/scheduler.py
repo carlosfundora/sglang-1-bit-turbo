@@ -167,7 +167,7 @@ class Scheduler:
     def _handle_generation(self, reqs: List[Req]):
         if self._sleeping:
             return OutputBatch(
-                error="Engine is sleeping. Call resume_memory_occupation first."
+                error="Server is sleeping. Call resume_memory_occupation first."
             )
         warmup_reqs = [req for req in reqs if req.is_warmup]
         if warmup_reqs:
