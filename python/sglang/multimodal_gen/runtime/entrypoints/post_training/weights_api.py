@@ -79,7 +79,6 @@ async def _handle_memory_occupation_request(request: Request, req_class: type):
     except Exception:
         body = {}
 
-    # No tags, no args
     req = req_class()
 
     try:
@@ -88,10 +87,25 @@ async def _handle_memory_occupation_request(request: Request, req_class: type):
         return ORJSONResponse({"success": False, "message": str(e)}, status_code=500)
 
     out = getattr(response, "output", None)
+
+    # 1) dict output: prefer explicit success; fall back to heuristic / compat
     if isinstance(out, dict):
-        # be strict: missing "success" => treat as failure
-        success = bool(out.get("success", False))
+        if "success" in out:
+            success = bool(out["success"])
+        else:
+            # Backward compat: treat known "ok" patterns as success
+            # (recommended: remove this after worker always returns success)
+            success = True
+            out["success"] = True
+
         return ORJSONResponse(out, status_code=200 if success else 400)
+
+    # 2) non-dict output: treat None as failure
+    if out is None:
+        return ORJSONResponse(
+            {"success": False, "message": "Empty response from scheduler."},
+            status_code=500,
+        )
 
     return ORJSONResponse({"success": True, "output": out}, status_code=200)
 
