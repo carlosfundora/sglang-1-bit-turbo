@@ -304,7 +304,7 @@ async def process_generation_batch(
                 status_code=500,
                 detail={
                     "error": {
-                         "message": f"Model generation returned no output. Error from scheduler: {error_msg}",
+                        "message": f"Model generation returned no output. Error from scheduler: {error_msg}",
                         "type": "internal_error",
                     }
                 },
