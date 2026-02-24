@@ -19,6 +19,7 @@ from functools import lru_cache, partial
 from logging import Logger
 from types import MethodType
 from typing import Any, cast
+
 from fastapi import HTTPException
 
 import sglang.multimodal_gen.envs as envs
@@ -612,6 +613,7 @@ def log_generation_timer(
                 exc_info=True,
             )
         raise
+
 
 def log_batch_completion(
     logger: logging.Logger, num_outputs: int, total_time: float

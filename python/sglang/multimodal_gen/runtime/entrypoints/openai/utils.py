@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from typing import Any, Generator, List, Optional, Union
 
 import httpx
-from fastapi import UploadFile, HTTPException
+from fastapi import HTTPException, UploadFile
 
 from sglang.multimodal_gen.configs.sample.sampling_params import (
     DataType,
@@ -253,6 +253,7 @@ async def _save_base64_image_to_path(base64_data: str, target_path: str) -> str:
         return target_path
     except Exception as e:
         raise Exception(f"Failed to decode base64 image: {str(e)}")
+
 
 def _is_engine_sleeping_error(msg: str) -> bool:
     """Heuristic matcher for 'engine is sleeping' errors from scheduler."""
