@@ -19,6 +19,7 @@ from functools import lru_cache, partial
 from logging import Logger
 from types import MethodType
 from typing import Any, cast
+from fastapi import HTTPException
 
 import sglang.multimodal_gen.envs as envs
 
@@ -577,6 +578,26 @@ def log_generation_timer(
             f"Pixel data generated successfully in {GREEN}%.2f{RESET} seconds",
             timer.duration,
         )
+
+    except HTTPException as e:
+        # Expected user-facing errors (e.g., server sleeping -> 400).
+        # Do NOT print traceback for these.
+        msg = e.detail
+        if request_idx is not None:
+            logger.warning(
+                "Request %d rejected (HTTP %d): %s",
+                request_idx,
+                e.status_code,
+                msg,
+            )
+        else:
+            logger.warning(
+                "Request rejected (HTTP %d): %s",
+                e.status_code,
+                msg,
+            )
+        raise
+
     except Exception as e:
         if request_idx is not None:
             logger.error(
@@ -591,7 +612,6 @@ def log_generation_timer(
                 exc_info=True,
             )
         raise
-
 
 def log_batch_completion(
     logger: logging.Logger, num_outputs: int, total_time: float

@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from typing import Any, Generator, List, Optional, Union
 
 import httpx
-from fastapi import UploadFile
+from fastapi import UploadFile, HTTPException
 
 from sglang.multimodal_gen.configs.sample.sampling_params import (
     DataType,
@@ -254,6 +254,18 @@ async def _save_base64_image_to_path(base64_data: str, target_path: str) -> str:
     except Exception as e:
         raise Exception(f"Failed to decode base64 image: {str(e)}")
 
+def _is_engine_sleeping_error(msg: str) -> bool:
+    """Heuristic matcher for 'engine is sleeping' errors from scheduler."""
+    if not msg:
+        return False
+    m = msg.lower()
+    return ("engine is sleeping" in m) or ("resume_memory_occupation" in m)
+
+
+def _openai_error_detail(message: str, code: str) -> dict:
+    """OpenAI-ish error envelope."""
+    return {"error": {"message": message, "type": code}}
+
 
 async def process_generation_batch(
     scheduler_client: AsyncSchedulerClient,
@@ -261,12 +273,40 @@ async def process_generation_batch(
 ) -> tuple[list[str], OutputBatch]:
     total_start_time = time.perf_counter()
     with log_generation_timer(logger, batch.prompt):
-        result = await scheduler_client.forward([batch])
+        # 1) Forward to scheduler
+        try:
+            result = await scheduler_client.forward([batch])
+        except Exception as e:
+            # Scheduler connectivity/transport errors -> 500
+            raise HTTPException(
+                status_code=500,
+                detail=_openai_error_detail(
+                    f"Scheduler request failed: {e}",
+                    code="internal_error",
+                ),
+            )
 
+        # 2) Scheduler returned no output => map to HTTP error
         if result.output is None and result.output_file_paths is None:
             error_msg = result.error or "Unknown error"
-            raise RuntimeError(
-                f"Model generation returned no output. Error from scheduler: {error_msg}"
+
+            # Engine sleeping -> 400 (client should call resume)
+            if _is_engine_sleeping_error(error_msg):
+                raise HTTPException(
+                    status_code=400,
+                    detail=_openai_error_detail(
+                        "Server is sleeping. Call /resume_memory_occupation first.",
+                        code="Server_sleeping",
+                    ),
+                )
+
+            # Other runtime errors -> 500 (do not leak python traceback)
+            raise HTTPException(
+                status_code=500,
+                detail=_openai_error_detail(
+                    f"Model generation returned no output. Error from scheduler: {error_msg}",
+                    code="internal_error",
+                ),
             )
 
         if result.output_file_paths:
