@@ -92,6 +92,7 @@ class GPUWorker:
         self.cfg_cpu_group = self.cfg_group.cpu_group
 
         self._sleeping: bool = False
+        self._sleep_restore_map: dict[str, str] = {}
 
     def init_device_and_model(self) -> None:
         """Initialize the device and load the model."""
@@ -461,83 +462,175 @@ class GPUWorker:
             )
         return checksums
 
-    def _move_pipeline_modules(self, device: str) -> tuple[list[str], list[str]]:
-        """Move all updatable nn.Module components of the pipeline to a device."""
-        moved: list[str] = []
-        skipped: list[str] = []
 
+    def _module_device(self, m) -> str:
+        """Return best-effort device string for a module."""
+
+        p = next(m.parameters(), None)
+        if p is not None:
+            return str(p.device)
+        b = next(m.buffers(), None)
+        if b is not None:
+            return str(b.device)
+        return "cpu"
+
+
+    def _move_obj_tensors(self, obj, device: str):
+        """Recursively move tensors inside plain python containers."""
+
+        if torch.is_tensor(obj):
+            try:
+                return obj.to(device)
+            except Exception:
+                return obj
+        if isinstance(obj, dict):
+            return {k: self._move_obj_tensors(v, device) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self._move_obj_tensors(v, device) for v in obj]
+        if isinstance(obj, tuple):
+            return tuple(self._move_obj_tensors(v, device) for v in obj)
+        return obj
+
+
+    def _sanitize_module_attrs(self, m, device: str):
+        """
+        Move non-parameter/buffer tensor attributes to target device.
+        This fixes common cases like RoPE caches / inv_freq stored as plain attributes.
+        """
+        # Avoid heavy recursion into private internals; only touch public-ish attrs.
+        for k, v in list(getattr(m, "__dict__", {}).items()):
+            if k.startswith("_") or k in {"_parameters", "_buffers", "_modules"}:
+                continue
+            try:
+                nv = self._move_obj_tensors(v, device)
+                # only set if object identity changed (avoid pointless writes)
+                if nv is not v:
+                    setattr(m, k, nv)
+            except Exception:
+                pass
+
+
+    def _move_modules(self, names: list[str], device: str) -> tuple[list[str], list[str]]:
+        """Move selected updatable modules to device (best-effort)."""
+        moved, skipped = [], []
         if self.pipeline is None:
             return moved, skipped
 
-        modules = get_updatable_modules(self.pipeline)  # dict[name, nn.Module]
-        for name, m in modules.items():
-            try:
-                # Only torch.nn.Module guaranteed here, but still best-effort
-                m.to(device)
-                moved.append(name)
-            except Exception:
+        modules = get_updatable_modules(self.pipeline)
+        for name in names:
+            m = modules.get(name)
+            if m is None:
                 skipped.append(name)
-
+                continue
+            try:
+                m.to(device)
+                self._sanitize_module_attrs(m, device)
+                moved.append(name)
+            except Exception as e:
+                logger.info(f"[SLEEP/WAKE] skip {name}: {e}")
+                skipped.append(name)
         return moved, skipped
 
-    def release_memory_occupation(self) -> Dict[str, Any]:
+
+    def _clear_device_cache(self) -> None:
+
+        dev = torch.get_device_module()  # cuda / xpu / etc (torch backend)
+
+        dev.synchronize()
+
+        gc.collect()
+
+        for fn in ("empty_cache", "ipc_collect"):
+            if hasattr(dev, fn):
+                getattr(dev, fn)()
+
+
+    def release_memory_occupation(self) -> dict:
+        """Sleep: record which modules were on GPU, move them to CPU, clear allocator."""
         logger.info(f"[SLEEP] GPUWorker.release_memory_occupation rank={self.rank}")
         if self._sleeping:
             return {"success": True, "sleeping": True, "message": "already sleeping"}
 
-        moved, skipped = self._move_pipeline_modules("cpu")
+        if self.pipeline is None:
+            return {"success": False, "sleeping": False, "message": "pipeline not initialized"}
 
-        # Clear CUDA allocator and Python GC (best-effort)
-        try:
-            torch.cuda.synchronize()
-        except Exception:
-            pass
-        gc.collect()
-        try:
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-        except Exception:
-            pass
+        modules = get_updatable_modules(self.pipeline)
 
+        # Snapshot ONLY modules currently on non-CPU devices (typically cuda:*).
+        restore_map: dict[str, str] = {}
+        for name, m in modules.items():
+            try:
+                dev = self._module_device(m)
+                if not dev.startswith("cpu"):
+                    restore_map[name] = dev
+            except Exception:
+                pass
+
+        # Move only those modules to CPU.
+        targets = list(restore_map.keys())
+        moved, skipped = self._move_modules(targets, "cpu")
+        self._clear_device_cache()
+
+        if skipped:
+            # do not enter sleeping state if partial offload
+            return {
+                "success": False,
+                "sleeping": False,
+                "message": "partial offload: some modules could not be moved to CPU",
+                "moved": moved,
+                "skipped": skipped,
+            }
+
+        self._sleep_restore_map = restore_map
         self._sleeping = True
         return {
             "success": True,
             "sleeping": True,
-            "message": "released GPU memory (moved pipeline modules to CPU)",
+            "message": "released GPU memory (moved active modules to CPU)",
             "moved": moved,
-            "skipped": skipped,
         }
 
-    def resume_memory_occupation(self) -> Dict[str, Any]:
+
+    def resume_memory_occupation(self) -> dict:
+        """Wake: move exactly the previously-offloaded modules back to their original devices."""
         logger.info(f"[WAKE ] GPUWorker.resume_memory_occupation rank={self.rank}")
         if not self._sleeping:
             return {"success": True, "sleeping": False, "message": "already awake"}
 
-        if not torch.cuda.is_available():
+        if self.pipeline is None:
+            return {"success": False, "sleeping": True, "message": "pipeline not initialized"}
+
+        if not self._sleep_restore_map:
+            # Nothing recorded; just mark awake.
             self._sleeping = False
+            return {"success": True, "sleeping": False, "message": "no restore map; marked awake"}
+
+        moved_all, skipped_all = [], []
+
+        # Restore per original device.
+        for dev in sorted(set(self._sleep_restore_map.values())):
+            names = [n for n, d in self._sleep_restore_map.items() if d == dev]
+            moved, skipped = self._move_modules(names, dev)
+            moved_all += moved
+            skipped_all += skipped
+
+        if skipped_all:
             return {
                 "success": False,
-                "sleeping": False,
-                "message": "CUDA is not available; cannot move modules back to GPU",
+                "sleeping": True,
+                "message": "partial resume: some modules could not be restored",
+                "moved": moved_all,
+                "skipped": skipped_all,
             }
 
-        device = f"cuda:{self.local_rank}"
-        moved, skipped = self._move_pipeline_modules(device)
-
-        try:
-            torch.cuda.synchronize()
-        except Exception:
-            pass
-
+        self._sleep_restore_map = {}
         self._sleeping = False
         return {
             "success": True,
             "sleeping": False,
-            "message": "resumed GPU memory (moved pipeline modules to GPU)",
-            "moved": moved,
-            "skipped": skipped,
+            "message": "resumed GPU memory (restored modules to original devices)",
+            "moved": moved_all,
         }
-
 
 OOM_MSG = f"""
 OOM detected. Possible solutions:
