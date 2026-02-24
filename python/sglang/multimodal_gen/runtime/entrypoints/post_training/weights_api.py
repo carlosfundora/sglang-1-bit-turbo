@@ -65,9 +65,21 @@ async def get_weights_checksum(request: Request):
 
 
 async def _handle_memory_occupation_request(request: Request, req_class: type):
-    """Helper to handle memory occupation requests."""
-    body = await request.json()
+    """Handle sleep/wake requests. No tags. Return 400 on success=False."""
+    # Body may be empty; do not crash on request.json()
+    try:
+        body = await request.json()
+        if body is None:
+            body = {}
+        if not isinstance(body, dict):
+            return ORJSONResponse(
+                {"success": False, "message": "Request body must be a JSON object."},
+                status_code=400,
+            )
+    except Exception:
+        body = {}
 
+    # No tags, no args
     req = req_class()
 
     try:
@@ -75,9 +87,12 @@ async def _handle_memory_occupation_request(request: Request, req_class: type):
     except Exception as e:
         return ORJSONResponse({"success": False, "message": str(e)}, status_code=500)
 
-    out = response.output
+    out = getattr(response, "output", None)
     if isinstance(out, dict):
-        return ORJSONResponse(out, status_code=200 if out.get("success", True) else 400)
+        # be strict: missing "success" => treat as failure
+        success = bool(out.get("success", False))
+        return ORJSONResponse(out, status_code=200 if success else 400)
+
     return ORJSONResponse({"success": True, "output": out}, status_code=200)
 
 
