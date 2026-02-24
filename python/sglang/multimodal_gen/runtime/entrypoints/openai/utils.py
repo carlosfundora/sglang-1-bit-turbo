@@ -255,19 +255,6 @@ async def _save_base64_image_to_path(base64_data: str, target_path: str) -> str:
         raise Exception(f"Failed to decode base64 image: {str(e)}")
 
 
-# def _is_engine_sleeping_error(msg: str) -> bool:
-#     """Heuristic matcher for 'engine is sleeping' errors from scheduler."""
-#     if not msg:
-#         return False
-#     m = msg.lower()
-#     return ("engine is sleeping" in m) or ("resume_memory_occupation" in m)
-
-
-def _openai_error_detail(message: str, code: str) -> dict:
-    """OpenAI-ish error envelope."""
-    return {"error": {"message": message, "type": code}}
-
-
 async def process_generation_batch(
     scheduler_client: AsyncSchedulerClient,
     batch,
@@ -280,43 +267,47 @@ async def process_generation_batch(
             # Scheduler connectivity/transport errors -> 500
             raise HTTPException(
                 status_code=500,
-                # detail=_openai_error_detail(
-                #     f"Scheduler request failed: {e}",
-                #     code="internal_error",
-                # ),
-                detail = {"error": {"message": f"Scheduler request failed: {e}", "type": "internal_error"}}
+                detail={
+                    "error": {
+                        "message": f"Scheduler request failed: {e}",
+                        "type": "internal_error",
+                    }
+                },
             )
 
         if result.output is None and result.output_file_paths is None:
             error_msg = result.error or "Unknown error"
 
-            # Engine sleeping -> 400 (client should call resume)
+            # Server sleeping -> 400 (client should call resume)
             server_sleep_error = False
             if not error_msg:
                 server_sleep_error = False
             else:
                 error_msg_lower = error_msg.lower()
-                server_sleep_error = ("engine is sleeping" in error_msg_lower) or ("resume_memory_occupation" in error_msg_lower)
+                server_sleep_error = ("Server is sleeping" in error_msg_lower) or (
+                    "resume_memory_occupation" in error_msg_lower
+                )
 
-            # if _is_engine_sleeping_error(error_msg):
             if server_sleep_error:
                 raise HTTPException(
                     status_code=400,
-                    # detail=_openai_error_detail(
-                    #     "Server is sleeping. Call /resume_memory_occupation first.",
-                    #     code="Server_sleeping",
-                    # ),
-                    detail = {"error": {"message": "Server is sleeping. Call /resume_memory_occupation first.", "type": "Server_sleeping"}}
+                    detail={
+                        "error": {
+                            "message": "Server is sleeping. Call /resume_memory_occupation first.",
+                            "type": "Server_sleeping",
+                        }
+                    },
                 )
 
             # Other runtime errors -> 500 (do not leak python traceback)
             raise HTTPException(
                 status_code=500,
-                # detail=_openai_error_detail(
-                #     f"Model generation returned no output. Error from scheduler: {error_msg}",
-                #     code="internal_error",
-                # ),
-                detail = {"error": {"message": "Server is sleeping. Call /resume_memory_occupation first.", "type": "internal_error"}}
+                detail={
+                    "error": {
+                        f"Model generation returned no output. Error from scheduler: {error_msg}",
+                        "type": "internal_error",
+                    }
+                },
             )
 
         if result.output_file_paths:

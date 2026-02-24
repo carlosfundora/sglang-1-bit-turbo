@@ -6,7 +6,7 @@ import logging
 import multiprocessing as mp
 import os
 import time
-from typing import Any, Dict, List, Union
+from typing import List, Union
 
 import torch
 from setproctitle import setproctitle
@@ -462,7 +462,6 @@ class GPUWorker:
             )
         return checksums
 
-
     def _module_device(self, m) -> str:
         """Return best-effort device string for a module."""
 
@@ -473,7 +472,6 @@ class GPUWorker:
         if buffer is not None:
             return str(buffer.device)
         return "cpu"
-
 
     def _move_obj_tensors(self, obj, device: str):
         """
@@ -503,7 +501,6 @@ class GPUWorker:
         if isinstance(obj, tuple):
             return tuple(self._move_obj_tensors(v, device) for v in obj)
         return obj
-
 
     def _sanitize_module_attrs(self, m, device: str):
         """
@@ -543,8 +540,9 @@ class GPUWorker:
                     f"error={repr(e)}"
                 )
 
-
-    def _move_modules(self, names: list[str], device: str) -> tuple[list[str], list[str]]:
+    def _move_modules(
+        self, names: list[str], device: str
+    ) -> tuple[list[str], list[str]]:
         """Move selected updatable modules to device (best-effort)."""
         moved, skipped = [], []
         if self.pipeline is None:
@@ -565,7 +563,6 @@ class GPUWorker:
                 skipped.append(name)
         return moved, skipped
 
-
     def release_memory_occupation(self) -> dict:
         """Sleep: record which modules were on GPU, move them to CPU, clear allocator."""
         logger.info(f"[SLEEP] GPUWorker.release_memory_occupation rank={self.rank}")
@@ -573,7 +570,11 @@ class GPUWorker:
             return {"success": True, "sleeping": True, "message": "already sleeping"}
 
         if self.pipeline is None:
-            return {"success": False, "sleeping": False, "message": "pipeline not initialized"}
+            return {
+                "success": False,
+                "sleeping": False,
+                "message": "pipeline not initialized",
+            }
 
         modules = get_updatable_modules(self.pipeline)
 
@@ -588,7 +589,6 @@ class GPUWorker:
                 logger.debug(
                     "[SLEEP] Failed to query module device, skip module. "
                     f"rank={self.rank}, module={name}, "
-                    f"type={m.__class__.__name__}, error={repr(e)}"
                 )
 
         # Move only those modules to CPU.
@@ -601,7 +601,7 @@ class GPUWorker:
         dev.synchronize()
 
         gc.collect()
-        
+
         dev.empty_cache()
 
         dev.ipc_collect()
@@ -625,7 +625,6 @@ class GPUWorker:
             "moved": moved,
         }
 
-
     def resume_memory_occupation(self) -> dict:
         """Wake: move exactly the previously-offloaded modules back to their original devices."""
         logger.info(f"[WAK] GPUWorker.resume_memory_occupation rank={self.rank}")
@@ -633,12 +632,20 @@ class GPUWorker:
             return {"success": True, "sleeping": False, "message": "already awake"}
 
         if self.pipeline is None:
-            return {"success": False, "sleeping": True, "message": "pipeline not initialized"}
+            return {
+                "success": False,
+                "sleeping": True,
+                "message": "pipeline not initialized",
+            }
 
         if not self._sleep_restore_map:
             # Nothing recorded; just mark awake.
             self._sleeping = False
-            return {"success": True, "sleeping": False, "message": "no restore map; marked awake"}
+            return {
+                "success": True,
+                "sleeping": False,
+                "message": "no restore map; marked awake",
+            }
 
         moved_all, skipped_all = [], []
 
@@ -666,6 +673,7 @@ class GPUWorker:
             "message": "resumed GPU memory (restored modules to original devices)",
             "moved": moved_all,
         }
+
 
 OOM_MSG = f"""
 OOM detected. Possible solutions:
