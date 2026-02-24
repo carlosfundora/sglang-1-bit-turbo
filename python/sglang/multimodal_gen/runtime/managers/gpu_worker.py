@@ -6,7 +6,7 @@ import logging
 import multiprocessing as mp
 import os
 import time
-from typing import List, Union
+from typing import Any, Dict, List, Union
 
 import torch
 from setproctitle import setproctitle
@@ -462,24 +462,39 @@ class GPUWorker:
             )
         return checksums
 
+
     def _module_device(self, m) -> str:
         """Return best-effort device string for a module."""
 
-        p = next(m.parameters(), None)
-        if p is not None:
-            return str(p.device)
-        b = next(m.buffers(), None)
-        if b is not None:
-            return str(b.device)
+        param = next(m.parameters(), None)
+        if param is not None:
+            return str(param.device)
+        buffer = next(m.buffers(), None)
+        if buffer is not None:
+            return str(buffer.device)
         return "cpu"
 
+
     def _move_obj_tensors(self, obj, device: str):
-        """Recursively move tensors inside plain python containers."""
+        """
+        Recursively move torch.Tensor objects inside plain Python containers
+        (dict / list / tuple) to the target device.
+
+        This is a best-effort utility used during sleep / wake and module sanitization:
+        - Only raw tensors are moved via `.to(device)`.
+        - Non-tensor objects and unsupported cases are left unchanged.
+        - Exceptions during device transfer are intentionally swallowed to avoid
+        breaking module state; critical issues should surface later in execution.
+
+        Typical use cases include auxiliary tensors such as RoPE caches that are
+        stored as plain attributes rather than registered buffers.
+        """
 
         if torch.is_tensor(obj):
             try:
                 return obj.to(device)
             except Exception:
+                # Best-effort: keep original tensor on failure.
                 return obj
         if isinstance(obj, dict):
             return {k: self._move_obj_tensors(v, device) for k, v in obj.items()}
@@ -489,12 +504,28 @@ class GPUWorker:
             return tuple(self._move_obj_tensors(v, device) for v in obj)
         return obj
 
+
     def _sanitize_module_attrs(self, m, device: str):
         """
-        Move non-parameter/buffer tensor attributes to target device.
-        This fixes common cases like RoPE caches / inv_freq stored as plain attributes.
+        Implementation-wise, this is a recursive best-effort traversal over
+        `module.__dict__`:
+
+        - If an attribute value is a `torch.Tensor`, it is moved via `value.to(device)`.
+        - If the value is a Python container (`list`, `tuple`, or `dict`), the function
+        recursively processes and moves any tensors inside.
+        - If the value is an `nn.Module`, it is intentionally *not* handled here,
+        since submodules are managed separately by `get_updatable_modules`.
+
+        After processing, the migrated tensor objects are written back to the original
+        attributes, which is crucial for correctness.
+
+        This approach covers common non-registered tensor states, including:
+        - RoPE-related caches (e.g., `inv_freq`, cosine/sine caches, expanded frequencies),
+        - attention-style caches (if a diffusion model uses similar mechanisms),
+        - temporary or auxiliary caches inside encoder components.
         """
-        # Avoid heavy recursion into private internals; only touch public-ish attrs.
+        mod_name = m.__class__.__name__
+
         for k, v in list(getattr(m, "__dict__", {}).items()):
             if k.startswith("_") or k in {"_parameters", "_buffers", "_modules"}:
                 continue
@@ -503,12 +534,17 @@ class GPUWorker:
                 # only set if object identity changed (avoid pointless writes)
                 if nv is not v:
                     setattr(m, k, nv)
-            except Exception:
-                pass
 
-    def _move_modules(
-        self, names: list[str], device: str
-    ) -> tuple[list[str], list[str]]:
+            except Exception as e:
+                self.logger.debug(
+                    f"[sanitize_module_attrs] Skip attr move: "
+                    f"module={mod_name}, attr={k}, "
+                    f"type={type(v)}, device={device}, "
+                    f"error={repr(e)}"
+                )
+
+
+    def _move_modules(self, names: list[str], device: str) -> tuple[list[str], list[str]]:
         """Move selected updatable modules to device (best-effort)."""
         moved, skipped = [], []
         if self.pipeline is None:
@@ -529,17 +565,6 @@ class GPUWorker:
                 skipped.append(name)
         return moved, skipped
 
-    def _clear_device_cache(self) -> None:
-
-        dev = torch.get_device_module()  # cuda / xpu / etc (torch backend)
-
-        dev.synchronize()
-
-        gc.collect()
-
-        for fn in ("empty_cache", "ipc_collect"):
-            if hasattr(dev, fn):
-                getattr(dev, fn)()
 
     def release_memory_occupation(self) -> dict:
         """Sleep: record which modules were on GPU, move them to CPU, clear allocator."""
@@ -548,11 +573,7 @@ class GPUWorker:
             return {"success": True, "sleeping": True, "message": "already sleeping"}
 
         if self.pipeline is None:
-            return {
-                "success": False,
-                "sleeping": False,
-                "message": "pipeline not initialized",
-            }
+            return {"success": False, "sleeping": False, "message": "pipeline not initialized"}
 
         modules = get_updatable_modules(self.pipeline)
 
@@ -564,12 +585,26 @@ class GPUWorker:
                 if not dev.startswith("cpu"):
                     restore_map[name] = dev
             except Exception:
-                pass
+                logger.debug(
+                    "[SLEEP] Failed to query module device, skip module. "
+                    f"rank={self.rank}, module={name}, "
+                    f"type={m.__class__.__name__}, error={repr(e)}"
+                )
 
         # Move only those modules to CPU.
         targets = list(restore_map.keys())
         moved, skipped = self._move_modules(targets, "cpu")
-        self._clear_device_cache()
+
+        # Clear memory
+        dev = torch.get_device_module()  # cuda / xpu / etc (torch backend)
+
+        dev.synchronize()
+
+        gc.collect()
+        
+        dev.empty_cache()
+
+        dev.ipc_collect()
 
         if skipped:
             # do not enter sleeping state if partial offload
@@ -590,27 +625,20 @@ class GPUWorker:
             "moved": moved,
         }
 
+
     def resume_memory_occupation(self) -> dict:
         """Wake: move exactly the previously-offloaded modules back to their original devices."""
-        logger.info(f"[WAKE ] GPUWorker.resume_memory_occupation rank={self.rank}")
+        logger.info(f"[WAK] GPUWorker.resume_memory_occupation rank={self.rank}")
         if not self._sleeping:
             return {"success": True, "sleeping": False, "message": "already awake"}
 
         if self.pipeline is None:
-            return {
-                "success": False,
-                "sleeping": True,
-                "message": "pipeline not initialized",
-            }
+            return {"success": False, "sleeping": True, "message": "pipeline not initialized"}
 
         if not self._sleep_restore_map:
             # Nothing recorded; just mark awake.
             self._sleeping = False
-            return {
-                "success": True,
-                "sleeping": False,
-                "message": "no restore map; marked awake",
-            }
+            return {"success": True, "sleeping": False, "message": "no restore map; marked awake"}
 
         moved_all, skipped_all = [], []
 
@@ -638,7 +666,6 @@ class GPUWorker:
             "message": "resumed GPU memory (restored modules to original devices)",
             "moved": moved_all,
         }
-
 
 OOM_MSG = f"""
 OOM detected. Possible solutions:
