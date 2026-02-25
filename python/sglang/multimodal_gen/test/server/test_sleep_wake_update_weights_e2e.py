@@ -25,7 +25,9 @@ def _find_free_port() -> int:
 
 
 def _wait_http_ready(base_url: str, timeout_s: float = 180.0) -> None:
-    logger.info(f"[STEP 1] Waiting for server ready: GET {base_url}/health (timeout={timeout_s}s)")
+    logger.info(
+        f"[STEP 1] Waiting for server ready: GET {base_url}/health (timeout={timeout_s}s)"
+    )
     deadline = time.time() + timeout_s
     last_err = None
     last_status = None
@@ -107,11 +109,15 @@ def _read_tail(p: subprocess.Popen, max_lines: int = 300) -> str:
             lines.append(line.rstrip("\n"))
         return "\n".join(lines[-max_lines:])
     except Exception as e:
-        logger.warning(f"[TAIL] Failed to read server log tail: {type(e).__name__}: {e}")
+        logger.warning(
+            f"[TAIL] Failed to read server log tail: {type(e).__name__}: {e}"
+        )
         return ""
 
 
-def _post_json(base_url: str, path: str, payload: dict, timeout_s: float = 300.0) -> httpx.Response:
+def _post_json(
+    base_url: str, path: str, payload: dict, timeout_s: float = 300.0
+) -> httpx.Response:
     t0 = time.time()
     r = httpx.post(f"{base_url}{path}", json=payload, timeout=timeout_s)
     dt = time.time() - t0
@@ -130,7 +136,9 @@ def _do_generate(base_url: str) -> None:
     payload = dict(base_payload)
     payload["response_format"] = "b64_json"
 
-    logger.info("[STEP 6] generate: POST /v1/images/generations (try response_format=b64_json)")
+    logger.info(
+        "[STEP 6] generate: POST /v1/images/generations (try response_format=b64_json)"
+    )
     r = _post_json(base_url, "/v1/images/generations", payload, timeout_s=900.0)
     logger.info(f"[STEP 6] generate: status={r.status_code} body_head={r.text[:800]}")
 
@@ -162,7 +170,9 @@ def _query_gpu_mem_used_mib(gpu_index: int = 0) -> Optional[int]:
         used = int(out.splitlines()[0].strip())
         return used
     except Exception as e:
-        logger.warning(f"[GPU] Failed to query nvidia-smi memory.used: {type(e).__name__}: {e}")
+        logger.warning(
+            f"[GPU] Failed to query nvidia-smi memory.used: {type(e).__name__}: {e}"
+        )
         return None
 
 
@@ -182,7 +192,9 @@ def _assert_mem_changed(
     min_delta_mib: int,
 ) -> None:
     delta = abs(after - before)
-    logger.info(f"[MEM] {label}: before={before} MiB after={after} MiB |delta|={delta} MiB")
+    logger.info(
+        f"[MEM] {label}: before={before} MiB after={after} MiB |delta|={delta} MiB"
+    )
     assert delta >= min_delta_mib, (
         f"GPU memory change too small for '{label}': |after-before|={delta} MiB < {min_delta_mib} MiB "
         f"(before={before} MiB, after={after} MiB)"
@@ -208,7 +220,9 @@ def test_sleep_wake_refit_generate_e2e():
 
         # 2) sleep
         logger.info("[STEP 2] sleep: POST /release_memory_occupation")
-        r = _post_json(base_url, "/release_memory_occupation", payload={}, timeout_s=180.0)
+        r = _post_json(
+            base_url, "/release_memory_occupation", payload={}, timeout_s=180.0
+        )
         assert r.status_code == 200, f"sleep failed: {r.status_code} {r.text}"
         out = r.json()
         logger.info(f"[STEP 2] sleep: response={out}")
@@ -217,12 +231,18 @@ def test_sleep_wake_refit_generate_e2e():
             assert out["sleeping"] is True, f"sleep response: {out}"
 
         mem1 = _require_gpu_mem_query(0)
-        min_sleep_delta = int(os.environ.get("SGLANG_MMGEN_SLEEP_MEM_DELTA_MIB", "1024"))
-        _assert_mem_changed("sleep (baseline -> after sleep)", mem0, mem1, min_sleep_delta)
+        min_sleep_delta = int(
+            os.environ.get("SGLANG_MMGEN_SLEEP_MEM_DELTA_MIB", "1024")
+        )
+        _assert_mem_changed(
+            "sleep (baseline -> after sleep)", mem0, mem1, min_sleep_delta
+        )
 
         # 4) wake
         logger.info("[STEP 4] wake: POST /resume_memory_occupation")
-        r = _post_json(base_url, "/resume_memory_occupation", payload={}, timeout_s=300.0)
+        r = _post_json(
+            base_url, "/resume_memory_occupation", payload={}, timeout_s=300.0
+        )
         assert r.status_code == 200, f"wake failed: {r.status_code} {r.text}"
         out = r.json()
         logger.info(f"[STEP 4] wake: response={out}")
@@ -232,10 +252,14 @@ def test_sleep_wake_refit_generate_e2e():
 
         mem2 = _require_gpu_mem_query(0)
         min_wake_delta = int(os.environ.get("SGLANG_MMGEN_WAKE_MEM_DELTA_MIB", "1024"))
-        _assert_mem_changed("wake (after sleep -> after wake)", mem1, mem2, min_wake_delta)
+        _assert_mem_changed(
+            "wake (after sleep -> after wake)", mem1, mem2, min_wake_delta
+        )
 
         # 5) refit/update_weights_from_disk using SAME model snapshot path
-        logger.info("[STEP 5] refit: resolving local snapshot path via maybe_download_model()")
+        logger.info(
+            "[STEP 5] refit: resolving local snapshot path via maybe_download_model()"
+        )
         t0 = time.time()
         model_snapshot_path = maybe_download_model(_MODEL_ID)
         logger.info(
@@ -248,7 +272,9 @@ def test_sleep_wake_refit_generate_e2e():
             payload={"model_path": model_snapshot_path, "flush_cache": True},
             timeout_s=900.0,
         )
-        assert r.status_code == 200, f"update_weights_from_disk failed: {r.status_code} {r.text}"
+        assert (
+            r.status_code == 200
+        ), f"update_weights_from_disk failed: {r.status_code} {r.text}"
         out = r.json()
         logger.info(f"[STEP 5] refit: response={out}")
         assert out.get("success") is True, f"update_weights_from_disk response: {out}"
