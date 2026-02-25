@@ -469,10 +469,8 @@ class Scheduler:
         with self._sleep_lock:
             if not self._sleeping:
                 return OutputBatch(output={"sleeping": False, "note": "already awake"})
+            self._sleeping = False
 
         detail = self.worker.resume_memory_occupation()
-
-        with self._sleep_lock:
-            self._sleeping = False
 
         return OutputBatch(output={"sleeping": False, "detail": detail})
