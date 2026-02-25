@@ -23,6 +23,8 @@ class GetWeightsChecksumReqInput:
 class ReleaseMemoryOccupationReqInput:
     """Request to release (sleep) GPU memory occupation for the diffusion engine."""
 
+    # TODO (Kun, Chenyang): We shall have rather dedicated
+    # control of the Diffusion model's memory occupation.
     pass
 
 

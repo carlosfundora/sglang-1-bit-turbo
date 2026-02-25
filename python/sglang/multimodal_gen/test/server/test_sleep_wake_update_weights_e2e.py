@@ -289,3 +289,7 @@ def test_sleep_wake_refit_generate_e2e():
         raise AssertionError(f"{e}\n\n---- server log tail ----\n{tail}") from e
     finally:
         _terminate_proc(p)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "-s"])
