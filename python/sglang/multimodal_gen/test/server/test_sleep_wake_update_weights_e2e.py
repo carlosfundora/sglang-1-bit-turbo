@@ -127,7 +127,6 @@ def _do_generate(base_url: str) -> None:
         "num_inference_steps": 2,
     }
 
-    # Try best-case: inline base64 return (no cloud storage required).
     payload = dict(base_payload)
     payload["response_format"] = "b64_json"
 
@@ -139,9 +138,6 @@ def _do_generate(base_url: str) -> None:
         logger.info("[STEP 6] generate: success (200/201)")
         return
 
-    # Known server behavior/bug: generation may succeed but response construction fails
-    # when response_format defaults to 'url' without cloud storage configured.
-    # Treat this specific error as non-fatal for this regression test.
     if r.status_code == 400 and "requires cloud storage" in r.text:
         logger.warning(
             "[STEP 6] generate: got 400 due to missing cloud storage; "
@@ -149,7 +145,6 @@ def _do_generate(base_url: str) -> None:
         )
         return
 
-    # Anything else should fail (real regression).
     raise AssertionError(f"generate failed: {r.status_code} {r.text}")
 
 
@@ -171,30 +166,27 @@ def _query_gpu_mem_used_mib(gpu_index: int = 0) -> Optional[int]:
         return None
 
 
-def _wait_for_mem_drop(
-    mem_before: int,
-    drop_mib: int,
-    timeout_s: float = 60.0,
-    poll_s: float = 2.0,
-) -> Optional[int]:
-    deadline = time.time() + timeout_s
-    target = max(0, mem_before - drop_mib)
-    last = None
-    logger.info(
-        f"[STEP 3] Waiting for GPU mem drop >= {drop_mib} MiB "
-        f"(before={mem_before} MiB, target<= {target} MiB, timeout={timeout_s}s)"
+def _require_gpu_mem_query(gpu_index: int = 0) -> int:
+    mem = _query_gpu_mem_used_mib(gpu_index)
+    assert mem is not None, (
+        "nvidia-smi memory query is unavailable; cannot enforce GPU memory assertions. "
+        "Make sure the CI runner has nvidia-smi accessible."
     )
-    while time.time() < deadline:
-        last = _query_gpu_mem_used_mib(0)
-        if last is None:
-            logger.warning("[STEP 3] nvidia-smi unavailable; skip mem assertion")
-            return None
-        if last <= target:
-            logger.info(f"[STEP 3] GPU mem drop observed: after={last} MiB (target met)")
-            return last
-        time.sleep(poll_s)
-    logger.warning(f"[STEP 3] GPU mem drop NOT observed in time: last={last} MiB")
-    return last
+    return mem
+
+
+def _assert_mem_changed(
+    label: str,
+    before: int,
+    after: int,
+    min_delta_mib: int,
+) -> None:
+    delta = abs(after - before)
+    logger.info(f"[MEM] {label}: before={before} MiB after={after} MiB |delta|={delta} MiB")
+    assert delta >= min_delta_mib, (
+        f"GPU memory change too small for '{label}': |after-before|={delta} MiB < {min_delta_mib} MiB "
+        f"(before={before} MiB, after={after} MiB)"
+    )
 
 
 @pytest.mark.gpu
@@ -210,9 +202,11 @@ def test_sleep_wake_refit_generate_e2e():
         # 1) launch
         _wait_http_ready(base_url, timeout_s=900.0)
 
+        # Baseline GPU memory
+        mem0 = _require_gpu_mem_query(0)
+        logger.info(f"[STEP 1] baseline: GPU mem = {mem0} MiB")
+
         # 2) sleep
-        mem_before_sleep = _query_gpu_mem_used_mib(0)
-        logger.info(f"[STEP 2] sleep: GPU mem before sleep = {mem_before_sleep} MiB")
         logger.info("[STEP 2] sleep: POST /release_memory_occupation")
         r = _post_json(base_url, "/release_memory_occupation", payload={}, timeout_s=180.0)
         assert r.status_code == 200, f"sleep failed: {r.status_code} {r.text}"
@@ -221,25 +215,10 @@ def test_sleep_wake_refit_generate_e2e():
         assert out.get("success", True) is True, f"sleep response: {out}"
         if "sleeping" in out:
             assert out["sleeping"] is True, f"sleep response: {out}"
-        logger.info("[STEP 2] sleep: success")
 
-        # 3) check GPU mem drop
-        if mem_before_sleep is not None:
-            target_drop_mib = int(os.environ.get("SGLANG_MMGEN_SLEEP_MEM_DROP_MIB", "256"))
-            mem_after_sleep = _wait_for_mem_drop(
-                mem_before_sleep,
-                drop_mib=target_drop_mib,
-                timeout_s=60.0,
-                poll_s=2.0,
-            )
-            if mem_after_sleep is not None:
-                assert mem_after_sleep <= max(0, mem_before_sleep - target_drop_mib), (
-                    f"GPU memory did not drop enough after sleep: "
-                    f"before={mem_before_sleep} MiB, after={mem_after_sleep} MiB, "
-                    f"threshold_drop={target_drop_mib} MiB"
-                )
-        else:
-            logger.warning("[STEP 3] GPU mem check skipped (nvidia-smi unavailable)")
+        mem1 = _require_gpu_mem_query(0)
+        min_sleep_delta = int(os.environ.get("SGLANG_MMGEN_SLEEP_MEM_DELTA_MIB", "1024"))
+        _assert_mem_changed("sleep (baseline -> after sleep)", mem0, mem1, min_sleep_delta)
 
         # 4) wake
         logger.info("[STEP 4] wake: POST /resume_memory_occupation")
@@ -250,9 +229,10 @@ def test_sleep_wake_refit_generate_e2e():
         assert out.get("success", True) is True, f"wake response: {out}"
         if "sleeping" in out:
             assert out["sleeping"] is False, f"wake response: {out}"
-        mem_after_wake = _query_gpu_mem_used_mib(0)
-        logger.info(f"[STEP 4] wake: GPU mem after wake = {mem_after_wake} MiB")
-        logger.info("[STEP 4] wake: success")
+
+        mem2 = _require_gpu_mem_query(0)
+        min_wake_delta = int(os.environ.get("SGLANG_MMGEN_WAKE_MEM_DELTA_MIB", "1024"))
+        _assert_mem_changed("wake (after sleep -> after wake)", mem1, mem2, min_wake_delta)
 
         # 5) refit/update_weights_from_disk using SAME model snapshot path
         logger.info("[STEP 5] refit: resolving local snapshot path via maybe_download_model()")
@@ -272,7 +252,6 @@ def test_sleep_wake_refit_generate_e2e():
         out = r.json()
         logger.info(f"[STEP 5] refit: response={out}")
         assert out.get("success") is True, f"update_weights_from_disk response: {out}"
-        logger.info("[STEP 5] refit: success")
 
         # 6) generate
         _do_generate(base_url)
