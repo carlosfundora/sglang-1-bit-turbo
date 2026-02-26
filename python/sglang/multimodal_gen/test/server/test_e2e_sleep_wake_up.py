@@ -8,31 +8,29 @@ Kun Lin, https://github.com/klhhhhh
 Chenyang Zhao, https://github.com/zhaochenyang20
 Menyang Liu, https://github.com/dreamyang-liu
 shuwen, https://github.com/alphabetc1
+Mook, https://github.com/Godmook
 
-This test exercises a realistic server lifecycle and validates both functional
-correctness and observable GPU memory side effects:
+This test validates both functional correctness of /release_memory_occupation
+and /resume_memory_occupation:
 
-1) Launch a SGLang server process and wait until the HTTP health endpoint
-   becomes ready.
-2) Query and record baseline GPU memory usage.
-3) Trigger GPU memory release via the `/release_memory_occupation` endpoint
-   and verify that GPU memory usage decreases by at least a configurable
-   threshold.
-4) Trigger GPU memory resume via the `/resume_memory_occupation` endpoint
+1. Launch a SGLang server process without offloading DiT and text encoder.
+   This roughly takes 56GB on H200.
+
+2. Trigger GPU memory release via the `/release_memory_occupation` endpoint
+   and verify that GPU memory usage decreases.
+
+   TODO (chenyang): still found some memory usage that can not be released:
+
+   https://github.com/sgl-project/sglang/issues/19441
+
+3. Trigger GPU memory resume via the `/resume_memory_occupation` endpoint
    and verify that GPU memory usage increases accordingly.
-5) Perform an in-place model weight update using the
+
+4. Perform an in-place model weight update using the
    `/update_weights_from_disk` endpoint without restarting the server.
-6) Issue a generation request to confirm that the server remains functional
-   after sleep, wake, and weight update operations.
 
-The test asserts:
-- Correct HTTP status codes and response payloads for sleep/wake/update APIs.
-- Directional GPU memory changes (decrease on release, increase on resume).
-- Continued serving capability after memory state transitions and weight updates.
-
-This ensures that GPU memory management operations are reversible, observable,
-and safe to use in a live server without corrupting internal state or breaking
-subsequent requests.
+    This is inherent with the usage in RL. SGLang Diffusion Server is slept
+    while training and resumed to do the next rollout with new weights.
 """
 
 import os
