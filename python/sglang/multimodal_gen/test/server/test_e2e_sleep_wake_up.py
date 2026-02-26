@@ -100,101 +100,84 @@ def test_sleep_wake_refit_generate_e2e():
         f"[GPU] memory sampling target: gpu_index={gpu_index} (from CUDA_VISIBLE_DEVICES)"
     )
 
-    try:
-        wait_for_http_ready(f"{base_url}/health", timeout=900, process=process)
-        mem_before_sleep = query_gpu_mem_used_mib(gpu_index)
-        r = post_request(
-            base_url,
-            "/release_memory_occupation",
-            payload={},
-            timeout_s=180.0,
-            logger=logger,
-        )
-        assert r.status_code == 200, f"sleep failed: {r.status_code} {r.text}"
-        out = r.json()
-        assert out.get("success", True) is True, f"sleep response: {out}"
-        assert out["sleeping"] is True, f"sleep response: {out}"
+    wait_for_http_ready(f"{base_url}/health", timeout=900, process=process)
+    mem_before_sleep = query_gpu_mem_used_mib(gpu_index)
+    r = post_request(
+        base_url,
+        "/release_memory_occupation",
+        payload={},
+        timeout_s=180.0,
+        logger=logger,
+    )
+    assert r.status_code == 200, f"sleep failed: {r.status_code} {r.text}"
+    out = r.json()
+    assert out.get("success", True) is True, f"sleep response: {out}"
+    assert out["sleeping"] is True, f"sleep response: {out}"
 
-        mem_after_sleep = query_gpu_mem_used_mib(gpu_index)
-        min_sleep_delta = int(
-            os.environ.get("SGLANG_MMGEN_SLEEP_MEM_DELTA_MIB", "1024")
-        )
-        _assert_mem_changed(
-            "sleep (baseline -> after sleep)",
-            mem_before_sleep,
-            mem_after_sleep,
-            min_sleep_delta,
-            expect_decrease=True,
-        )
+    mem_after_sleep = query_gpu_mem_used_mib(gpu_index)
+    min_sleep_delta = int(os.environ.get("SGLANG_MMGEN_SLEEP_MEM_DELTA_MIB", "1024"))
+    _assert_mem_changed(
+        "sleep (baseline -> after sleep)",
+        mem_before_sleep,
+        mem_after_sleep,
+        min_sleep_delta,
+        expect_decrease=True,
+    )
 
-        r = post_request(
-            base_url,
-            "/resume_memory_occupation",
-            payload={},
-            timeout_s=300.0,
-            logger=logger,
-        )
-        assert r.status_code == 200, f"wake failed: {r.status_code} {r.text}"
-        out = r.json()
-        assert out.get("success", True) is True, f"wake response: {out}"
-        assert out["sleeping"] is False, f"wake response: {out}"
+    r = post_request(
+        base_url,
+        "/resume_memory_occupation",
+        payload={},
+        timeout_s=300.0,
+        logger=logger,
+    )
+    assert r.status_code == 200, f"wake failed: {r.status_code} {r.text}"
+    out = r.json()
+    assert out.get("success", True) is True, f"wake response: {out}"
+    assert out["sleeping"] is False, f"wake response: {out}"
 
-        mem_after_wake = query_gpu_mem_used_mib(gpu_index)
-        min_wake_delta = int(os.environ.get("SGLANG_MMGEN_WAKE_MEM_DELTA_MIB", "1024"))
-        _assert_mem_changed(
-            "wake (after sleep -> after wake)",
-            mem_after_sleep,
-            mem_after_wake,
-            min_wake_delta,
-            expect_decrease=False,
-        )
+    mem_after_wake = query_gpu_mem_used_mib(gpu_index)
+    min_wake_delta = int(os.environ.get("SGLANG_MMGEN_WAKE_MEM_DELTA_MIB", "1024"))
+    _assert_mem_changed(
+        "wake (after sleep -> after wake)",
+        mem_after_sleep,
+        mem_after_wake,
+        min_wake_delta,
+        expect_decrease=False,
+    )
 
-        model_snapshot_path = maybe_download_model(_MODEL_ID)
-        r = post_request(
-            base_url,
-            "/update_weights_from_disk",
-            payload={"model_path": model_snapshot_path, "flush_cache": True},
-            timeout_s=900.0,
-            logger=logger,
-        )
-        assert (
-            r.status_code == 200
-        ), f"update_weights_from_disk failed: {r.status_code} {r.text}"
-        out = r.json()
-        assert out.get("success") is True, f"update_weights_from_disk response: {out}"
+    model_snapshot_path = maybe_download_model(_MODEL_ID)
+    r = post_request(
+        base_url,
+        "/update_weights_from_disk",
+        payload={"model_path": model_snapshot_path, "flush_cache": True},
+        timeout_s=900.0,
+        logger=logger,
+    )
+    assert (
+        r.status_code == 200
+    ), f"update_weights_from_disk failed: {r.status_code} {r.text}"
+    out = r.json()
+    assert out.get("success") is True, f"update_weights_from_disk response: {out}"
 
-        payload = {
-            "prompt": "a cute panda",
-            "width": 256,
-            "height": 256,
-            "num_inference_steps": 2,
-            "response_format": "b64_json",
-        }
-        logger.info(
-            "[STEP 6] generate: POST /v1/images/generations (try response_format=b64_json)"
-        )
-        r = post_request(
-            base_url, "/v1/images/generations", payload, timeout_s=900.0, logger=logger
-        )
-        logger.info(
-            f"[STEP 6] generate: status={r.status_code} body_head={r.text[:800]}"
-        )
-        if r.status_code == 200:
-            logger.info("[STEP 6] generate: success (200)")
-        elif r.status_code == 400 and "requires cloud storage" in r.text:
-            logger.warning(
-                "[STEP 6] generate: got 400 due to missing cloud storage; "
-                "treating as known non-fatal response_format/url behavior."
-            )
-        else:
-            raise AssertionError(f"generate failed: {r.status_code} {r.text}")
+    payload = {
+        "prompt": "a cute panda",
+        "width": 256,
+        "height": 256,
+        "num_inference_steps": 2,
+        "response_format": "b64_json",
+    }
+    response = post_request(
+        base_url, "/v1/images/generations", payload, timeout_s=900.0, logger=logger
+    )
 
-        logger.info("Test finished: SUCCESS")
+    assert (
+        response.status_code == 200
+    ), f"generate failed: {response.status_code} {response.text}"
+    out = response.json()
+    assert out.get("success") is True, f"generate response: {out}"
 
-    except Exception as e:
-        raise AssertionError(str(e)) from e
-    finally:
-        terminate_process(process)
+    terminate_process(process)
 
 
 if __name__ == "__main__":
