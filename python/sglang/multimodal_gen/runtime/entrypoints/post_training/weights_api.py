@@ -67,38 +67,17 @@ async def get_weights_checksum(request: Request):
     return ORJSONResponse(response.output, status_code=200)
 
 
-async def _handle_memory_occupation_request(request: Request, req_class: type):
+async def _handle_memory_occupation_request(req_class: type):
     """Handle memory sleep/wake requests forwarded to scheduler."""
-    req = req_class()
-
     try:
-        response = await async_scheduler_client.forward(req)
+        response = await async_scheduler_client.forward(req_class())
     except Exception as e:
         logger.exception("scheduler_client.forward failed for %s", req_class.__name__)
         return ORJSONResponse({"success": False, "message": str(e)}, status_code=500)
 
-    if response is None:
-        logger.error("scheduler returned None response for %s", req_class.__name__)
-        return ORJSONResponse(
-            {"success": False, "message": "Empty response object from scheduler."},
-            status_code=500,
-        )
-
     out = response.output
-
-    if out is None:
-        return ORJSONResponse(
-            {"success": False, "message": "Empty response from scheduler."},
-            status_code=500,
-        )
-
-    if (
-        "detail" in out
-        and isinstance(out["detail"], dict)
-        and "success" in out["detail"]
-    ):
-        payload = out["detail"]
-    else:
+    payload = out.get("detail") if isinstance(out, dict) else None
+    if not isinstance(payload, dict) or "success" not in payload:
         logger.error("missing success in scheduler output detail: %r", out)
         return ORJSONResponse(
             {
@@ -113,16 +92,12 @@ async def _handle_memory_occupation_request(request: Request, req_class: type):
 
 
 @router.post("/release_memory_occupation")
-async def release_memory_occupation(request: Request):
+async def release_memory_occupation():
     """Release GPU memory occupation (sleep the engine)."""
-    return await _handle_memory_occupation_request(
-        request, ReleaseMemoryOccupationReqInput
-    )
+    return await _handle_memory_occupation_request(ReleaseMemoryOccupationReqInput)
 
 
 @router.post("/resume_memory_occupation")
-async def resume_memory_occupation(request: Request):
+async def resume_memory_occupation():
     """Resume GPU memory occupation (wake the engine)."""
-    return await _handle_memory_occupation_request(
-        request, ResumeMemoryOccupationReqInput
-    )
+    return await _handle_memory_occupation_request(ResumeMemoryOccupationReqInput)

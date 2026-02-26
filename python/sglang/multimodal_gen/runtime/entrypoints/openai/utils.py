@@ -264,71 +264,41 @@ async def process_generation_batch(
     with log_generation_timer(logger, batch.prompt):
         result = await scheduler_client.forward([batch])
 
-        # Error path: scheduler return error
-        if result.error is not None:
-            error_msg = str(result.error)
-            error_msg_lower = error_msg.lower()
-
-            # Server sleeping -> 400
-            if (
-                "server is sleeping" in error_msg_lower
-                or "resume_memory_occupation" in error_msg_lower
-            ):
+        if result.output is None and result.output_file_paths is None:
+            error_msg = result.error or "Unknown error"
+            if "server is sleeping" in error_msg:
                 raise HTTPException(
                     status_code=400,
                     detail={
-                        "error": {
-                            "message": "Server is sleeping. Call /resume_memory_occupation first.",
-                            "type": "server_sleeping",
-                        }
+                        "message": error_msg,
                     },
                 )
             else:
-                # Other runtime / internal errors -> 500
-                raise HTTPException(
-                    status_code=500,
-                    detail={
-                        "error": {
-                            "message": f"Scheduler returned error: {error_msg}",
-                            "type": "internal_error",
-                        }
-                    },
-                )
-        else:
-            # No error reported by scheduler → must have output or file paths
-            if result.output_file_paths:
-                save_file_path_list = result.output_file_paths
-            elif result.output is not None:
-                num_outputs = len(result.output)
-                save_file_path_list = save_outputs(
-                    result.output,
-                    batch.data_type,
-                    batch.fps,
-                    batch.save_output,
-                    lambda idx: str(batch.output_file_path(num_outputs, idx)),
-                    audio=result.audio,
-                    audio_sample_rate=result.audio_sample_rate,
-                    output_compression=batch.output_compression,
-                    enable_frame_interpolation=batch.enable_frame_interpolation,
-                    frame_interpolation_exp=batch.frame_interpolation_exp,
-                    frame_interpolation_scale=batch.frame_interpolation_scale,
-                    frame_interpolation_model_path=batch.frame_interpolation_model_path,
-                    enable_upscaling=batch.enable_upscaling,
-                    upscaling_model_path=batch.upscaling_model_path,
-                    upscaling_scale=batch.upscaling_scale,
-                )
-            else:
-                # Defensive: no error but also no output → inconsistent scheduler state
-                raise HTTPException(
-                    status_code=500,
-                    detail={
-                        "error": {
-                            "message": "Scheduler returned no error but also no output.",
-                            "type": "internal_error",
-                        }
-                    },
+                raise RuntimeError(
+                    f"Model generation returned no output. Error from scheduler: {error_msg}"
                 )
 
+        if result.output_file_paths:
+            save_file_path_list = result.output_file_paths
+        else:
+            num_outputs = len(result.output)
+            save_file_path_list = save_outputs(
+                result.output,
+                batch.data_type,
+                batch.fps,
+                batch.save_output,
+                lambda idx: str(batch.output_file_path(num_outputs, idx)),
+                audio=result.audio,
+                audio_sample_rate=result.audio_sample_rate,
+                output_compression=batch.output_compression,
+                enable_frame_interpolation=batch.enable_frame_interpolation,
+                frame_interpolation_exp=batch.frame_interpolation_exp,
+                frame_interpolation_scale=batch.frame_interpolation_scale,
+                frame_interpolation_model_path=batch.frame_interpolation_model_path,
+                enable_upscaling=batch.enable_upscaling,
+                upscaling_model_path=batch.upscaling_model_path,
+                upscaling_scale=batch.upscaling_scale,
+            )
     total_time = time.perf_counter() - total_start_time
     log_batch_completion(logger, 1, total_time)
 

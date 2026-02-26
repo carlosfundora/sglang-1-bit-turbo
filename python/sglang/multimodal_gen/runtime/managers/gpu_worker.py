@@ -62,6 +62,19 @@ from sglang.srt.utils.network import NetworkAddress
 
 logger = init_logger(__name__)
 
+OOM_MSG = f"""
+OOM detected. Possible solutions:
+  - If the OOM occurs during loading:
+    1. Enable CPU offload for memory-intensive components, or use `--dit-layerwise-offload` for DiT
+  - If the OOM occurs during runtime:
+    1. Enable SP and/or TP (in a multi-GPU setup)
+    2. Reduce the number of output tokens by lowering resolution or decreasing `--num-frames`
+    3. Opt for a sparse-attention backend
+    4. Enable FSDP by `--use-fsdp-inference` (in a multi-GPU setup)
+    5. Enable quantization (e.g. nunchaku)
+  Or, open an issue on GitHub https://github.com/sgl-project/sglang/issues/new/choose
+"""
+
 
 class GPUWorker:
     """
@@ -603,11 +616,10 @@ class GPUWorker:
                 "message": f"offload failed; rolled back to keep state consistent: {e}",
             }
 
-        dev = torch.get_device_module()
-        dev.synchronize()
+        device = torch.get_device_module()
+        device.synchronize()
         gc.collect()
-        dev.empty_cache()
-        torch.cuda.ipc_collect()
+        device.empty_cache()
         self._sleep_restore_map = restore_map
         self._sleeping = True
         return {
@@ -617,6 +629,7 @@ class GPUWorker:
         }
 
     def resume_memory_occupation(self) -> dict:
+        "Resume previously released GPU memory occupation."
         logger.info(f"[WAKE] GPUWorker.resume_memory_occupation rank={self.rank}")
         if not self._sleeping:
             return {"success": True, "sleeping": False, "message": "already awake"}
@@ -663,20 +676,6 @@ class GPUWorker:
                 "sleeping": False,
                 "message": "resumed GPU memory (restored modules to original devices)",
             }
-
-
-OOM_MSG = f"""
-OOM detected. Possible solutions:
-  - If the OOM occurs during loading:
-    1. Enable CPU offload for memory-intensive components, or use `--dit-layerwise-offload` for DiT
-  - If the OOM occurs during runtime:
-    1. Enable SP and/or TP (in a multi-GPU setup)
-    2. Reduce the number of output tokens by lowering resolution or decreasing `--num-frames`
-    3. Opt for a sparse-attention backend
-    4. Enable FSDP by `--use-fsdp-inference` (in a multi-GPU setup)
-    5. Enable quantization (e.g. nunchaku)
-  Or, open an issue on GitHub https://github.com/sgl-project/sglang/issues/new/choose
-"""
 
 
 def _oom_exceptions():
