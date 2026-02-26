@@ -592,10 +592,7 @@ class GPUWorker:
                     dev_str = self._get_module_device(m)
                 except RuntimeError as e:
                     logger.debug(
-                        "[SLEEP] module device query failed; skip module. rank=%s module=%s error=%r",
-                        self.rank,
-                        name,
-                        e,
+                        f"[SLEEP] module device query failed; skip module. rank={self.rank} module={name} error={e}",
                     )
                     continue
                 if not dev_str.startswith("cpu"):
@@ -616,9 +613,7 @@ class GPUWorker:
             }
         except Exception as e:
             logger.warning(
-                "[SLEEP] release_memory_occupation failed. rank=%s error=%r",
-                self.rank,
-                e,
+                f"[SLEEP] release_memory_occupation failed. rank={self.rank} error={e}",
             )
             return {
                 "success": False,
@@ -660,9 +655,7 @@ class GPUWorker:
             }
         except Exception as e:
             logger.warning(
-                "[WAKE] resume_memory_occupation failed. rank=%s error=%r",
-                self.rank,
-                e,
+                f"[WAKE] resume_memory_occupation failed. rank={self.rank} error={e}",
             )
             return {
                 "success": False,
@@ -729,7 +722,7 @@ def run_scheduler_process(
         )
         scheduler.event_loop()
     except _oom_exceptions() as _e:
-        logger.warning(OOM_MSG)
+        logger.warning(f"{OOM_MSG}")
         raise
     finally:
         # Clean up resources to speed up shutdown
