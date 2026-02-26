@@ -476,23 +476,18 @@ class GPUWorker:
     def _move_obj_tensors(self, obj, device: str):
         """
         Recursively move torch.Tensor objects inside plain Python containers
-        (dict / list / tuple) to the target device.
+        (dict, list, tuple) to the target device.
 
-        This is a best-effort utility used during sleep / wake and module sanitization:
-        - Only raw tensors are moved via `.to(device)`.
-        - Non-tensor objects and unsupported cases are left unchanged.
-        - Exceptions during device transfer are intentionally swallowed to avoid
-        breaking module state; critical issues should surface later in execution.
-
-        Typical use cases include auxiliary tensors such as RoPE caches that are
-        stored as plain attributes rather than registered buffers.
+        This utility is used during sleep/wake and module sanitization.
+        Only tensors are moved; non-tensor objects are left unchanged.
+        Errors during device transfer are ignored to avoid breaking module state.
         """
 
         if torch.is_tensor(obj):
             try:
                 return obj.to(device)
             except Exception:
-                # Best-effort: keep original tensor on failure.
+                logger.warning(f"Failed to move tensor to {device}: {e}")
                 return obj
         if isinstance(obj, dict):
             return {k: self._move_obj_tensors(v, device) for k, v in obj.items()}
@@ -522,23 +517,25 @@ class GPUWorker:
         - temporary or auxiliary caches inside encoder components.
         """
         mod_name = m.__class__.__name__
+        attrs = m.__dict__
 
-        for k, v in list(getattr(m, "__dict__", {}).items()):
-            if k.startswith("_") or k in {"_parameters", "_buffers", "_modules"}:
+        for key, value in list(attrs.items()):
+            if key.startswith("_") or key in {"_parameters", "_buffers", "_modules"}:
                 continue
-            try:
-                nv = self._move_obj_tensors(v, device)
-                # only set if object identity changed (avoid pointless writes)
-                if nv is not v:
-                    setattr(m, k, nv)
 
-            except Exception as e:
+            try:
+                new_value = self._move_obj_tensors(value, device)
+            except RuntimeError as e:
+                # Expose failure but keep best-effort behavior during sleep/wake.
                 self.logger.debug(
-                    f"[sanitize_module_attrs] Skip attr move: "
-                    f"module={mod_name}, attr={k}, "
-                    f"type={type(v)}, device={device}, "
-                    f"error={repr(e)}"
+                    "[sanitize_module_attrs] attr move failed: "
+                    f"module={mod_name}, attr={key}, type={type(value)}, device={device}, error={e!r}"
                 )
+                continue
+
+            # only write back when identity changed (avoid pointless writes)
+            if new_value is not value:
+                attrs[key] = new_value  
 
     def _move_modules(
         self, names: list[str], device: str
@@ -564,7 +561,6 @@ class GPUWorker:
         return moved, skipped
 
     def release_memory_occupation(self) -> dict:
-        """Sleep: record which modules were on GPU, move them to CPU, clear allocator."""
         logger.info(f"[SLEEP] GPUWorker.release_memory_occupation rank={self.rank}")
         if self._sleeping:
             return {"success": True, "sleeping": True, "message": "already sleeping"}
@@ -597,13 +593,9 @@ class GPUWorker:
 
         # Clear memory
         dev = torch.get_device_module()  # cuda / xpu / etc (torch backend)
-
         dev.synchronize()
-
         gc.collect()
-
         dev.empty_cache()
-
         dev.ipc_collect()
 
         if skipped:
@@ -615,30 +607,29 @@ class GPUWorker:
                 "moved": moved,
                 "skipped": skipped,
             }
-
-        self._sleep_restore_map = restore_map
-        self._sleeping = True
-        return {
-            "success": True,
-            "sleeping": True,
-            "message": "released GPU memory (moved active modules to CPU)",
-            "moved": moved,
-        }
+        else:
+            self._sleep_restore_map = restore_map
+            self._sleeping = True
+            return {
+                "success": True,
+                "sleeping": True,
+                "message": "released GPU memory (moved active modules to CPU)",
+                "moved": moved,
+            }
 
     def resume_memory_occupation(self) -> dict:
-        """Wake: move exactly the previously-offloaded modules back to their original devices."""
         logger.info(f"[WAKE] GPUWorker.resume_memory_occupation rank={self.rank}")
         if not self._sleeping:
             return {"success": True, "sleeping": False, "message": "already awake"}
 
-        if self.pipeline is None:
+        elif self.pipeline is None:
             return {
                 "success": False,
                 "sleeping": True,
                 "message": "pipeline not initialized",
             }
 
-        if not self._sleep_restore_map:
+        elif not self._sleep_restore_map:
             # Nothing recorded; just mark awake.
             self._sleeping = False
             return {
@@ -647,32 +638,33 @@ class GPUWorker:
                 "message": "no restore map; marked awake",
             }
 
-        moved_all, skipped_all = [], []
+        else:
+            moved_all, skipped_all = [], []
 
-        # Restore per original device.
-        for dev in sorted(set(self._sleep_restore_map.values())):
-            names = [n for n, d in self._sleep_restore_map.items() if d == dev]
-            moved, skipped = self._move_modules(names, dev)
-            moved_all += moved
-            skipped_all += skipped
+            # Restore per original device.
+            for dev in sorted(set(self._sleep_restore_map.values())):
+                names = [n for n, d in self._sleep_restore_map.items() if d == dev]
+                moved, skipped = self._move_modules(names, dev)
+                moved_all += moved
+                skipped_all += skipped
 
-        if skipped_all:
-            return {
-                "success": False,
-                "sleeping": True,
-                "message": "partial resume: some modules could not be restored",
-                "moved": moved_all,
-                "skipped": skipped_all,
-            }
-
-        self._sleep_restore_map = {}
-        self._sleeping = False
-        return {
-            "success": True,
-            "sleeping": False,
-            "message": "resumed GPU memory (restored modules to original devices)",
-            "moved": moved_all,
-        }
+            if skipped_all:
+                return {
+                    "success": False,
+                    "sleeping": True,
+                    "message": "partial resume: some modules could not be restored",
+                    "moved": moved_all,
+                    "skipped": skipped_all,
+                }
+            else:
+                self._sleep_restore_map = {}
+                self._sleeping = False
+                return {
+                    "success": True,
+                    "sleeping": False,
+                    "message": "resumed GPU memory (restored modules to original devices)",
+                    "moved": moved_all,
+                }
 
 
 OOM_MSG = f"""
