@@ -1,6 +1,41 @@
+"""
+End-to-end test for GPU memory sleep/wake and in-place weight update workflow
+in a running SGLang multimodal server.
+
+Author:
+
+Kun Lin, https://github.com/klhhhhh
+Chenyang Zhao, https://github.com/zhaochenyang20
+Menyang Liu, https://github.com/dreamyang-liu
+shuwen, https://github.com/alphabetc1
+
+This test exercises a realistic server lifecycle and validates both functional
+correctness and observable GPU memory side effects:
+
+1) Launch a SGLang server process and wait until the HTTP health endpoint
+   becomes ready.
+2) Query and record baseline GPU memory usage.
+3) Trigger GPU memory release via the `/release_memory_occupation` endpoint
+   and verify that GPU memory usage decreases by at least a configurable
+   threshold.
+4) Trigger GPU memory resume via the `/resume_memory_occupation` endpoint
+   and verify that GPU memory usage increases accordingly.
+5) Perform an in-place model weight update using the
+   `/update_weights_from_disk` endpoint without restarting the server.
+6) Issue a generation request to confirm that the server remains functional
+   after sleep, wake, and weight update operations.
+
+The test asserts:
+- Correct HTTP status codes and response payloads for sleep/wake/update APIs.
+- Directional GPU memory changes (decrease on release, increase on resume).
+- Continued serving capability after memory state transitions and weight updates.
+
+This ensures that GPU memory management operations are reversible, observable,
+and safe to use in a live server without corrupting internal state or breaking
+subsequent requests.
+"""
+
 import os
-import signal
-import socket
 import subprocess
 import time
 from typing import Optional
@@ -10,88 +45,11 @@ import pytest
 
 from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import maybe_download_model
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.utils import launch_server_cmd, terminate_process, wait_for_http_ready
 
 logger = init_logger(__name__)
 
 _MODEL_ID = "Qwen/Qwen-Image"
-
-
-def _find_free_port() -> int:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
-
-
-def _wait_http_ready(base_url: str, timeout_s: float = 180.0) -> None:
-    logger.info(
-        f"[STEP 1] Waiting for server ready: GET {base_url}/health (timeout={timeout_s}s)"
-    )
-    deadline = time.time() + timeout_s
-    last_err = None
-    last_status = None
-    while time.time() < deadline:
-        try:
-            r = httpx.get(f"{base_url}/health", timeout=5.0)
-            last_status = r.status_code
-            if r.status_code == 200:
-                logger.info("[STEP 1] Server is ready (health=200)")
-                return
-        except Exception as e:
-            last_err = e
-        time.sleep(1.0)
-    raise RuntimeError(
-        f"Server not ready after {timeout_s}s. last_status={last_status} last_err={last_err}"
-    )
-
-
-def _launch_server(model_path: str, port: int) -> subprocess.Popen:
-    cmd = [
-        "sglang",
-        "serve",
-        "--model-path",
-        model_path,
-        "--port",
-        str(port),
-        "--num-gpus",
-        "1",
-        "--dit-cpu-offload",
-        "false",
-        "--text-encoder-cpu-offload",
-        "false",
-    ]
-    logger.info(f"[STEP 0] Launching server: {' '.join(cmd)}")
-    env = os.environ.copy()
-    p = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=env,
-        text=True,
-        bufsize=1,
-    )
-    return p
-
-
-def _terminate_proc(p: subprocess.Popen) -> None:
-    if p.poll() is not None:
-        return
-
-    logger.info("[CLEANUP] Terminating server process (SIGINT -> KILL if needed)")
-    try:
-        p.send_signal(signal.SIGINT)
-        p.wait(timeout=20)
-        logger.info("[CLEANUP] Server process terminated gracefully via SIGINT")
-        return
-    except Exception as e:
-        logger.warning(f"[CLEANUP] SIGINT termination failed: {type(e).__name__}: {e}")
-
-    try:
-        p.kill()
-        logger.info("[CLEANUP] Server process killed via SIGKILL")
-    except Exception as e:
-        logger.error(f"[CLEANUP] SIGKILL failed: {type(e).__name__}: {e}")
 
 
 def _read_tail(p: subprocess.Popen, max_lines: int = 300) -> str:
@@ -99,30 +57,26 @@ def _read_tail(p: subprocess.Popen, max_lines: int = 300) -> str:
         logger.warning("[TAIL] Process stdout is None; cannot read log tail")
         return ""
 
-    try:
-        lines = []
-        start = time.time()
-        while time.time() - start < 2.0:
-            line = p.stdout.readline()
-            if not line:
-                break
-            lines.append(line.rstrip("\n"))
-        return "\n".join(lines[-max_lines:])
-    except Exception as e:
-        logger.warning(
-            f"[TAIL] Failed to read server log tail: {type(e).__name__}: {e}"
-        )
-        return ""
+    lines = []
+    start = time.time()
+    while time.time() - start < 2.0:
+        line = p.stdout.readline()
+        if not line:
+            break
+        lines.append(line.rstrip("\n"))
+    return "\n".join(lines[-max_lines:])
 
 
 def _post_json(
     base_url: str, path: str, payload: dict, timeout_s: float = 300.0
 ) -> httpx.Response:
-    t0 = time.time()
-    r = httpx.post(f"{base_url}{path}", json=payload, timeout=timeout_s)
-    dt = time.time() - t0
-    logger.info(f"[HTTP] POST {path} status={r.status_code} time={dt:.2f}s")
-    return r
+    request_start_time_s = time.time()
+    response = httpx.post(f"{base_url}{path}", json=payload, timeout=timeout_s)
+    request_elapsed_s = time.time() - request_start_time_s
+    logger.info(
+        f"[HTTP] POST {path} status={response.status_code} time={request_elapsed_s:.2f}s"
+    )
+    return response
 
 
 def _do_generate(base_url: str) -> None:
@@ -142,18 +96,17 @@ def _do_generate(base_url: str) -> None:
     r = _post_json(base_url, "/v1/images/generations", payload, timeout_s=900.0)
     logger.info(f"[STEP 6] generate: status={r.status_code} body_head={r.text[:800]}")
 
-    if r.status_code in (200, 201):
-        logger.info("[STEP 6] generate: success (200/201)")
+    if r.status_code == 200:
+        logger.info("[STEP 6] generate: success (200)")
         return
-
-    if r.status_code == 400 and "requires cloud storage" in r.text:
+    elif r.status_code == 400 and "requires cloud storage" in r.text:
         logger.warning(
             "[STEP 6] generate: got 400 due to missing cloud storage; "
             "treating as known non-fatal response_format/url behavior."
         )
         return
-
-    raise AssertionError(f"generate failed: {r.status_code} {r.text}")
+    else:
+        raise AssertionError(f"generate failed: {r.status_code} {r.text}")
 
 
 def _query_gpu_mem_used_mib(gpu_index: int = 0) -> Optional[int]:
@@ -190,35 +143,52 @@ def _assert_mem_changed(
     before: int,
     after: int,
     min_delta_mib: int,
+    *,
+    expect_decrease: bool,
 ) -> None:
-    delta = abs(after - before)
-    logger.info(
-        f"[MEM] {label}: before={before} MiB after={after} MiB |delta|={delta} MiB"
-    )
-    assert delta >= min_delta_mib, (
-        f"GPU memory change too small for '{label}': |after-before|={delta} MiB < {min_delta_mib} MiB "
-        f"(before={before} MiB, after={after} MiB)"
-    )
+    if expect_decrease:
+        delta = before - after
+        logger.info(
+            f"[MEM] {label}: before={before} MiB after={after} MiB delta={delta} MiB (expect decrease)"
+        )
+        assert delta >= min_delta_mib, (
+            f"GPU memory did not decrease enough for '{label}': before-after={delta} MiB < {min_delta_mib} MiB "
+            f"(before={before} MiB, after={after} MiB)"
+        )
+    else:
+        delta = after - before
+        logger.info(
+            f"[MEM] {label}: before={before} MiB after={after} MiB delta={delta} MiB (expect increase)"
+        )
+        assert delta >= min_delta_mib, (
+            f"GPU memory did not increase enough for '{label}': after-before={delta} MiB < {min_delta_mib} MiB "
+            f"(before={before} MiB, after={after} MiB)"
+        )
 
 
 @pytest.mark.gpu
 @pytest.mark.timeout(1800)
 def test_sleep_wake_refit_generate_e2e():
-    port = _find_free_port()
+    cmd = (
+        "sglang serve "
+        f"--model-path {_MODEL_ID} "
+        "--num-gpus 1 "
+        "--dit-cpu-offload false "
+        "--text-encoder-cpu-offload false"
+    )
+    process, port = launch_server_cmd(cmd, host="127.0.0.1")
     base_url = f"http://127.0.0.1:{port}"
     logger.info(f"Test start: model={_MODEL_ID} port={port} base_url={base_url}")
 
-    p = _launch_server(model_path=_MODEL_ID, port=port)
-
     try:
-        # 1) launch
-        _wait_http_ready(base_url, timeout_s=900.0)
+        # launch
+        wait_for_http_ready(f"{base_url}/health", timeout=900, process=process)
 
         # Baseline GPU memory
-        mem0 = _require_gpu_mem_query(0)
-        logger.info(f"[STEP 1] baseline: GPU mem = {mem0} MiB")
+        mem_before_sleep = _require_gpu_mem_query(0)
+        logger.info(f"[STEP 1] baseline: GPU mem = {mem_before_sleep} MiB")
 
-        # 2) sleep
+        # sleep
         logger.info("[STEP 2] sleep: POST /release_memory_occupation")
         r = _post_json(
             base_url, "/release_memory_occupation", payload={}, timeout_s=180.0
@@ -230,15 +200,19 @@ def test_sleep_wake_refit_generate_e2e():
         if "sleeping" in out:
             assert out["sleeping"] is True, f"sleep response: {out}"
 
-        mem1 = _require_gpu_mem_query(0)
+        mem_after_sleep = _require_gpu_mem_query(0)
         min_sleep_delta = int(
             os.environ.get("SGLANG_MMGEN_SLEEP_MEM_DELTA_MIB", "1024")
         )
         _assert_mem_changed(
-            "sleep (baseline -> after sleep)", mem0, mem1, min_sleep_delta
+            "sleep (baseline -> after sleep)",
+            mem_before_sleep,
+            mem_after_sleep,
+            min_sleep_delta,
+            expect_decrease=True,
         )
 
-        # 4) wake
+        # wake
         logger.info("[STEP 4] wake: POST /resume_memory_occupation")
         r = _post_json(
             base_url, "/resume_memory_occupation", payload={}, timeout_s=300.0
@@ -250,20 +224,24 @@ def test_sleep_wake_refit_generate_e2e():
         if "sleeping" in out:
             assert out["sleeping"] is False, f"wake response: {out}"
 
-        mem2 = _require_gpu_mem_query(0)
+        mem_after_wake = _require_gpu_mem_query(0)
         min_wake_delta = int(os.environ.get("SGLANG_MMGEN_WAKE_MEM_DELTA_MIB", "1024"))
         _assert_mem_changed(
-            "wake (after sleep -> after wake)", mem1, mem2, min_wake_delta
+            "wake (after sleep -> after wake)",
+            mem_after_sleep,
+            mem_after_wake,
+            min_wake_delta,
+            expect_decrease=False,
         )
 
-        # 5) refit/update_weights_from_disk using SAME model snapshot path
+        # refit/update_weights_from_disk using SAME model snapshot path
         logger.info(
             "[STEP 5] refit: resolving local snapshot path via maybe_download_model()"
         )
-        t0 = time.time()
+        refit_start_time = time.time()
         model_snapshot_path = maybe_download_model(_MODEL_ID)
         logger.info(
-            f"[STEP 5] refit: snapshot_path={model_snapshot_path} (took {time.time() - t0:.2f}s)"
+            f"[STEP 5] refit: snapshot_path={model_snapshot_path} (took {time.time() - refit_start_time:.2f}s)"
         )
         logger.info("[STEP 5] refit: POST /update_weights_from_disk")
         r = _post_json(
@@ -279,16 +257,16 @@ def test_sleep_wake_refit_generate_e2e():
         logger.info(f"[STEP 5] refit: response={out}")
         assert out.get("success") is True, f"update_weights_from_disk response: {out}"
 
-        # 6) generate
+        # generate
         _do_generate(base_url)
 
         logger.info("Test finished: SUCCESS")
 
     except Exception as e:
-        tail = _read_tail(p)
+        tail = _read_tail(process)
         raise AssertionError(f"{e}\n\n---- server log tail ----\n{tail}") from e
     finally:
-        _terminate_proc(p)
+        terminate_process(process)
 
 
 if __name__ == "__main__":
