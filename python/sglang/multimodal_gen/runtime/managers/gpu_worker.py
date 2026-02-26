@@ -478,17 +478,13 @@ class GPUWorker:
         Recursively move torch.Tensor objects inside plain Python containers
         (dict, list, tuple) to the target device.
 
-        This utility is used during sleep/wake and module sanitization.
+        Used during sleep/wake and module attribute sanitization.
         Only tensors are moved; non-tensor objects are left unchanged.
-        Errors during device transfer are ignored to avoid breaking module state.
         """
-
         if torch.is_tensor(obj):
-            try:
-                return obj.to(device)
-            except Exception:
-                logger.warning(f"Failed to move tensor to {device}: {e}")
-                return obj
+            # Let RuntimeError propagate so callers can rollback / fail-fast.
+            return obj.to(device)
+
         if isinstance(obj, dict):
             return {k: self._move_obj_tensors(v, device) for k, v in obj.items()}
         if isinstance(obj, list):
@@ -526,38 +522,117 @@ class GPUWorker:
             try:
                 new_value = self._move_obj_tensors(value, device)
             except RuntimeError as e:
-                # Expose failure but keep best-effort behavior during sleep/wake.
-                self.logger.debug(
-                    "[sanitize_module_attrs] attr move failed: "
-                    f"module={mod_name}, attr={key}, type={type(value)}, device={device}, error={e!r}"
+                logger.warning(
+                    "[sanitize_module_attrs] attr move failed: module=%s attr=%s type=%s target=%s error=%r",
+                    mod_name,
+                    key,
+                    type(value),
+                    device,
+                    e,
                 )
+                raise
+
+            if new_value is not value:
+                attrs[key] = new_value
+
+    def _rollback_moved_modules(
+        self,
+        modules: dict[str, object],
+        moved_names: list[str],
+        src_device_map: dict[str, str],
+    ) -> None:
+        for name in reversed(moved_names):
+            module = modules.get(name)
+            if module is None:
                 continue
 
-            # only write back when identity changed (avoid pointless writes)
-            if new_value is not value:
-                attrs[key] = new_value  
+            src_dev = src_device_map.get(name)
+            if src_dev is None:
+                continue
+
+            try:
+                module.to(src_dev)
+                self._sanitize_module_attrs(module, src_dev)
+            except RuntimeError as e:
+                logger.warning(
+                    "[SLEEP/WAKE] rollback failed: name=%s target=%s module=%s error=%r",
+                    name,
+                    src_dev,
+                    module.__class__.__name__,
+                    e,
+                )
 
     def _move_modules(
         self, names: list[str], device: str
     ) -> tuple[list[str], list[str]]:
-        """Move selected updatable modules to device (best-effort)."""
-        moved, skipped = [], []
+        """
+        Move selected updatable modules to device.
+
+        Fail-fast + rollback:
+        - Stop on the first failure (missing module / move failure / sanitize failure).
+        - Roll back modules already moved in this call to keep state consistent.
+        """
+        moved: list[str] = []
+        skipped: list[str] = []
+
         if self.pipeline is None:
             return moved, skipped
 
         modules = get_updatable_modules(self.pipeline)
+        src_device_map: dict[str, str] = {}
         for name in names:
             m = modules.get(name)
             if m is None:
                 skipped.append(name)
-                continue
+                self._rollback_moved_modules(modules, moved, src_device_map)
+                break
+
+            # Snapshot original device for rollback.
+            try:
+                src_device_map[name] = self._module_device(m)
+            except RuntimeError as e:
+                logger.warning(
+                    "[SLEEP/WAKE] device query failed: name=%s module=%s error=%r",
+                    name,
+                    m.__class__.__name__,
+                    e,
+                )
+                skipped.append(name)
+                self._rollback_moved_modules(modules, moved, src_device_map)
+                break
+
+            # Phase 1: move.
             try:
                 m.to(device)
-                self._sanitize_module_attrs(m, device)
-                moved.append(name)
-            except Exception as e:
-                logger.info(f"[SLEEP/WAKE] skip {name}: {e}")
+            except RuntimeError as e:
+                logger.warning(
+                    "[SLEEP/WAKE] module move failed: name=%s target=%s module=%s error=%r",
+                    name,
+                    device,
+                    m.__class__.__name__,
+                    e,
+                )
                 skipped.append(name)
+                self._rollback_moved_modules(modules, moved, src_device_map)
+                break
+
+            # Phase 2: sanitize attrs. If this fails, the module is already moved -> rollback includes it.
+            try:
+                self._sanitize_module_attrs(m, device)
+            except RuntimeError as e:
+                logger.warning(
+                    "[SLEEP/WAKE] sanitize failed after move: name=%s target=%s module=%s error=%r",
+                    name,
+                    device,
+                    m.__class__.__name__,
+                    e,
+                )
+                skipped.append(name)
+                self._rollback_moved_modules(modules, moved + [name], src_device_map)
+                break
+
+            moved.append(name)
+
         return moved, skipped
 
     def release_memory_occupation(self) -> dict:
@@ -574,20 +649,22 @@ class GPUWorker:
 
         modules = get_updatable_modules(self.pipeline)
 
-        # Snapshot ONLY modules currently on non-CPU devices (typically cuda:*).
         restore_map: dict[str, str] = {}
         for name, m in modules.items():
             try:
-                dev = self._module_device(m)
-                if not dev.startswith("cpu"):
-                    restore_map[name] = dev
-            except Exception:
+                dev_str = self._module_device(m)
+            except RuntimeError as e:
                 logger.debug(
-                    "[SLEEP] Failed to query module device, skip module. "
-                    f"rank={self.rank}, module={name}, "
+                    "[SLEEP] module device query failed; skip module. rank=%s module=%s error=%r",
+                    self.rank,
+                    name,
+                    e,
                 )
+                continue
 
-        # Move only those modules to CPU.
+            if not dev_str.startswith("cpu"):
+                restore_map[name] = dev_str
+
         targets = list(restore_map.keys())
         moved, skipped = self._move_modules(targets, "cpu")
 
@@ -596,14 +673,15 @@ class GPUWorker:
         dev.synchronize()
         gc.collect()
         dev.empty_cache()
-        dev.ipc_collect()
+        if dev is torch.cuda:
+            torch.cuda.ipc_collect()
 
         if skipped:
             # do not enter sleeping state if partial offload
             return {
                 "success": False,
                 "sleeping": False,
-                "message": "partial offload: some modules could not be moved to CPU",
+                "message": "offload failed; rolled back to keep state consistent",
                 "moved": moved,
                 "skipped": skipped,
             }
@@ -639,14 +717,19 @@ class GPUWorker:
             }
 
         else:
-            moved_all, skipped_all = [], []
+            moved_all: list[str] = []
+            skipped_all: list[str] = []
 
-            # Restore per original device.
-            for dev in sorted(set(self._sleep_restore_map.values())):
-                names = [n for n, d in self._sleep_restore_map.items() if d == dev]
-                moved, skipped = self._move_modules(names, dev)
+            # Restore per original device. If any group fails, we stop and keep sleeping=True.
+            for dev_str in sorted(set(self._sleep_restore_map.values())):
+                names = [n for n, d in self._sleep_restore_map.items() if d == dev_str]
+                moved, skipped = self._move_modules(names, dev_str)
+
                 moved_all += moved
                 skipped_all += skipped
+
+                if skipped:
+                    break
 
             if skipped_all:
                 return {
