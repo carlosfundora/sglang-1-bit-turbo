@@ -447,30 +447,62 @@ class Scheduler:
             results.append(pipe.recv())
         return results
 
-    def _handle_release_memory_occupation(self, reqs: List[Any]) -> OutputBatch:
-        logger.info(f"[SLEEP] handle_release_memory_occupation on rank={self.gpu_id}")
-        req = reqs[0]
-        with self._sleep_lock:
-            if self._sleeping:
-                return OutputBatch(
-                    output={"sleeping": True, "note": "already sleeping"}
-                )
-            # become sleeping，and stall generation
+def _handle_release_memory_occupation(self, reqs: List[Any]) -> OutputBatch:
+    logger.info(f"[SLEEP] handle_release_memory_occupation on rank={self.gpu_id}")
+
+    with self._sleep_lock:
+        if self._sleeping:
+            return OutputBatch(output={"sleeping": True, "note": "already sleeping"})
+
+        try:
+            detail = self.worker.release_memory_occupation()
+        except RuntimeError as e:
+            logger.exception(
+                "[SLEEP] release_memory_occupation failed on rank=%s",
+                self.gpu_id,
+            )
+            # keep state unchanged (still awake) on failure
+            return OutputBatch(
+                output={
+                    "sleeping": False,
+                    "detail": {"success": False, "message": str(e)},
+                }
+            )
+
+        success = isinstance(detail, dict) and bool(detail.get("success", False))
+        if success:
             self._sleeping = True
+            return OutputBatch(output={"sleeping": True, "detail": detail})
+        else:
+            # do not mark sleeping on failure
+            return OutputBatch(output={"sleeping": False, "detail": detail})
 
-        # release gpu memory (every rank will execute their own worker)
-        detail = self.worker.release_memory_occupation()
+def _handle_resume_memory_occupation(self, reqs: List[Any]) -> OutputBatch:
+    logger.info(f"[WAKE ] handle_resume_memory_occupation on rank={self.gpu_id}")
 
-        return OutputBatch(output={"sleeping": True, "detail": detail})
+    with self._sleep_lock:
+        if not self._sleeping:
+            return OutputBatch(output={"sleeping": False, "note": "already awake"})
 
-    def _handle_resume_memory_occupation(self, reqs: List[Any]) -> OutputBatch:
-        logger.info(f"[WAKE ] handle_resume_memory_occupation on rank={self.gpu_id}")
-        req = reqs[0]
-        with self._sleep_lock:
-            if not self._sleeping:
-                return OutputBatch(output={"sleeping": False, "note": "already awake"})
+        try:
+            detail = self.worker.resume_memory_occupation()
+        except RuntimeError as e:
+            logger.exception(
+                "[WAKE ] resume_memory_occupation failed on rank=%s",
+                self.gpu_id,
+            )
+            # keep state unchanged (still sleeping) on failure
+            return OutputBatch(
+                output={
+                    "sleeping": True,
+                    "detail": {"success": False, "message": str(e)},
+                }
+            )
+
+        success = isinstance(detail, dict) and bool(detail.get("success", False))
+        if success:
             self._sleeping = False
-
-        detail = self.worker.resume_memory_occupation()
-
-        return OutputBatch(output={"sleeping": False, "detail": detail})
+            return OutputBatch(output={"sleeping": False, "detail": detail})
+        else:
+            # do not mark awake on failure
+            return OutputBatch(output={"sleeping": True, "detail": detail})
