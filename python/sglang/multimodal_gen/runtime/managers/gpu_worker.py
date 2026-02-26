@@ -577,7 +577,6 @@ class GPUWorker:
         logger.info(f"[SLEEP] GPUWorker.release_memory_occupation rank={self.rank}")
         if self._sleeping:
             return {"success": True, "sleeping": True, "message": "already sleeping"}
-
         if self.pipeline is None:
             return {
                 "success": False,
@@ -585,89 +584,72 @@ class GPUWorker:
                 "message": "pipeline not initialized",
             }
 
-        modules = get_updatable_modules(self.pipeline)
-
-        restore_map: dict[str, str] = {}
-        for name, m in modules.items():
-            try:
-                dev_str = self._get_module_device(m)
-            except RuntimeError as e:
-                logger.debug(
-                    "[SLEEP] module device query failed; skip module. rank=%s module=%s error=%r",
-                    self.rank,
-                    name,
-                    e,
-                )
-                continue
-
-            if not dev_str.startswith("cpu"):
-                restore_map[name] = dev_str
-
-        targets = list(restore_map.keys())
         try:
-            self._move_modules(targets, "cpu")
+            modules = get_updatable_modules(self.pipeline)
+            restore_map: dict[str, str] = {}
+            for name, m in modules.items():
+                try:
+                    dev_str = self._get_module_device(m)
+                except RuntimeError as e:
+                    logger.debug(
+                        "[SLEEP] module device query failed; skip module. rank=%s module=%s error=%r",
+                        self.rank,
+                        name,
+                        e,
+                    )
+                    continue
+                if not dev_str.startswith("cpu"):
+                    restore_map[name] = dev_str
+
+            self._move_modules(list(restore_map.keys()), "cpu")
+            device = torch.get_device_module()
+            device.synchronize()
+            gc.collect()
+            device.empty_cache()
+
+            self._sleep_restore_map = restore_map
+            self._sleeping = True
+            return {
+                "success": True,
+                "sleeping": True,
+                "message": "released GPU memory (moved active modules to CPU)",
+            }
         except Exception as e:
             logger.warning(
-                f"[SLEEP] release_memory_occupation failed. rank={self.rank} error={e}",
+                "[SLEEP] release_memory_occupation failed. rank=%s error=%r",
+                self.rank,
+                e,
             )
             return {
                 "success": False,
-                "sleeping": False,
+                "sleeping": self._sleeping,
                 "message": f"offload failed; rolled back to keep state consistent: {e}",
             }
-
-        device = torch.get_device_module()
-        device.synchronize()
-        gc.collect()
-        device.empty_cache()
-        self._sleep_restore_map = restore_map
-        self._sleeping = True
-        return {
-            "success": True,
-            "sleeping": True,
-            "message": "released GPU memory (moved active modules to CPU)",
-        }
 
     def resume_memory_occupation(self) -> dict:
         "Resume previously released GPU memory occupation."
         logger.info(f"[WAKE] GPUWorker.resume_memory_occupation rank={self.rank}")
         if not self._sleeping:
             return {"success": True, "sleeping": False, "message": "already awake"}
-
-        elif self.pipeline is None:
+        if self.pipeline is None:
             return {
                 "success": False,
                 "sleeping": True,
                 "message": "pipeline not initialized",
             }
 
-        elif not self._sleep_restore_map:
-            # Nothing recorded; just mark awake.
-            self._sleeping = False
-            return {
-                "success": True,
-                "sleeping": False,
-                "message": "no restore map; marked awake",
-            }
+        try:
+            if not self._sleep_restore_map:
+                self._sleeping = False
+                return {
+                    "success": True,
+                    "sleeping": False,
+                    "message": "no restore map; marked awake",
+                }
 
-        else:
-            # Restore per original device. If any group fails, we stop and keep sleeping=True.
             for dev_str in sorted(set(self._sleep_restore_map.values())):
                 names = [n for n, d in self._sleep_restore_map.items() if d == dev_str]
-                try:
-                    self._move_modules(names, dev_str)
-                except RuntimeError as e:
-                    logger.warning(
-                        "[WAKE] resume_memory_occupation failed. rank=%s target=%s error=%r",
-                        self.rank,
-                        dev_str,
-                        e,
-                    )
-                    return {
-                        "success": False,
-                        "sleeping": True,
-                        "message": "resume failed: rollback kept module states consistent",
-                    }
+                self._move_modules(names, dev_str)
 
             self._sleep_restore_map = {}
             self._sleeping = False
@@ -675,6 +657,17 @@ class GPUWorker:
                 "success": True,
                 "sleeping": False,
                 "message": "resumed GPU memory (restored modules to original devices)",
+            }
+        except Exception as e:
+            logger.warning(
+                "[WAKE] resume_memory_occupation failed. rank=%s error=%r",
+                self.rank,
+                e,
+            )
+            return {
+                "success": False,
+                "sleeping": self._sleeping,
+                "message": f"resume failed; rolled back to keep state consistent: {e}",
             }
 
 

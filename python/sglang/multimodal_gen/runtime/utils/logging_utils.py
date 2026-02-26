@@ -586,17 +586,10 @@ def log_generation_timer(
         msg = e.detail
         if request_idx is not None:
             logger.warning(
-                "Request %d rejected (HTTP %d): %s",
-                request_idx,
-                e.status_code,
-                msg,
+                f"Request {request_idx} rejected (HTTP {e.status_code}): {msg}",
             )
         else:
-            logger.warning(
-                "Request rejected (HTTP %d): %s",
-                e.status_code,
-                msg,
-            )
+            logger.warning(f"Request rejected (HTTP {e.status_code}): {msg}")
         raise
 
     except Exception as e:

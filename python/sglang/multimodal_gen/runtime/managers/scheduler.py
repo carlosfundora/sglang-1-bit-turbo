@@ -461,14 +461,14 @@ class Scheduler:
         logger.info(f"[{tag}] {operation_name} on rank={self.gpu_id}")
         with self._sleep_lock:
             if self._sleeping != require_sleeping:
-                return OutputBatch(
-                    output={"sleeping": self._sleeping, "note": note}
-                )
+                return OutputBatch(output={"sleeping": self._sleeping, "note": note})
 
             try:
                 detail = worker_call()
             except RuntimeError as e:
-                logger.exception(f"[{tag}] {operation_name} failed on rank={self.gpu_id}")
+                logger.exception(
+                    f"[{tag}] {operation_name} failed on rank={self.gpu_id}"
+                )
                 return OutputBatch(
                     output={
                         "sleeping": self._sleeping,
