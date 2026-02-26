@@ -463,26 +463,21 @@ class GPUWorker:
         return checksums
 
     def _get_module_device(self, module: torch.nn.Module) -> str:
+        """Return best-effort device string for a module."""
         param = next(module.parameters(), None)
         if param is not None:
             return str(param.device)
         buffer = next(module.buffers(), None)
         if buffer is not None:
             return str(buffer.device)
+
+        for key, val in vars(module).items():
+            if key.startswith("_"):
+                continue
+            if isinstance(val, torch.Tensor):
+                return str(val.device)
+
         return "cpu"
-
-    def _move_obj_tensors(self, obj, device: str):
-        """Recursively move tensor leaves in dict/list/tuple containers."""
-        if torch.is_tensor(obj):
-            return obj.to(device)
-
-        if isinstance(obj, dict):
-            return {k: self._move_obj_tensors(v, device) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [self._move_obj_tensors(v, device) for v in obj]
-        if isinstance(obj, tuple):
-            return tuple(self._move_obj_tensors(v, device) for v in obj)
-        return obj
 
     def _move_unregistered_tensors(self, module: torch.nn.Module, device: str) -> None:
         """
@@ -492,23 +487,30 @@ class GPUWorker:
         caches in plain Python attributes. We traverse `module.__dict__` and move tensor
         leaves inside tensors / dict / list / tuple while keeping non-tensor objects.
         """
+
+        def move_tensors(obj):
+            if torch.is_tensor(obj):
+                return obj.to(device)
+            if isinstance(obj, dict):
+                return {k: move_tensors(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [move_tensors(v) for v in obj]
+            if isinstance(obj, tuple):
+                return tuple(move_tensors(v) for v in obj)
+            return obj
+
         attrs = module.__dict__
         for attr_name, attr_value in list(attrs.items()):
             if attr_name in {"_parameters", "_buffers", "_modules"}:
                 continue
 
             try:
-                moved_value = self._move_obj_tensors(attr_value, device)
-            except RuntimeError as e:
+                moved_value = move_tensors(attr_value)
+            except Exception as e:
                 logger.warning(
-                    "[move_unregistered_tensors] attr move failed: module=%s attr=%s type=%s target=%s error=%r",
-                    module.__class__.__name__,
-                    attr_name,
-                    type(attr_value),
-                    device,
-                    e,
+                    f"[move_unregistered_tensors] attr move failed: module={module.__class__.__name__} attr={attr_name} type={type(attr_value)} target={device} error={e}",
                 )
-                raise
+                raise e
 
             if moved_value is not attr_value:
                 attrs[attr_name] = moved_value
