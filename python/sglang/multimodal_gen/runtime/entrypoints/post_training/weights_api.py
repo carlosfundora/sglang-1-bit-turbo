@@ -72,17 +72,17 @@ async def _handle_memory_occupation_request(req_class: type):
     try:
         response = await async_scheduler_client.forward(req_class())
     except Exception as e:
-        logger.exception("scheduler_client.forward failed for %s", req_class.__name__)
+        logger.exception(f"scheduler_client.forward failed for {req_class.__name__}")
         return ORJSONResponse({"success": False, "message": str(e)}, status_code=500)
 
     out = response.output
     payload = out.get("detail") if isinstance(out, dict) else None
     if not isinstance(payload, dict) or "success" not in payload:
-        logger.error("missing success in scheduler output detail: %r", out)
+        logger.error(f"missing success in scheduler output detail: {out}")
         return ORJSONResponse(
             {
                 "success": False,
-                "message": "Missing 'success' field in scheduler response.",
+                "message": f"Missing 'success' field in scheduler response: {out}",
             },
             status_code=500,
         )

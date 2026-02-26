@@ -6,7 +6,8 @@ import os
 import pickle
 import threading
 from collections import deque
-from typing import Any, List
+from copy import deepcopy
+from typing import Any, Callable, List
 
 import zmq
 
@@ -245,7 +246,7 @@ class Scheduler:
                         height=height,
                         prompt="",
                     )
-                req.set_as_warmup(self.server_args.warmup_steps)
+                req.set_as_warmup()
                 self.waiting_queue.append((None, req))
             # if server is warmed-up, set this flag to avoid req-based warmup
             self.warmed_up = True
@@ -265,7 +266,8 @@ class Scheduler:
         # only the very first req through server's lifetime will be warmed up
         identity, req = recv_reqs[0]
         if isinstance(req, Req):
-            warmup_req = req.copy_as_warmup(self.server_args.warmup_steps)
+            warmup_req = deepcopy(req)
+            warmup_req.set_as_warmup()
             recv_reqs.insert(0, (identity, warmup_req))
             self._warmup_total = 1
             self._warmup_processed = 0
@@ -447,64 +449,54 @@ class Scheduler:
             results.append(pipe.recv())
         return results
 
-    def _handle_release_memory_occupation(self, reqs: List[Any]) -> OutputBatch:
-        logger.info(f"[SLEEP] handle_release_memory_occupation on rank={self.gpu_id}")
-
+    def _handle_memory_occupation(
+        self,
+        tag: str,
+        operation_name: str,
+        require_sleeping: bool,
+        note: str,
+        worker_call: Callable[[], dict[str, Any]],
+        next_sleeping_state: bool,
+    ) -> OutputBatch:
+        logger.info(f"[{tag}] {operation_name} on rank={self.gpu_id}")
         with self._sleep_lock:
-            if self._sleeping:
+            if self._sleeping != require_sleeping:
                 return OutputBatch(
-                    output={"sleeping": True, "note": "already sleeping"}
+                    output={"sleeping": self._sleeping, "note": note}
                 )
 
             try:
-                detail = self.worker.release_memory_occupation()
+                detail = worker_call()
             except RuntimeError as e:
-                logger.exception(
-                    "[SLEEP] release_memory_occupation failed on rank=%s",
-                    self.gpu_id,
-                )
-                # keep state unchanged (still awake) on failure
+                logger.exception(f"[{tag}] {operation_name} failed on rank={self.gpu_id}")
                 return OutputBatch(
                     output={
-                        "sleeping": False,
+                        "sleeping": self._sleeping,
                         "detail": {"success": False, "message": str(e)},
                     }
                 )
 
-            success = isinstance(detail, dict) and bool(detail.get("success", False))
-            if success:
-                self._sleeping = True
-                return OutputBatch(output={"sleeping": True, "detail": detail})
-            else:
-                # do not mark sleeping on failure
-                return OutputBatch(output={"sleeping": False, "detail": detail})
+            if bool(detail.get("success", False)):
+                self._sleeping = next_sleeping_state
+
+            return OutputBatch(output={"sleeping": self._sleeping, "detail": detail})
+
+    def _handle_release_memory_occupation(self, reqs: List[Any]) -> OutputBatch:
+        return self._handle_memory_occupation(
+            tag="SLEEP",
+            operation_name="handle_release_memory_occupation",
+            require_sleeping=False,
+            note="already sleeping",
+            worker_call=self.worker.release_memory_occupation,
+            next_sleeping_state=True,
+        )
 
     def _handle_resume_memory_occupation(self, reqs: List[Any]) -> OutputBatch:
-        logger.info(f"[WAKE] handle_resume_memory_occupation on rank={self.gpu_id}")
-
-        with self._sleep_lock:
-            if not self._sleeping:
-                return OutputBatch(output={"sleeping": False, "note": "already awake"})
-
-            try:
-                detail = self.worker.resume_memory_occupation()
-            except RuntimeError as e:
-                logger.exception(
-                    "[WAKE] resume_memory_occupation failed on rank=%s",
-                    self.gpu_id,
-                )
-                # keep state unchanged (still sleeping) on failure
-                return OutputBatch(
-                    output={
-                        "sleeping": True,
-                        "detail": {"success": False, "message": str(e)},
-                    }
-                )
-
-            success = isinstance(detail, dict) and bool(detail.get("success", False))
-            if success:
-                self._sleeping = False
-                return OutputBatch(output={"sleeping": False, "detail": detail})
-            else:
-                # do not mark awake on failure
-                return OutputBatch(output={"sleeping": True, "detail": detail})
+        return self._handle_memory_occupation(
+            tag="WAKE",
+            operation_name="handle_resume_memory_occupation",
+            require_sleeping=True,
+            note="already awake",
+            worker_call=self.worker.resume_memory_occupation,
+            next_sleeping_state=False,
+        )
