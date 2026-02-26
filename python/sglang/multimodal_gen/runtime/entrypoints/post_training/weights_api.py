@@ -16,6 +16,7 @@ router = APIRouter()
 
 logger = init_logger(__name__)
 
+
 @router.post("/update_weights_from_disk")
 async def update_weights_from_disk(request: Request):
     """Update model weights from disk inplace without restarting the server."""
@@ -91,12 +92,19 @@ async def _handle_memory_occupation_request(request: Request, req_class: type):
             status_code=500,
         )
 
-    if "detail" in out and isinstance(out["detail"], dict) and "success" in out["detail"]:
+    if (
+        "detail" in out
+        and isinstance(out["detail"], dict)
+        and "success" in out["detail"]
+    ):
         payload = out["detail"]
     else:
         logger.error("missing success in scheduler output detail: %r", out)
         return ORJSONResponse(
-            {"success": False, "message": "Missing 'success' field in scheduler response."},
+            {
+                "success": False,
+                "message": "Missing 'success' field in scheduler response.",
+            },
             status_code=500,
         )
 
