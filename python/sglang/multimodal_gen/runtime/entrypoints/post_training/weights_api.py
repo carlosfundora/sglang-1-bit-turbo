@@ -10,9 +10,11 @@ from sglang.multimodal_gen.runtime.entrypoints.post_training.io_struct import (
     UpdateWeightFromDiskReqInput,
 )
 from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
+from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 router = APIRouter()
 
+logger = init_logger(__name__)
 
 @router.post("/update_weights_from_disk")
 async def update_weights_from_disk(request: Request):
@@ -65,49 +67,41 @@ async def get_weights_checksum(request: Request):
 
 
 async def _handle_memory_occupation_request(request: Request, req_class: type):
-    """Handle sleep/wake requests. No tags. Return 400 on success=False."""
-    # Body may be empty; do not crash on request.json()
-    try:
-        body = await request.json()
-        if body is None:
-            body = {}
-        if not isinstance(body, dict):
-            return ORJSONResponse(
-                {"success": False, "message": "Request body must be a JSON object."},
-                status_code=400,
-            )
-    except Exception:
-        body = {}
-
+    """Handle memory sleep/wake requests forwarded to scheduler."""
     req = req_class()
 
     try:
         response = await async_scheduler_client.forward(req)
     except Exception as e:
+        logger.exception("scheduler_client.forward failed for %s", req_class.__name__)
         return ORJSONResponse({"success": False, "message": str(e)}, status_code=500)
 
-    out = getattr(response, "output", None)
+    if response is None:
+        logger.error("scheduler returned None response for %s", req_class.__name__)
+        return ORJSONResponse(
+            {"success": False, "message": "Empty response object from scheduler."},
+            status_code=500,
+        )
 
-    # 1) dict output: prefer explicit success; fall back to heuristic / compat
-    if isinstance(out, dict):
-        if "success" in out:
-            success = bool(out["success"])
-        else:
-            # Backward compat: treat known "ok" patterns as success
-            # (recommended: remove this after worker always returns success)
-            success = True
-            out["success"] = True
+    out = response.output
 
-        return ORJSONResponse(out, status_code=200 if success else 400)
-
-    # 2) non-dict output: treat None as failure
     if out is None:
         return ORJSONResponse(
             {"success": False, "message": "Empty response from scheduler."},
             status_code=500,
         )
 
-    return ORJSONResponse({"success": True, "output": out}, status_code=200)
+    if "detail" in out and isinstance(out["detail"], dict) and "success" in out["detail"]:
+        payload = out["detail"]
+    else:
+        logger.error("missing success in scheduler output detail: %r", out)
+        return ORJSONResponse(
+            {"success": False, "message": "Missing 'success' field in scheduler response."},
+            status_code=500,
+        )
+
+    success = bool(payload["success"])
+    return ORJSONResponse(payload, status_code=200 if success else 400)
 
 
 @router.post("/release_memory_occupation")
