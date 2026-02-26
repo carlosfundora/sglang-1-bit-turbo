@@ -472,15 +472,8 @@ class GPUWorker:
         return "cpu"
 
     def _move_obj_tensors(self, obj, device: str):
-        """
-        Recursively move torch.Tensor objects inside plain Python containers
-        (dict, list, tuple) to the target device.
-
-        Used during sleep/wake and module attribute sanitization.
-        Only tensors are moved; non-tensor objects are left unchanged.
-        """
+        """Recursively move tensor leaves in dict/list/tuple containers."""
         if torch.is_tensor(obj):
-            # Let RuntimeError propagate so callers can rollback / fail-fast.
             return obj.to(device)
 
         if isinstance(obj, dict):
@@ -491,47 +484,34 @@ class GPUWorker:
             return tuple(self._move_obj_tensors(v, device) for v in obj)
         return obj
 
-    def _move_unregistered_tensors(self, m, device: str):
+    def _move_unregistered_tensors(self, module: torch.nn.Module, device: str) -> None:
         """
-        Implementation-wise, this is a recursive best-effort traversal over
-        `module.__dict__`:
+        Move tensor attributes that are not covered by `module.to(device)`.
 
-        - If an attribute value is a `torch.Tensor`, it is moved via `value.to(device)`.
-        - If the value is a Python container (`list`, `tuple`, or `dict`), the function
-        recursively processes and moves any tensors inside.
-        - If the value is an `nn.Module`, it is intentionally *not* handled here,
-        since submodules are managed separately by `get_updatable_modules`.
-
-        After processing, the migrated tensor objects are written back to the original
-        attributes, which is crucial for correctness.
-
-        This approach covers common non-registered tensor states, including:
-        - RoPE-related caches (e.g., `inv_freq`, cosine/sine caches, expanded frequencies),
-        - attention-style caches (if a diffusion model uses similar mechanisms),
-        - temporary or auxiliary caches inside encoder components.
+        `module.to` handles parameters/buffers/submodules, but some models keep tensor
+        caches in plain Python attributes. We traverse `module.__dict__` and move tensor
+        leaves inside tensors / dict / list / tuple while keeping non-tensor objects.
         """
-        mod_name = m.__class__.__name__
-        attrs = m.__dict__
-
-        for key, value in list(attrs.items()):
-            if key.startswith("_") or key in {"_parameters", "_buffers", "_modules"}:
+        attrs = module.__dict__
+        for attr_name, attr_value in list(attrs.items()):
+            if attr_name in {"_parameters", "_buffers", "_modules"}:
                 continue
 
             try:
-                new_value = self._move_obj_tensors(value, device)
+                moved_value = self._move_obj_tensors(attr_value, device)
             except RuntimeError as e:
                 logger.warning(
                     "[move_unregistered_tensors] attr move failed: module=%s attr=%s type=%s target=%s error=%r",
-                    mod_name,
-                    key,
-                    type(value),
+                    module.__class__.__name__,
+                    attr_name,
+                    type(attr_value),
                     device,
                     e,
                 )
                 raise
 
-            if new_value is not value:
-                attrs[key] = new_value
+            if moved_value is not attr_value:
+                attrs[attr_name] = moved_value
 
     def _move_modules(self, names: list[str], device: str) -> bool:
         """
@@ -611,26 +591,21 @@ class GPUWorker:
         targets = list(restore_map.keys())
         try:
             self._move_modules(targets, "cpu")
-        except RuntimeError as e:
+        except Exception as e:
             logger.warning(
-                "[SLEEP] release_memory_occupation failed. rank=%s error=%r",
-                self.rank,
-                e,
+                f"[SLEEP] release_memory_occupation failed. rank={self.rank} error={e}",
             )
             return {
                 "success": False,
                 "sleeping": False,
-                "message": "offload failed; rolled back to keep state consistent",
+                "message": f"offload failed; rolled back to keep state consistent: {e}",
             }
 
-        # Clear memory
-        dev = torch.get_device_module()  # cuda / xpu / etc (torch backend)
+        dev = torch.get_device_module()
         dev.synchronize()
         gc.collect()
         dev.empty_cache()
-        if dev is torch.cuda:
-            torch.cuda.ipc_collect()
-
+        torch.cuda.ipc_collect()
         self._sleep_restore_map = restore_map
         self._sleeping = True
         return {

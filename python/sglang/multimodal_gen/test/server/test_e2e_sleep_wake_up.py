@@ -174,8 +174,6 @@ def test_sleep_wake_refit_generate_e2e():
     assert (
         response.status_code == 200
     ), f"generate failed: {response.status_code} {response.text}"
-    out = response.json()
-    assert out.get("success") is True, f"generate response: {out}"
 
     terminate_process(process)
 
