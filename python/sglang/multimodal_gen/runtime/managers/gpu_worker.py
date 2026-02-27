@@ -565,6 +565,8 @@ class GPUWorker:
             logger.warning(
                 f"[_move_modules] move failed, rollback started: target={device} moved={moved} error={e}",
             )
+            # TODO (mengyang, chenyang): If exception is raised
+            # during rollback, the original exception detail is lost.
             for name in moved:
                 module = modules.get(name)
                 src_dev = src_device_map.get(name)
