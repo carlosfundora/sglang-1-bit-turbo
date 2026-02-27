@@ -25,10 +25,19 @@ and /resume_memory_occupation:
 
    https://github.com/sgl-project/sglang/issues/19441
 
-3. Trigger GPU memory resume via the `/resume_memory_occupation` endpoint
+3. Verify idempotency of release: repeated calls to /release_memory_occupation
+   should return 200 and keep the sleeping state.
+
+4. While sleeping, verify that /v1/images/generations rejects requests with
+   HTTP 400 and the response mentions the sleep state.
+
+5. Trigger GPU memory resume via the `/resume_memory_occupation` endpoint
    and verify that GPU memory usage increases accordingly.
 
-4. Perform an in-place model weight update using the
+6. Verify idempotency of resume: repeated calls to /resume_memory_occupation
+   should return 200 and keep the awake state.
+
+7. Perform an in-place model weight update using the
    `/update_weights_from_disk` endpoint without restarting the server.
 
     This is inherent with the usage in RL. SGLang Diffusion Server is slept
