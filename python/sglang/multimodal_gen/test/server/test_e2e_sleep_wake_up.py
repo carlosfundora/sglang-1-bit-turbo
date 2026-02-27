@@ -9,6 +9,7 @@ Chenyang Zhao, https://github.com/zhaochenyang20
 Menyang Liu, https://github.com/dreamyang-liu
 shuwen, https://github.com/alphabetc1
 Mook, https://github.com/Godmook
+Yuzhen Zhou, https://github.com/zyzshishui
 
 This test validates both functional correctness of /release_memory_occupation
 and /resume_memory_occupation:
@@ -92,7 +93,10 @@ def test_sleep_wake_refit_generate_e2e():
     )
     process, port = launch_server_cmd(cmd, host="127.0.0.1")
     base_url = f"http://127.0.0.1:{port}"
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    visible = (
+        os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+        or os.environ.get("HIP_VISIBLE_DEVICES", "").strip()
+    )
     first_visible = visible.split(",")[0].strip() if visible else ""
     gpu_index = int(first_visible) if first_visible.isdigit() else 0
     logger.info(f"Test start: model={_MODEL_ID} port={port} base_url={base_url}")

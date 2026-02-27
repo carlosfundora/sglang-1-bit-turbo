@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import random
+import shutil
+import socket
 import ssl
 import subprocess
 import sys
@@ -726,16 +728,27 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
 
 def query_gpu_mem_used_mib(gpu_index: int = 0) -> int:
     """Query the used memory of the 1 GPU runner in MiB."""
-    out = subprocess.check_output(
-        [
-            "nvidia-smi",
-            f"--id={gpu_index}",
-            "--query-gpu=memory.used",
-            "--format=csv,noheader,nounits",
-        ],
-        text=True,
-    ).strip()
-    return int(out.splitlines()[0].strip())
+    if shutil.which("nvidia-smi"):
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                f"--id={gpu_index}",
+                "--query-gpu=memory.used",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+        ).strip()
+        return int(out.splitlines()[0].strip())
+
+    if shutil.which("rocm-smi"):
+        out = subprocess.check_output(
+            ["rocm-smi", "-d", str(gpu_index), "--showmeminfo", "vram"],
+            text=True,
+        )
+        for line in out.splitlines():
+            if "VRAM Total Used Memory (B)" in line:
+                used_bytes = int(line.split(":")[-1].strip())
+                return used_bytes // (1024 * 1024)
 
 
 def post_request(
