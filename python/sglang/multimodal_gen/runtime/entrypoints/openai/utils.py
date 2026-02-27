@@ -266,7 +266,7 @@ async def process_generation_batch(
 
         if result.output is None and result.output_file_paths is None:
             error_msg = result.error or "Unknown error"
-            if "server is sleeping" in error_msg:
+            if "sleeping" in str(error_msg).lower():
                 raise HTTPException(
                     status_code=400,
                     detail={

@@ -4,7 +4,6 @@
 import asyncio
 import os
 import pickle
-import threading
 from collections import deque
 from copy import deepcopy
 from typing import Any, Callable, List
@@ -119,10 +118,6 @@ class Scheduler:
         self._max_consecutive_errors = 3
         self._consecutive_error_count = 0
 
-        # sleeping status
-        self._sleep_lock = threading.Lock()
-        self._sleeping: bool = False
-
     def _handle_set_lora(self, reqs: List[Any]) -> OutputBatch:
         # TODO: return set status
         # TODO: return with SetLoRAResponse or something more appropriate
@@ -166,7 +161,7 @@ class Scheduler:
         return OutputBatch(output=checksums)
 
     def _handle_generation(self, reqs: List[Req]):
-        if self._sleeping:
+        if self.worker.is_sleeping():
             return OutputBatch(
                 error="Server is sleeping. Call resume_memory_occupation first."
             )
@@ -453,50 +448,38 @@ class Scheduler:
         self,
         tag: str,
         operation_name: str,
-        require_sleeping: bool,
-        note: str,
         worker_call: Callable[[], dict[str, Any]],
-        next_sleeping_state: bool,
     ) -> OutputBatch:
         logger.info(f"[{tag}] {operation_name} on rank={self.gpu_id}")
-        with self._sleep_lock:
-            if self._sleeping != require_sleeping:
-                return OutputBatch(output={"sleeping": self._sleeping, "note": note})
 
-            try:
-                detail = worker_call()
-            except RuntimeError as e:
-                logger.exception(
-                    f"[{tag}] {operation_name} failed on rank={self.gpu_id}"
-                )
-                return OutputBatch(
-                    output={
-                        "sleeping": self._sleeping,
-                        "detail": {"success": False, "message": str(e)},
-                    }
-                )
+        try:
+            detail = worker_call()
+        except Exception as e:
+            logger.exception(f"[{tag}] {operation_name} failed on rank={self.gpu_id}")
+            detail = {"success": False, "message": str(e)}
 
-            if bool(detail.get("success", False)):
-                self._sleeping = next_sleeping_state
+        if not isinstance(detail, dict):
+            detail = {
+                "success": False,
+                "message": f"invalid worker response: {detail}",
+            }
 
-            return OutputBatch(output={"sleeping": self._sleeping, "detail": detail})
+        normalized_detail = dict(detail)
+        normalized_detail["success"] = bool(normalized_detail.get("success", False))
+        normalized_detail["sleeping"] = self.worker.is_sleeping()
+        normalized_detail.setdefault("message", "memory occupation operation finished")
+        return OutputBatch(output=normalized_detail)
 
     def _handle_release_memory_occupation(self, reqs: List[Any]) -> OutputBatch:
         return self._handle_memory_occupation(
             tag="SLEEP",
             operation_name="handle_release_memory_occupation",
-            require_sleeping=False,
-            note="already sleeping",
             worker_call=self.worker.release_memory_occupation,
-            next_sleeping_state=True,
         )
 
     def _handle_resume_memory_occupation(self, reqs: List[Any]) -> OutputBatch:
         return self._handle_memory_occupation(
             tag="WAKE",
             operation_name="handle_resume_memory_occupation",
-            require_sleeping=True,
-            note="already awake",
             worker_call=self.worker.resume_memory_occupation,
-            next_sleeping_state=False,
         )

@@ -107,6 +107,9 @@ class GPUWorker:
         self._sleeping: bool = False
         self._sleep_restore_map: dict[str, str] = {}
 
+    def is_sleeping(self) -> bool:
+        return self._sleeping
+
     def init_device_and_model(self) -> None:
         """Initialize the device and load the model."""
         torch.get_device_module().set_device(self.local_rank)
