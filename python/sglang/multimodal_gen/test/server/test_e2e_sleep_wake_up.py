@@ -10,6 +10,7 @@ Menyang Liu, https://github.com/dreamyang-liu
 shuwen, https://github.com/alphabetc1
 Mook, https://github.com/Godmook
 Yuzhen Zhou, https://github.com/zyzshishui
+Ratish P, https://github.com/Ratish1
 
 This test validates both functional correctness of /release_memory_occupation
 and /resume_memory_occupation:
