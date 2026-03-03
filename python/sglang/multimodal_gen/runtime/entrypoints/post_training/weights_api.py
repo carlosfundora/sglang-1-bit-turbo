@@ -67,7 +67,11 @@ async def get_weights_checksum(request: Request):
     return ORJSONResponse(response.output, status_code=200)
 
 
-async def _handle_memory_occupation_request(req_class: type):
+async def _handle_memory_occupation_request(
+    req_class: (
+        type[ReleaseMemoryOccupationReqInput] | type[ResumeMemoryOccupationReqInput]
+    ),
+):
     """Handle memory sleep/wake requests forwarded to scheduler."""
     try:
         response = await async_scheduler_client.forward(req_class())

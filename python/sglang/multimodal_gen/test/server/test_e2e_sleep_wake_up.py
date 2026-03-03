@@ -157,9 +157,7 @@ def test_sleep_wake_refit_generate_e2e():
         )
 
         mem_after_sleep = query_gpu_mem_used_mib(gpu_index)
-        min_sleep_delta = int(
-            os.environ.get("SGLANG_MMGEN_SLEEP_MEM_DELTA_MIB", "1024")
-        )
+        min_sleep_delta = int(os.environ.get("SGLD_MMGEN_SLEEP_MEM_DELTA_MIB", "1024"))
         _assert_mem_changed(
             "sleep (baseline -> after sleep)",
             mem_before_sleep,
@@ -206,7 +204,7 @@ def test_sleep_wake_refit_generate_e2e():
         )
 
         mem_after_wake = query_gpu_mem_used_mib(gpu_index)
-        min_wake_delta = int(os.environ.get("SGLANG_MMGEN_WAKE_MEM_DELTA_MIB", "1024"))
+        min_wake_delta = int(os.environ.get("SGLD_MMGEN_WAKE_MEM_DELTA_MIB", "1024"))
         _assert_mem_changed(
             "wake (after sleep -> after wake)",
             mem_after_sleep,

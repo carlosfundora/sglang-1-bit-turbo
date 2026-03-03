@@ -526,7 +526,7 @@ class GPUWorker:
                 logger.warning(
                     f"[move_unregistered_tensors] attr move failed: module={module.__class__.__name__} attr={attr_name} type={type(attr_value)} target={device} error={e}",
                 )
-                raise e
+                raise
 
             if moved_value is not attr_value:
                 attrs[attr_name] = moved_value

@@ -24,7 +24,10 @@ from sglang.multimodal_gen.runtime.entrypoints.utils import (
     format_lora_message,
     save_outputs,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
+from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
+    SLEEPING_ERROR_PREFIX,
+    OutputBatch,
+)
 from sglang.multimodal_gen.runtime.scheduler_client import AsyncSchedulerClient
 from sglang.multimodal_gen.runtime.server_args import get_global_server_args
 from sglang.multimodal_gen.runtime.utils.logging_utils import (
@@ -266,7 +269,7 @@ async def process_generation_batch(
 
         if result.output is None and result.output_file_paths is None:
             error_msg = result.error or "Unknown error"
-            if "sleeping" in str(error_msg).lower():
+            if str(error_msg).startswith(SLEEPING_ERROR_PREFIX):
                 raise HTTPException(
                     status_code=400,
                     detail={
