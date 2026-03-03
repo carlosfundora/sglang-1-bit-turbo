@@ -146,6 +146,11 @@ class Scheduler:
 
     def _handle_update_weights_from_disk(self, reqs: List[Any]) -> OutputBatch:
         """Handle update_weights_from_disk request for RL workflows."""
+        if self.worker.is_sleeping():
+            return OutputBatch(
+                error="Cannot update weights while the server is sleeping. "
+                "Call resume_memory_occupation first."
+            )
         req = reqs[0]
         success, message = self.worker.update_weights_from_disk(
             model_path=req.model_path,

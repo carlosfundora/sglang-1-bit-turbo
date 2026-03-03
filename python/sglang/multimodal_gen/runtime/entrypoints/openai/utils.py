@@ -302,6 +302,7 @@ async def process_generation_batch(
                 upscaling_model_path=batch.upscaling_model_path,
                 upscaling_scale=batch.upscaling_scale,
             )
+
     total_time = time.perf_counter() - total_start_time
     log_batch_completion(logger, 1, total_time)
 
