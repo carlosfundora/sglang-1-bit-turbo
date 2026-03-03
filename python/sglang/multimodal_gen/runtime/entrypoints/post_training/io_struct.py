@@ -1,4 +1,8 @@
-"""Request/response data structures for post-training APIs."""
+"""Request/response data structures for post-training APIs.
+
+TODO(Shuwen, Chenyang): Split RL-oriented request types and serving-oriented
+request types into dedicated files.
+"""
 
 from dataclasses import dataclass
 

@@ -76,6 +76,61 @@ OOM detected. Possible solutions:
 """
 
 
+def _get_module_device(module: torch.nn.Module) -> str:
+    """Return best-effort device string for a module."""
+    param = next(module.parameters(), None)
+    if param is not None:
+        return str(param.device)
+    buffer = next(module.buffers(), None)
+    if buffer is not None:
+        return str(buffer.device)
+
+    for key, val in vars(module).items():
+        if key.startswith("_"):
+            continue
+        if isinstance(val, torch.Tensor):
+            return str(val.device)
+
+    return "cpu"
+
+
+def _move_unregistered_tensors(module: torch.nn.Module, device: str) -> None:
+    """
+    Move tensor attributes that are not covered by `module.to(device)`.
+
+    `module.to` handles parameters/buffers/submodules, but some models keep tensor
+    caches in plain Python attributes. We traverse `module.__dict__` and move tensor
+    leaves inside tensors / dict / list / tuple while keeping non-tensor objects.
+    """
+
+    def move_tensors(obj):
+        if torch.is_tensor(obj):
+            return obj.to(device)
+        if isinstance(obj, dict):
+            return {k: move_tensors(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [move_tensors(v) for v in obj]
+        if isinstance(obj, tuple):
+            return tuple(move_tensors(v) for v in obj)
+        return obj
+
+    attrs = module.__dict__
+    for attr_name, attr_value in list(attrs.items()):
+        if attr_name in {"_parameters", "_buffers", "_modules"}:
+            continue
+
+        try:
+            moved_value = move_tensors(attr_value)
+        except Exception as e:
+            logger.warning(
+                f"[move_unregistered_tensors] attr move failed: module={module.__class__.__name__} attr={attr_name} type={type(attr_value)} target={device} error={e}",
+            )
+            raise
+
+        if moved_value is not attr_value:
+            attrs[attr_name] = moved_value
+
+
 class GPUWorker:
     """
     A worker that executes the model on a single GPU.
@@ -478,59 +533,6 @@ class GPUWorker:
             )
         return checksums
 
-    def _get_module_device(self, module: torch.nn.Module) -> str:
-        """Return best-effort device string for a module."""
-        param = next(module.parameters(), None)
-        if param is not None:
-            return str(param.device)
-        buffer = next(module.buffers(), None)
-        if buffer is not None:
-            return str(buffer.device)
-
-        for key, val in vars(module).items():
-            if key.startswith("_"):
-                continue
-            if isinstance(val, torch.Tensor):
-                return str(val.device)
-
-        return "cpu"
-
-    def _move_unregistered_tensors(self, module: torch.nn.Module, device: str) -> None:
-        """
-        Move tensor attributes that are not covered by `module.to(device)`.
-
-        `module.to` handles parameters/buffers/submodules, but some models keep tensor
-        caches in plain Python attributes. We traverse `module.__dict__` and move tensor
-        leaves inside tensors / dict / list / tuple while keeping non-tensor objects.
-        """
-
-        def move_tensors(obj):
-            if torch.is_tensor(obj):
-                return obj.to(device)
-            if isinstance(obj, dict):
-                return {k: move_tensors(v) for k, v in obj.items()}
-            if isinstance(obj, list):
-                return [move_tensors(v) for v in obj]
-            if isinstance(obj, tuple):
-                return tuple(move_tensors(v) for v in obj)
-            return obj
-
-        attrs = module.__dict__
-        for attr_name, attr_value in list(attrs.items()):
-            if attr_name in {"_parameters", "_buffers", "_modules"}:
-                continue
-
-            try:
-                moved_value = move_tensors(attr_value)
-            except Exception as e:
-                logger.warning(
-                    f"[move_unregistered_tensors] attr move failed: module={module.__class__.__name__} attr={attr_name} type={type(attr_value)} target={device} error={e}",
-                )
-                raise
-
-            if moved_value is not attr_value:
-                attrs[attr_name] = moved_value
-
     def _move_modules(self, names: list[str], device: str) -> bool:
         """
         Move selected modules to device.
@@ -557,10 +559,10 @@ class GPUWorker:
                         f"module not found during move: name={name}, target={device}"
                     )
 
-                src_device_map[name] = self._get_module_device(module)
+                src_device_map[name] = _get_module_device(module)
                 module.to(device)
                 moved.append(name)
-                self._move_unregistered_tensors(module, device)
+                _move_unregistered_tensors(module, device)
         except Exception as e:
             logger.warning(
                 f"[_move_modules] move failed, rollback started: target={device} moved={moved} error={e}",
@@ -571,7 +573,7 @@ class GPUWorker:
                 module = modules.get(name)
                 src_dev = src_device_map.get(name)
                 module.to(src_dev)
-                self._move_unregistered_tensors(module, src_dev)
+                _move_unregistered_tensors(module, src_dev)
             raise RuntimeError(
                 f"failed to move modules to {device}; rollback finished: error={e}"
             ) from e
@@ -594,7 +596,7 @@ class GPUWorker:
             restore_map: dict[str, str] = {}
             for name, m in modules.items():
                 try:
-                    dev_str = self._get_module_device(m)
+                    dev_str = _get_module_device(m)
                 except RuntimeError as e:
                     logger.debug(
                         f"[SLEEP] module device query failed; skip module. rank={self.rank} module={name} error={e}",
