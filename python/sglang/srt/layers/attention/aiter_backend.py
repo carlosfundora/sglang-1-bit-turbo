@@ -21,10 +21,9 @@ from sglang.srt.layers.dp_attention import (
     get_attention_tp_size,
     is_dp_attention_enabled,
 )
+from sglang.srt.layers.radix_attention import AttentionType
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.utils import is_gfx95_supported, is_hip
-
-from sglang.srt.layers.radix_attention import AttentionType
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
