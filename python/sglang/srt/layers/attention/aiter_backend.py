@@ -2027,12 +2027,11 @@ class AiterAttnBackend(AttentionBackend):
         sinks=None,
     ):
         self.logits_soft_cap = layer.logit_cap
-        if layer.is_cross_attention or layer.attn_type == AttentionType.ENCODER_ONLY:
-            causal = False
-        else:
-            causal = True
         if layer.attn_type == AttentionType.ENCODER_ONLY:
+            causal = False
             save_kv_cache = False
+        else:
+            causal = not layer.is_cross_attention
 
         cache_loc = (
             forward_batch.out_cache_loc
