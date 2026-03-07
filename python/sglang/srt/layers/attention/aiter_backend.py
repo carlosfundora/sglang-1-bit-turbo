@@ -2028,7 +2028,6 @@ class AiterAttnBackend(AttentionBackend):
         self.logits_soft_cap = layer.logit_cap
         if layer.attn_type == AttentionType.ENCODER_ONLY:
             causal = False
-            save_kv_cache = False
         else:
             causal = not layer.is_cross_attention
 
