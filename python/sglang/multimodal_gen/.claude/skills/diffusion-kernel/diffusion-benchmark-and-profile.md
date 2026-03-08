@@ -321,7 +321,7 @@ ncu --graph-profiling node \
       --model-path=black-forest-labs/FLUX.1-dev \
       --prompt="test" --width=1024 --height=1024 \
       --num-inference-steps=5 --seed=42 \
-      --enable-piecewise-cuda-graph
+      --enable-cuda-graph
 ```
 
 #### Reading ncu results (CLI, no GUI needed)

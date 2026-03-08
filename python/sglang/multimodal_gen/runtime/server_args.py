@@ -271,6 +271,7 @@ class ServerArgs:
 
     # Compilation
     enable_torch_compile: bool = False
+    enable_cuda_graph: bool = False
     enable_piecewise_cuda_graph: bool = False
 
     # warmup
@@ -604,6 +605,18 @@ class ServerArgs:
         # configure logger before use
         configure_logger(server_args=self)
 
+        # Backward/forward compatibility for CUDA graph flag.
+        # Prefer the new name enable_cuda_graph, but keep the legacy
+        # enable_piecewise_cuda_graph working.
+        if getattr(self, "enable_piecewise_cuda_graph", False) and not getattr(
+            self, "enable_cuda_graph", False
+        ):
+            self.enable_cuda_graph = True
+        if getattr(self, "enable_cuda_graph", False) and not getattr(
+            self, "enable_piecewise_cuda_graph", False
+        ):
+            self.enable_piecewise_cuda_graph = True
+
         # 1. adjust parameters
         self._adjust_parameters()
 
@@ -763,10 +776,12 @@ class ServerArgs:
             + "However, will likely cause precision drifts. See (https://github.com/pytorch/pytorch/issues/145213)",
         )
         parser.add_argument(
+            "--enable-cuda-graph",
             "--enable-piecewise-cuda-graph",
             action=StoreBoolean,
-            default=ServerArgs.enable_piecewise_cuda_graph,
-            help="Enable diffusion piecewise CUDA graph (PCG) for image denoising stages.",
+            dest="enable_cuda_graph",
+            default=ServerArgs.enable_cuda_graph,
+            help="Enable diffusion CUDA graph capture/replay for image denoising stages.",
         )
 
         # warmup
