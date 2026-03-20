@@ -236,6 +236,6 @@ class MambaComponent(TreeComponent):
                     req, mamba_ping_pong_track_buffer_to_keep=keep_idx
                 )
         else:
-            if insert_result is not None and insert_result.mamba_exist:
+            if insert_result is None or insert_result.mamba_exist:
                 self.cache.req_to_token_pool.mamba_pool.free(insert_params.mamba_value)
             req.mamba_last_track_seqlen = None

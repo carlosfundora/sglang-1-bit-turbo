@@ -400,6 +400,8 @@ class HybridRadixCache(BasePrefixCache):
 
         if effective_cache_len <= 0:
             req.prefix_indices = kv_indices_orig.to(dtype=torch.int64, copy=True)
+            for comp in self.components.values():
+                comp.cleanup_after_caching_req(req, None, insert_params, False)
             return
 
         kv_indices = kv_indices_orig[:effective_cache_len]
