@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
@@ -20,6 +21,9 @@ from sglang.srt.utils.common import ceil_align
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
+
+
+logger = logging.getLogger(__name__)
 
 
 class _VirtualNode:
@@ -248,6 +252,12 @@ class SessionAwareCache(BasePrefixCache):
         slot = self.slots.pop(session_id, None)
         if slot is None:
             return
+        tokens_freed = (
+            max(0, slot.kv_allocated_len - slot.cache_protected_len)
+            if slot.is_holding_kv
+            else 0
+        )
+        logger.info("Session KV released: %s (%d tokens freed)", session_id, tokens_freed)
 
         if slot.last_node is not None:
             if slot.swa_uuid_for_lock is not None:
