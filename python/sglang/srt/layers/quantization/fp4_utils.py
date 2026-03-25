@@ -37,6 +37,9 @@ class Fp4GemmRunnerBackend(Enum):
     def is_flashinfer_trtllm(self) -> bool:
         return self == Fp4GemmRunnerBackend.FLASHINFER_TRTLLM
 
+    def is_flashinfer(self) -> bool:
+        return self.value.startswith("flashinfer_")
+
     def get_flashinfer_backend(self) -> str:
         """Get the backend string to pass to FlashInfer's mm_fp4 API.
 

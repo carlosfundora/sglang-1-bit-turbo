@@ -140,7 +140,7 @@ def fp4_gemm(
     out_features: int,
 ) -> torch.Tensor:
     fp4_backend = get_fp4_gemm_runner_backend()
-    if fp4_backend.is_cutlass():
+    if fp4_backend.is_cutlass() and cutlass_fp4_gemm is not None:
         # flashinfer.fp4_quantize returns scale factors as uint8 (e4m3fn bits
         # stored in uint8 memory). The JIT kernel requires float8_e4m3fn dtype.
         if input_sf.dtype != torch.float8_e4m3fn:

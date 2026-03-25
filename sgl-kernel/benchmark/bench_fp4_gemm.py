@@ -361,7 +361,7 @@ if __name__ == "__main__":
     if args.csv:
         with open(args.csv, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["provider", "m", "n", "k", "time_ms"])
+            writer.writerow(["provider", "m", "n", "k", "time_ms", "bandwidth_gbs"])
 
     major, minor = get_device_capability()
     if not (is_sm100_supported() or is_sm120_supported()):

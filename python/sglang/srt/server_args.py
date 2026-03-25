@@ -4620,7 +4620,8 @@ class ServerArgs:
             dest="fp4_gemm_runner_backend",
             help="Choose the runner backend for NVFP4 GEMM operations. "
             "Options: 'auto' (default; selects flashinfer_cudnn on SM120, flashinfer_cutlass otherwise), "
-            "'flashinfer_cutlass' (CUTLASS backend), "
+            "'cutlass' (SGLang CUTLASS kernel), "
+            "'flashinfer_cutlass' (FlashInfer CUTLASS backend), "
             "'flashinfer_cudnn' (FlashInfer cuDNN backend, optimal on CUDA 13+ with cuDNN 9.15+), "
             "'flashinfer_trtllm' (FlashInfer TensorRT-LLM backend, requires different weight preparation with shuffling). "
             "NOTE: This replaces the deprecated environment variable "
