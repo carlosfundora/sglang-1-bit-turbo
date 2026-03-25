@@ -22,7 +22,9 @@ from sglang.srt.server_args import get_global_server_args
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
-    from sglang.srt.mem_cache.unified_cache_components.unified_radix_cache import UnifiedTreeNode
+    from sglang.srt.mem_cache.unified_cache_components.unified_radix_cache import (
+        UnifiedTreeNode,
+    )
 
 
 class MambaComponent(TreeComponent):

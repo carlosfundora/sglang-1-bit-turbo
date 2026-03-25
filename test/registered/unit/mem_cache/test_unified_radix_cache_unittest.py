@@ -17,11 +17,13 @@ from sglang.srt.mem_cache.base_prefix_cache import (
 )
 from sglang.srt.mem_cache.cache_init_params import CacheInitParams
 from sglang.srt.mem_cache.common import available_and_evictable_str
-from sglang.srt.mem_cache.unified_cache_components.unified_radix_cache import UnifiedRadixCache
-from sglang.srt.mem_cache.unified_cache_components.tree_component import ComponentName
 from sglang.srt.mem_cache.memory_pool import HybridLinearKVPool, HybridReqToTokenPool
 from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool, SWATokenToKVPoolAllocator
+from sglang.srt.mem_cache.unified_cache_components.tree_component import ComponentName
+from sglang.srt.mem_cache.unified_cache_components.unified_radix_cache import (
+    UnifiedRadixCache,
+)
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs, set_global_server_args_for_scheduler
 from sglang.srt.utils import get_device
@@ -125,7 +127,7 @@ class TestUnifiedRadixCacheMamba(unittest.TestCase):
                 page_size=_PAGE_SIZE,
                 disable=False,
             ),
-            component_names=(ComponentName.MAMBA,)
+            component_names=(ComponentName.MAMBA,),
         )
 
         def make_req():

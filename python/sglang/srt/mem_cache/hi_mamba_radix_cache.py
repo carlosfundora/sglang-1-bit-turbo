@@ -23,10 +23,6 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     MatchResult,
 )
 from sglang.srt.mem_cache.hicache_storage import PoolHitPolicy, PoolName, PoolTransfer
-from sglang.srt.mem_cache.unified_cache_components.hybrid_cache_controller import (
-    HybridCacheController,
-    PrefetchOperation,
-)
 from sglang.srt.mem_cache.mamba_radix_cache import (
     LRUList,
     MambaRadixCache,
@@ -45,6 +41,10 @@ from sglang.srt.mem_cache.radix_cache import (
     RadixKey,
     compute_node_hash_values,
     split_node_hash_value,
+)
+from sglang.srt.mem_cache.unified_cache_components.hybrid_cache_controller import (
+    HybridCacheController,
+    PrefetchOperation,
 )
 from sglang.srt.observability.metrics_collector import StorageMetricsCollector
 from sglang.srt.utils import bind_to_closest_numa_node_cuda

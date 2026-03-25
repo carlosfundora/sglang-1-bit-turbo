@@ -24,16 +24,6 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     MatchPrefixParams,
     MatchResult,
 )
-from sglang.srt.mem_cache.unified_cache_components import (
-    BASE_COMPONENT_NAME,
-    ComponentData,
-    ComponentName,
-    FullComponent,
-    MambaComponent,
-    SWAComponent,
-    TreeComponent,
-    get_last_access_time,
-)
 from sglang.srt.mem_cache.memory_pool import HybridReqToTokenPool
 from sglang.srt.mem_cache.radix_cache import (
     RadixKey,
@@ -44,6 +34,16 @@ from sglang.srt.mem_cache.radix_cache import (
     page_align_keys,
 )
 from sglang.srt.mem_cache.swa_memory_pool import SWATokenToKVPoolAllocator
+from sglang.srt.mem_cache.unified_cache_components import (
+    BASE_COMPONENT_NAME,
+    ComponentData,
+    ComponentName,
+    FullComponent,
+    MambaComponent,
+    SWAComponent,
+    TreeComponent,
+    get_last_access_time,
+)
 from sglang.srt.mem_cache.utils import convert_to_bigram_key
 
 if TYPE_CHECKING:
