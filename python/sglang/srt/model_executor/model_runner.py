@@ -1972,28 +1972,20 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         if self.server_args.disable_flashinfer_autotune:
             return False
 
-        major, _ = torch.cuda.get_device_capability()
-        if major < 9:
-            return False
-
-        # Check if MOE runner backend requires autotune
         backend_str = self.server_args.moe_runner_backend
-        moe_needs_autotune = backend_str in [
+
+        # TODO smor- support other cases for flashinfer autotune, such as, mamba backend
+
+        if backend_str not in [
             "flashinfer_trtllm",
             "flashinfer_mxfp4",
             # TODO: flashinfer_cutlass will cause some flashinfer compilation errors. To be fixed.
             # "flashinfer_cutlass",
-        ]
+        ]:
+            return False
 
-        # Check if FP4 GEMM backend is a FlashInfer backend (requires autotune)
-        from sglang.srt.layers.quantization.fp4_utils import (
-            get_fp4_gemm_runner_backend,
-        )
-
-        fp4_backend = get_fp4_gemm_runner_backend()
-        fp4_needs_autotune = fp4_backend.is_flashinfer()
-
-        if not moe_needs_autotune and not fp4_needs_autotune:
+        major, _ = torch.cuda.get_device_capability()
+        if major < 9:
             return False
 
         if (
