@@ -11,7 +11,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     InsertParams,
     InsertResult,
 )
-from sglang.srt.mem_cache.hybrid_cache.tree_component import (
+from sglang.srt.mem_cache.unified_cache_components.tree_component import (
     ComponentName,
     TreeComponent,
     gen_component_uuid,
@@ -19,7 +19,7 @@ from sglang.srt.mem_cache.hybrid_cache.tree_component import (
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
-    from sglang.srt.mem_cache.hybrid_cache.hybrid_radix_cache import HybridTreeNode
+    from sglang.srt.mem_cache.unified_cache_components.unified_radix_cache import UnifiedTreeNode
 
 
 class SWAComponent(TreeComponent):
@@ -41,12 +41,12 @@ class SWAComponent(TreeComponent):
             full_indices
         )
 
-    def create_match_validator(self) -> Callable[[HybridTreeNode], bool]:
+    def create_match_validator(self) -> Callable[[UnifiedTreeNode], bool]:
         sliding_window_size = self.cache.sliding_window_size
         name = self.name
         state = {"len": float("inf")}
 
-        def validator(node: HybridTreeNode) -> bool:
+        def validator(node: UnifiedTreeNode) -> bool:
             if node.component_value(name) is None:
                 state["len"] = 0
                 return False
@@ -57,7 +57,7 @@ class SWAComponent(TreeComponent):
 
     def update_component_on_insert_overlap(
         self,
-        node: HybridTreeNode,
+        node: UnifiedTreeNode,
         prefix_len: int,
         total_prefix_len: int,
         value_slice: torch.Tensor,
@@ -109,7 +109,7 @@ class SWAComponent(TreeComponent):
 
     def commit_insert_component_data(
         self,
-        node: HybridTreeNode,
+        node: UnifiedTreeNode,
         is_new_leaf: bool,
         params: InsertParams,
         result: InsertResult,
@@ -136,7 +136,7 @@ class SWAComponent(TreeComponent):
             self.cache.component_evictable_size_[self.name] += len(swa_value)
 
     def redistribute_on_node_split(
-        self, new_parent: HybridTreeNode, child: HybridTreeNode
+        self, new_parent: UnifiedTreeNode, child: UnifiedTreeNode
     ):
         new_parent.component(self.name).lock_ref = child.component(self.name).lock_ref
 
@@ -156,7 +156,7 @@ class SWAComponent(TreeComponent):
         ).metadata.get("uuid")
         child.component(self.name).metadata.pop("uuid", None)
 
-    def evict_component(self, node: HybridTreeNode, is_leaf: bool) -> int:
+    def evict_component(self, node: UnifiedTreeNode, is_leaf: bool) -> int:
         swa_value = node.component_value(self.name)
         if swa_value is None:
             return 0
@@ -194,7 +194,7 @@ class SWAComponent(TreeComponent):
                 x = lru.get_lru_no_lock()
 
     def acquire_component_lock(
-        self, node: HybridTreeNode, result: IncLockRefResult
+        self, node: UnifiedTreeNode, result: IncLockRefResult
     ) -> IncLockRefResult:
         sliding_window_size = self.cache.sliding_window_size
         swa_lock_size = 0
@@ -221,7 +221,7 @@ class SWAComponent(TreeComponent):
         return result
 
     def release_component_lock(
-        self, node: HybridTreeNode, params: Optional[DecLockRefParams]
+        self, node: UnifiedTreeNode, params: Optional[DecLockRefParams]
     ) -> None:
         swa_uuid_for_lock = params.swa_uuid_for_lock if params else None
         dec_swa = True

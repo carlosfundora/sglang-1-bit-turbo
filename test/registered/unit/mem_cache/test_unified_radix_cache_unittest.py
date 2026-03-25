@@ -1,4 +1,4 @@
-"""Unit tests for HybridRadixCache"""
+"""Unit tests for UnifiedRadixCache"""
 
 import unittest
 
@@ -17,8 +17,8 @@ from sglang.srt.mem_cache.base_prefix_cache import (
 )
 from sglang.srt.mem_cache.cache_init_params import CacheInitParams
 from sglang.srt.mem_cache.common import available_and_evictable_str
-from sglang.srt.mem_cache.hybrid_cache.hybrid_radix_cache import HybridRadixCache
-from sglang.srt.mem_cache.hybrid_cache.tree_component import ComponentName
+from sglang.srt.mem_cache.unified_cache_components.unified_radix_cache import UnifiedRadixCache
+from sglang.srt.mem_cache.unified_cache_components.tree_component import ComponentName
 from sglang.srt.mem_cache.memory_pool import HybridLinearKVPool, HybridReqToTokenPool
 from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool, SWATokenToKVPoolAllocator
@@ -57,8 +57,8 @@ def _swa_attention_layer_ids():
 # ===================================================================
 # Test: Full + Mamba components (no SWA)
 # ===================================================================
-class TestHybridRadixCacheMamba(unittest.TestCase):
-    """HybridRadixCache with (Full, Mamba) components."""
+class TestUnifiedRadixCacheMamba(unittest.TestCase):
+    """UnifiedRadixCache with (Full, Mamba) components."""
 
     @classmethod
     def setUpClass(cls):
@@ -118,14 +118,14 @@ class TestHybridRadixCacheMamba(unittest.TestCase):
             kvcache=pool,
             need_sort=False,
         )
-        tree = HybridRadixCache(
+        tree = UnifiedRadixCache(
             params=CacheInitParams(
                 req_to_token_pool=req_to_token_pool,
                 token_to_kv_pool_allocator=allocator,
                 page_size=_PAGE_SIZE,
                 disable=False,
             ),
-            component_names=(ComponentName.MAMBA,),
+            component_names=(ComponentName.MAMBA,)
         )
 
         def make_req():
@@ -406,8 +406,8 @@ class TestHybridRadixCacheMamba(unittest.TestCase):
 # ===================================================================
 # Test: Full + SWA + Mamba components
 # ===================================================================
-class TestHybridRadixCacheSWAMamba(unittest.TestCase):
-    """HybridRadixCache with (Full, SWA, Mamba) components — the most complex config."""
+class TestUnifiedRadixCacheSWAMamba(unittest.TestCase):
+    """UnifiedRadixCache with (Full, SWA, Mamba) components — the most complex config."""
 
     @classmethod
     def setUpClass(cls):
@@ -473,7 +473,7 @@ class TestHybridRadixCacheSWAMamba(unittest.TestCase):
             need_sort=False,
         )
 
-        tree = HybridRadixCache(
+        tree = UnifiedRadixCache(
             params=CacheInitParams(
                 req_to_token_pool=req_to_token_pool,
                 token_to_kv_pool_allocator=allocator,

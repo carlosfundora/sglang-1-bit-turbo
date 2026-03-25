@@ -7,13 +7,13 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     EvictParams,
     IncLockRefResult,
 )
-from sglang.srt.mem_cache.hybrid_cache.tree_component import (
+from sglang.srt.mem_cache.unified_cache_components.tree_component import (
     ComponentName,
     TreeComponent,
 )
 
 if TYPE_CHECKING:
-    from sglang.srt.mem_cache.hybrid_cache.hybrid_radix_cache import HybridTreeNode
+    from sglang.srt.mem_cache.unified_cache_components.unified_radix_cache import UnifiedTreeNode
 
 
 class FullComponent(TreeComponent):
@@ -21,19 +21,19 @@ class FullComponent(TreeComponent):
     def name(self) -> ComponentName:
         return ComponentName.FULL
 
-    def node_has_component_data(self, node: HybridTreeNode) -> bool:
+    def node_has_component_data(self, node: UnifiedTreeNode) -> bool:
         # Override so _for_each_component_lru includes Full in LRU operations
         return node.full_value is not None
 
-    def create_match_validator(self) -> Callable[[HybridTreeNode], bool]:
+    def create_match_validator(self) -> Callable[[UnifiedTreeNode], bool]:
         return lambda node: True
 
     def redistribute_on_node_split(
-        self, new_parent: HybridTreeNode, child: HybridTreeNode
+        self, new_parent: UnifiedTreeNode, child: UnifiedTreeNode
     ):
         new_parent.component(self.name).lock_ref = child.component(self.name).lock_ref
 
-    def evict_component(self, node: HybridTreeNode, is_leaf: bool) -> int:
+    def evict_component(self, node: UnifiedTreeNode, is_leaf: bool) -> int:
         self.cache.token_to_kv_pool_allocator.free(node.full_value)
         freed = len(node.full_value)
         self.cache.component_evictable_size_[self.name] -= freed
@@ -55,7 +55,7 @@ class FullComponent(TreeComponent):
             self.cache._cascade_evict(x, self, tracker)
 
     def acquire_component_lock(
-        self, node: HybridTreeNode, result: IncLockRefResult
+        self, node: UnifiedTreeNode, result: IncLockRefResult
     ) -> IncLockRefResult:
         cur = node
         while cur != self.cache.root_node:
@@ -67,7 +67,7 @@ class FullComponent(TreeComponent):
         return result
 
     def release_component_lock(
-        self, node: HybridTreeNode, params: Optional[DecLockRefParams]
+        self, node: UnifiedTreeNode, params: Optional[DecLockRefParams]
     ) -> None:
         cur = node
         while cur != self.cache.root_node:

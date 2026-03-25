@@ -748,12 +748,12 @@ class Scheduler(
                     self.tree_cache.cache_controller.layer_done_counter
                 )
             elif self.is_hybrid_swa or self.is_hybrid_ssm:
-                if server_args.enable_hybrid_radix_tree:
-                    from sglang.srt.mem_cache.hybrid_cache.hybrid_radix_cache import (
-                        create_hybrid_radix_cache,
+                if server_args.enable_unified_radix_tree:
+                    from sglang.srt.mem_cache.unified_cache_components.unified_radix_cache import (
+                        create_unified_radix_cache,
                     )
 
-                    self.tree_cache = create_hybrid_radix_cache(params)
+                    self.tree_cache = create_unified_radix_cache(params)
                 elif self.is_hybrid_swa:
                     from sglang.srt.mem_cache.swa_radix_cache import SWARadixCache
 

@@ -24,7 +24,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     MatchPrefixParams,
     MatchResult,
 )
-from sglang.srt.mem_cache.hybrid_cache import (
+from sglang.srt.mem_cache.unified_cache_components import (
     BASE_COMPONENT_NAME,
     ComponentData,
     ComponentName,
@@ -51,12 +51,12 @@ if TYPE_CHECKING:
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
 
 
-class HybridTreeNode:
+class UnifiedTreeNode:
     counter = 0
 
     def __init__(self, component_names: list[str]):
-        self.children = defaultdict(partial(HybridTreeNode, component_names))
-        self.parent: HybridTreeNode | None = None
+        self.children = defaultdict(partial(UnifiedTreeNode, component_names))
+        self.parent: UnifiedTreeNode | None = None
         self.key: Optional[RadixKey] = None
         self.component_names = list(component_names)
         self.component_data = {
@@ -65,14 +65,14 @@ class HybridTreeNode:
         self.last_access_time = get_last_access_time()
         self.host_value = None
         self.hit_count = 0
-        self.lru_prev: dict[str, HybridTreeNode | None] = {
+        self.lru_prev: dict[str, UnifiedTreeNode | None] = {
             component_name: None for component_name in self.component_names
         }
-        self.lru_next: dict[str, HybridTreeNode | None] = {
+        self.lru_next: dict[str, UnifiedTreeNode | None] = {
             component_name: None for component_name in self.component_names
         }
-        self.id = HybridTreeNode.counter
-        HybridTreeNode.counter += 1
+        self.id = UnifiedTreeNode.counter
+        UnifiedTreeNode.counter += 1
 
     def component(self, name: str) -> ComponentData:
         return self.component_data[name]
@@ -91,30 +91,30 @@ class HybridTreeNode:
     def set_component_value(self, name: str, value: Optional[torch.Tensor]) -> None:
         self.component(name).value = value
 
-    def __lt__(self, other: HybridTreeNode):
+    def __lt__(self, other: UnifiedTreeNode):
         return self.last_access_time < other.last_access_time
 
 
-class HybridLRUList:
+class UnifiedLRUList:
     def __init__(self, component_name: str, component_names: list[str]):
         self.component_name = component_name
-        self.head = HybridTreeNode(component_names)
-        self.tail = HybridTreeNode(component_names)
+        self.head = UnifiedTreeNode(component_names)
+        self.tail = UnifiedTreeNode(component_names)
         self.head.lru_next[component_name] = self.tail
         self.tail.lru_prev[component_name] = self.head
-        self.cache: dict[int, HybridTreeNode] = {}
+        self.cache: dict[int, UnifiedTreeNode] = {}
 
-    def _add_node_after(self, old_node: HybridTreeNode, new_node: HybridTreeNode):
+    def _add_node_after(self, old_node: UnifiedTreeNode, new_node: UnifiedTreeNode):
         component_name = self.component_name
         new_node.lru_prev[component_name] = old_node
         new_node.lru_next[component_name] = old_node.lru_next[component_name]
         old_node.lru_next[component_name].lru_prev[component_name] = new_node
         old_node.lru_next[component_name] = new_node
 
-    def _add_node(self, node: HybridTreeNode):
+    def _add_node(self, node: UnifiedTreeNode):
         self._add_node_after(self.head, node)
 
-    def _remove_node(self, node: HybridTreeNode):
+    def _remove_node(self, node: UnifiedTreeNode):
         component_name = self.component_name
         node.lru_prev[component_name].lru_next[component_name] = node.lru_next[
             component_name
@@ -123,25 +123,25 @@ class HybridLRUList:
             component_name
         ]
 
-    def insert_mru(self, node: HybridTreeNode):
+    def insert_mru(self, node: UnifiedTreeNode):
         assert node.id not in self.cache
         self.cache[node.id] = node
         self._add_node(node)
 
-    def remove_node(self, node: HybridTreeNode):
+    def remove_node(self, node: UnifiedTreeNode):
         assert node.id in self.cache
         del self.cache[node.id]
         self._remove_node(node)
 
-    def reset_node_mru(self, node: HybridTreeNode):
+    def reset_node_mru(self, node: UnifiedTreeNode):
         assert node.id in self.cache
         self._remove_node(node)
         self._add_node(node)
 
     def reset_node_and_parents_mru(
         self,
-        node: HybridTreeNode,
-        root_node: HybridTreeNode,
+        node: UnifiedTreeNode,
+        root_node: UnifiedTreeNode,
         should_include,
     ):
         prev_node = self.head
@@ -153,10 +153,10 @@ class HybridLRUList:
                 prev_node = node
             node = node.parent
 
-    def in_list(self, node: Optional[HybridTreeNode]):
+    def in_list(self, node: Optional[UnifiedTreeNode]):
         return node is not None and node.id in self.cache
 
-    def get_prev_no_lock(self, node: HybridTreeNode, check_id: bool = True):
+    def get_prev_no_lock(self, node: UnifiedTreeNode, check_id: bool = True):
         if check_id:
             assert node.id in self.cache
         x = node.lru_prev[self.component_name]
@@ -166,7 +166,7 @@ class HybridLRUList:
             return None
         return x
 
-    def get_prev_leaf_no_lock(self, node: HybridTreeNode, check_id: bool = True):
+    def get_prev_leaf_no_lock(self, node: UnifiedTreeNode, check_id: bool = True):
         if check_id:
             assert node.id in self.cache
         x = node.lru_prev[self.component_name]
@@ -192,7 +192,7 @@ COMPONENT_REGISTRY: dict[ComponentName, type[TreeComponent]] = {
 logger = logging.getLogger(__name__)
 
 
-class HybridRadixCache(BasePrefixCache):
+class UnifiedRadixCache(BasePrefixCache):
     def __init__(
         self,
         params: CacheInitParams,
@@ -231,10 +231,10 @@ class HybridRadixCache(BasePrefixCache):
         else:
             self.key_convert_fn = lambda key: key
         self.reset()
-        logger.info(f"Init Hybrid RadixTree with components {self.component_names}")
+        logger.info(f"Init Unified RadixTree with components {self.component_names}")
 
     def reset(self) -> None:
-        self.root_node = HybridTreeNode(self.component_names)
+        self.root_node = UnifiedTreeNode(self.component_names)
         self.root_node.key = RadixKey([], None)
         self.root_node.full_value = []
         for component_name in self.component_names:
@@ -242,7 +242,7 @@ class HybridRadixCache(BasePrefixCache):
         self.component_evictable_size_ = {name: 0 for name in self.component_names}
         self.component_protected_size_ = {name: 0 for name in self.component_names}
         self.lru_lists = {
-            component_name: HybridLRUList(component_name, self.component_names)
+            component_name: UnifiedLRUList(component_name, self.component_names)
             for component_name in self.component_names
         }
 
@@ -295,7 +295,7 @@ class HybridRadixCache(BasePrefixCache):
             mamba_num_evicted=tracker.get(ComponentName.MAMBA, 0),
         )
 
-    def inc_lock_ref(self, node: HybridTreeNode) -> IncLockRefResult:
+    def inc_lock_ref(self, node: UnifiedTreeNode) -> IncLockRefResult:
         if self.disable:
             return IncLockRefResult()
         result = IncLockRefResult()
@@ -304,7 +304,7 @@ class HybridRadixCache(BasePrefixCache):
         return result
 
     def dec_lock_ref(
-        self, node: HybridTreeNode, params: Optional[DecLockRefParams] = None
+        self, node: UnifiedTreeNode, params: Optional[DecLockRefParams] = None
     ) -> DecLockRefResult:
         if self.disable:
             return DecLockRefResult()
@@ -455,14 +455,14 @@ class HybridRadixCache(BasePrefixCache):
             comp.cleanup_after_caching_req(req, result, insert_params, False)
 
     ## Internal Helper Functions
-    def _for_each_component_lru(self, node: HybridTreeNode, lru_op):
+    def _for_each_component_lru(self, node: UnifiedTreeNode, lru_op):
         for component_name, component in self.components.items():
             if component.node_has_component_data(node):
                 lru_op(self.lru_lists[component_name], node)
 
     def _match_prefix_helper(
         self, key: RadixKey
-    ) -> tuple[list[torch.Tensor], HybridTreeNode, int]:
+    ) -> tuple[list[torch.Tensor], UnifiedTreeNode, int]:
         node = self.root_node
         child_key = self.get_child_key_fn(key)
         value: list[torch.Tensor] = []
@@ -499,7 +499,7 @@ class HybridRadixCache(BasePrefixCache):
         self,
         params: MatchPrefixParams,
         value: list[torch.Tensor],
-        last_node: HybridTreeNode,
+        last_node: UnifiedTreeNode,
         best_value_len: int,
     ) -> MatchResult:
         node_update = last_node
@@ -530,15 +530,15 @@ class HybridRadixCache(BasePrefixCache):
         return result
 
     def _split_node(
-        self, key: RadixKey, child: HybridTreeNode, split_len: int
-    ) -> HybridTreeNode:
-        new_node = HybridTreeNode(self.component_names)
+        self, key: RadixKey, child: UnifiedTreeNode, split_len: int
+    ) -> UnifiedTreeNode:
+        new_node = UnifiedTreeNode(self.component_names)
         new_node.children = {self.get_child_key_fn(key[split_len:]): child}
         new_node.parent = child.parent
         new_node.key = child.key[:split_len]
         new_node.full_value = child.full_value[:split_len].clone()
 
-        self._for_each_component_lru(child, HybridLRUList.remove_node)
+        self._for_each_component_lru(child, UnifiedLRUList.remove_node)
 
         child.parent = new_node
         child.key = child.key[split_len:]
@@ -548,23 +548,23 @@ class HybridRadixCache(BasePrefixCache):
             component.redistribute_on_node_split(new_node, child)
         new_node.parent.children[self.get_child_key_fn(key)] = new_node
 
-        self._for_each_component_lru(new_node, HybridLRUList.insert_mru)
-        self._for_each_component_lru(child, HybridLRUList.insert_mru)
+        self._for_each_component_lru(new_node, UnifiedLRUList.insert_mru)
+        self._for_each_component_lru(child, UnifiedLRUList.insert_mru)
         child.last_access_time = get_last_access_time()
         return new_node
 
-    def _touch_node(self, node: HybridTreeNode):
+    def _touch_node(self, node: UnifiedTreeNode):
         node.last_access_time = get_last_access_time()
         if node != self.root_node:
-            self._for_each_component_lru(node, HybridLRUList.reset_node_mru)
+            self._for_each_component_lru(node, UnifiedLRUList.reset_node_mru)
 
     def _add_new_node(
         self,
-        parent: HybridTreeNode,
+        parent: UnifiedTreeNode,
         key: RadixKey,
         value: torch.Tensor,
-    ) -> HybridTreeNode:
-        new_node = HybridTreeNode(self.component_names)
+    ) -> UnifiedTreeNode:
+        new_node = UnifiedTreeNode(self.component_names)
         new_node.parent = parent
         new_node.key = key
         new_node.full_value = value.clone()
@@ -575,7 +575,7 @@ class HybridRadixCache(BasePrefixCache):
 
     def _insert_helper(
         self,
-        node: HybridTreeNode,
+        node: UnifiedTreeNode,
         key: RadixKey,
         value: torch.Tensor,
         params: InsertParams,
@@ -637,14 +637,14 @@ class HybridRadixCache(BasePrefixCache):
             )
         return result
 
-    def _remove_leaf_from_parent(self, node: HybridTreeNode):
+    def _remove_leaf_from_parent(self, node: UnifiedTreeNode):
         key = self.get_child_key_fn(node.key)
         v = node.parent.children.pop(key, None)
         assert v == node
 
     def _evict_component_and_detach_lru(
         self,
-        node: HybridTreeNode,
+        node: UnifiedTreeNode,
         comp: TreeComponent,
         is_leaf: bool,
         tracker: dict[str, int],
@@ -657,7 +657,7 @@ class HybridRadixCache(BasePrefixCache):
         return freed
 
     def _cascade_evict(
-        self, node: HybridTreeNode, trigger: TreeComponent, tracker: dict[str, int]
+        self, node: UnifiedTreeNode, trigger: TreeComponent, tracker: dict[str, int]
     ):
         is_leaf = len(node.children) == 0
         trigger_priority = trigger.eviction_priority(is_leaf)
@@ -675,7 +675,7 @@ class HybridRadixCache(BasePrefixCache):
             self._iteratively_delete_tombstone_leaf(node, tracker)
 
     def _iteratively_delete_tombstone_leaf(
-        self, deleted_node: HybridTreeNode, tracker: dict[str, int]
+        self, deleted_node: UnifiedTreeNode, tracker: dict[str, int]
     ):
         """After a leaf is removed, walk up the parent chain and delete
         any ancestor that is leaf node and has lost any component data (tombstoned)."""
@@ -750,7 +750,7 @@ class HybridRadixCache(BasePrefixCache):
     def all_values_flatten(self) -> torch.Tensor:
         values = []
 
-        def _dfs(node: HybridTreeNode):
+        def _dfs(node: UnifiedTreeNode):
             for child in node.children.values():
                 values.append(child.full_value)
                 _dfs(child)
@@ -766,7 +766,7 @@ class HybridRadixCache(BasePrefixCache):
 
         values = []
 
-        def _dfs(node: HybridTreeNode):
+        def _dfs(node: UnifiedTreeNode):
             value = node.component_value(component_name)
             if value is not None:
                 values.append(value)
@@ -831,7 +831,7 @@ class HybridRadixCache(BasePrefixCache):
                 stack.append((child, indent + 2))
 
 
-class HybridMambaRadixCache(HybridRadixCache):
+class UnifiedMambaRadixCache(UnifiedRadixCache):
     def __init__(self, params: CacheInitParams):
         assert isinstance(
             params.token_to_kv_pool_allocator, TokenToKVPoolAllocator
@@ -845,7 +845,7 @@ class HybridMambaRadixCache(HybridRadixCache):
         )
 
 
-class HybridSWARadixCache(HybridRadixCache):
+class UnifiedSWARadixCache(UnifiedRadixCache):
     def __init__(self, params: CacheInitParams):
         assert isinstance(params.token_to_kv_pool_allocator, SWATokenToKVPoolAllocator)
         super().__init__(
@@ -854,21 +854,21 @@ class HybridSWARadixCache(HybridRadixCache):
         )
 
 
-def create_hybrid_radix_cache(
+def create_unified_radix_cache(
     params: CacheInitParams,
     component_names: Optional[tuple[ComponentName, ...]] = None,
-) -> HybridRadixCache:
+) -> UnifiedRadixCache:
     if component_names is None:
-        component_names = tuple(getattr(params, "hybrid_tree_components", ()) or ())
+        component_names = tuple(getattr(params, "unified_tree_components", ()) or ())
     if not component_names:
         if isinstance(params.token_to_kv_pool_allocator, SWATokenToKVPoolAllocator):
             component_names = (ComponentName.SWA,)
         elif isinstance(params.req_to_token_pool, HybridReqToTokenPool):
             component_names = (ComponentName.MAMBA,)
         else:
-            raise ValueError("Can not infer hybrid tree components from params.")
+            raise ValueError("Can not infer unified tree components from params.")
     if component_names == (ComponentName.MAMBA,):
-        return HybridMambaRadixCache(params)
+        return UnifiedMambaRadixCache(params)
     if component_names == (ComponentName.SWA,):
-        return HybridSWARadixCache(params)
-    return HybridRadixCache(params, component_names=component_names)
+        return UnifiedSWARadixCache(params)
+    return UnifiedRadixCache(params, component_names=component_names)

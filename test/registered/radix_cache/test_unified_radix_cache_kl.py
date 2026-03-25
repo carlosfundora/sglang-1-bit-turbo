@@ -432,7 +432,7 @@ class MambaReplayKLMixin(HybridReplayKLMixinBase):
         "extra_buffer",
         "--mamba-track-interval",
         MAMBA_TRACK_INTERVAL,
-        "--enable-hybrid-radix-tree",
+        "--enable-unified-radix-tree",
     ]
 
     @classmethod
@@ -613,7 +613,7 @@ class SWAReplayKLMixin(HybridReplayKLMixinBase):
         "--disable-piecewise-cuda-graph",
         "--random-seed",
         "20260322",
-        "--enable-hybrid-radix-tree",
+        "--enable-unified-radix-tree",
     ]
 
     @staticmethod

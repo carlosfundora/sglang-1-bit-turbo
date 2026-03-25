@@ -23,7 +23,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     MatchResult,
 )
 from sglang.srt.mem_cache.hicache_storage import PoolHitPolicy, PoolName, PoolTransfer
-from sglang.srt.mem_cache.hybrid_cache.hybrid_cache_controller import (
+from sglang.srt.mem_cache.unified_cache_components.hybrid_cache_controller import (
     HybridCacheController,
     PrefetchOperation,
 )

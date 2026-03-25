@@ -13,7 +13,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     MatchPrefixParams,
     MatchResult,
 )
-from sglang.srt.mem_cache.hybrid_cache.tree_component import (
+from sglang.srt.mem_cache.unified_cache_components.tree_component import (
     ComponentName,
     TreeComponent,
     get_last_access_time,
@@ -22,7 +22,7 @@ from sglang.srt.server_args import get_global_server_args
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
-    from sglang.srt.mem_cache.hybrid_cache.hybrid_radix_cache import HybridTreeNode
+    from sglang.srt.mem_cache.unified_cache_components.unified_radix_cache import UnifiedTreeNode
 
 
 class MambaComponent(TreeComponent):
@@ -30,7 +30,7 @@ class MambaComponent(TreeComponent):
     def name(self) -> ComponentName:
         return ComponentName.MAMBA
 
-    def create_match_validator(self) -> Callable[[HybridTreeNode], bool]:
+    def create_match_validator(self) -> Callable[[UnifiedTreeNode], bool]:
         name = self.name
         return lambda node: node.component_value(name) is not None
 
@@ -79,7 +79,7 @@ class MambaComponent(TreeComponent):
 
     def commit_insert_component_data(
         self,
-        node: HybridTreeNode,
+        node: UnifiedTreeNode,
         is_new_leaf: bool,
         params: InsertParams,
         result: InsertResult,
@@ -101,12 +101,12 @@ class MambaComponent(TreeComponent):
         result.mamba_exist = True
 
     def redistribute_on_node_split(
-        self, new_parent: HybridTreeNode, child: HybridTreeNode
+        self, new_parent: UnifiedTreeNode, child: UnifiedTreeNode
     ):
         new_parent.set_component_value(self.name, None)
         new_parent.component(self.name).lock_ref = 0
 
-    def evict_component(self, node: HybridTreeNode, is_leaf: bool) -> int:
+    def evict_component(self, node: UnifiedTreeNode, is_leaf: bool) -> int:
         value = node.component_value(self.name)
         self.cache.req_to_token_pool.mamba_pool.free(value)
         freed = len(value)
@@ -136,7 +136,7 @@ class MambaComponent(TreeComponent):
                 x = lru.get_lru_no_lock()
 
     def acquire_component_lock(
-        self, node: HybridTreeNode, result: IncLockRefResult
+        self, node: UnifiedTreeNode, result: IncLockRefResult
     ) -> IncLockRefResult:
         value = node.component_value(self.name)
         if value is not None:
@@ -147,7 +147,7 @@ class MambaComponent(TreeComponent):
         return result
 
     def release_component_lock(
-        self, node: HybridTreeNode, params: Optional[DecLockRefParams]
+        self, node: UnifiedTreeNode, params: Optional[DecLockRefParams]
     ) -> None:
         value = node.component_value(self.name)
         if value is not None:

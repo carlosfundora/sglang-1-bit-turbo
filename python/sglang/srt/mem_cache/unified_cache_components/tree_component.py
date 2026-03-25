@@ -20,9 +20,9 @@ from sglang.srt.mem_cache.base_prefix_cache import (
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
-    from sglang.srt.mem_cache.hybrid_cache.hybrid_radix_cache import (
-        HybridRadixCache,
-        HybridTreeNode,
+    from sglang.srt.mem_cache.unified_cache_components.unified_radix_cache import (
+        UnifiedRadixCache,
+        UnifiedTreeNode,
     )
 
 
@@ -71,13 +71,13 @@ def gen_component_uuid() -> int:
 
 
 class TreeComponent(ABC):
-    def __init__(self, cache: HybridRadixCache):
+    def __init__(self, cache: UnifiedRadixCache):
         self.cache = cache
 
-    def node_has_component_data(self, node: HybridTreeNode) -> bool:
+    def node_has_component_data(self, node: UnifiedTreeNode) -> bool:
         return node.component_value(self.name) is not None
 
-    def value_len(self, node: HybridTreeNode) -> int:
+    def value_len(self, node: UnifiedTreeNode) -> int:
         value = node.component_value(self.name)
         return len(value) if value is not None else 0
 
@@ -88,7 +88,7 @@ class TreeComponent(ABC):
         ...
 
     @abstractmethod
-    def create_match_validator(self) -> Callable[[HybridTreeNode], bool]:
+    def create_match_validator(self) -> Callable[[UnifiedTreeNode], bool]:
         """Return a per-match stateful predicate that decides whether a node
         is a valid match boundary for this component.
         Called once per match_prefix; the returned closure may carry state.
@@ -114,7 +114,7 @@ class TreeComponent(ABC):
 
     def update_component_on_insert_overlap(
         self,
-        node: HybridTreeNode,
+        node: UnifiedTreeNode,
         prefix_len: int,
         total_prefix_len: int,
         value_slice: torch.Tensor,
@@ -137,7 +137,7 @@ class TreeComponent(ABC):
 
     def commit_insert_component_data(
         self,
-        node: HybridTreeNode,
+        node: UnifiedTreeNode,
         is_new_leaf: bool,
         params: InsertParams,
         result: InsertResult,
@@ -158,7 +158,7 @@ class TreeComponent(ABC):
 
     @abstractmethod
     def redistribute_on_node_split(
-        self, new_parent: HybridTreeNode, child: HybridTreeNode
+        self, new_parent: UnifiedTreeNode, child: UnifiedTreeNode
     ):
         """Redistribute component data between new_parent and child when a
         node is split. new_parent is the newly created prefix node.
@@ -171,7 +171,7 @@ class TreeComponent(ABC):
         ...
 
     @abstractmethod
-    def evict_component(self, node: HybridTreeNode, is_leaf: bool) -> int:
+    def evict_component(self, node: UnifiedTreeNode, is_leaf: bool) -> int:
         """Free this component's KV resources on a node being evicted.
         For internal (non-leaf) nodes: free memory and tombstone the value
         (set to None); the node structure is kept.
@@ -224,7 +224,7 @@ class TreeComponent(ABC):
 
     @abstractmethod
     def acquire_component_lock(
-        self, node: HybridTreeNode, result: IncLockRefResult
+        self, node: UnifiedTreeNode, result: IncLockRefResult
     ) -> IncLockRefResult:
         """Increment lock_ref for this component, protecting nodes from
         eviction. Updates evictable → protected size on first lock.
@@ -239,7 +239,7 @@ class TreeComponent(ABC):
 
     @abstractmethod
     def release_component_lock(
-        self, node: HybridTreeNode, params: Optional[DecLockRefParams]
+        self, node: UnifiedTreeNode, params: Optional[DecLockRefParams]
     ) -> None:
         """Decrement lock_ref for this component, un-protecting nodes.
         Updates protected → evictable size when lock_ref drops to 0.
