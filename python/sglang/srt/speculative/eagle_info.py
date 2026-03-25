@@ -43,8 +43,18 @@ from sglang.srt.speculative.spec_utils import (
 )
 from sglang.srt.utils import is_cuda, is_hip, next_power_of_2
 
-if is_cuda() or is_hip():
-    from sgl_kernel import top_k_renorm_prob, top_p_renorm_prob
+if is_cuda():
+    from sgl_kernel import (
+        top_k_renorm_prob,
+        top_p_renorm_prob,
+        tree_speculative_sampling_target_only,
+    )
+elif is_hip():
+    from sglang.srt.speculative.triton_sampling_kernels import (
+        top_k_renorm_prob,
+        top_p_renorm_prob,
+        tree_speculative_sampling_target_only,
+    )
 
 logger = logging.getLogger(__name__)
 
