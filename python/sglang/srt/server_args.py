@@ -3108,7 +3108,13 @@ class ServerArgs:
         if self.speculative_algorithm == "NEXTN":
             self.speculative_algorithm = "EAGLE"
 
-        if self.speculative_algorithm in ("EAGLE", "EAGLE3", "P_EAGLE", "STANDALONE", "P_CASCADE"):
+        if self.speculative_algorithm in (
+            "EAGLE",
+            "EAGLE3",
+            "P_EAGLE",
+            "STANDALONE",
+            "P_CASCADE",
+        ):
             if (
                 self.speculative_algorithm == "EAGLE"
                 and self.speculative_draft_model_path
