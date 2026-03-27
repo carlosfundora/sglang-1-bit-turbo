@@ -461,6 +461,41 @@ class UnifiedRadixCache(BasePrefixCache):
             if component.node_has_component_data(node):
                 lru_op(self.lru_lists[component_name], node)
 
+    def _match_prefix_helper_readonly(
+        self, key: RadixKey
+    ) -> tuple[list[torch.Tensor], UnifiedTreeNode, int]:
+        """Read-only version of _match_prefix_helper that does not split nodes.
+        Only considers fully matched nodes, ignores partial matches."""
+        node = self.root_node
+        child_key = self.get_child_key_fn(key)
+        value: list[torch.Tensor] = []
+        best_value_len = 0
+        best_node = node
+        validators = {
+            name: component.create_match_validator()
+            for name, component in self.components.items()
+        }
+
+        def _update_best_if_valid(node):
+            nonlocal best_value_len, best_node
+            if all(validators[name](node) for name in self.components):
+                best_value_len = len(value)
+                best_node = node
+
+        while len(key) > 0 and child_key in node.children:
+            child = node.children[child_key]
+            prefix_len = self.key_match_fn(child.key, key)
+            if prefix_len < len(child.key):
+                # Read-only: do not split, ignore partial match and stop
+                break
+            value.append(child.full_value)
+            node = child
+            _update_best_if_valid(node)
+            key = key[prefix_len:]
+            if len(key):
+                child_key = self.get_child_key_fn(key)
+        return value, best_node, best_value_len
+
     def _match_prefix_helper(
         self, key: RadixKey
     ) -> tuple[list[torch.Tensor], UnifiedTreeNode, int]:

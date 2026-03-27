@@ -766,5 +766,104 @@ class TestUnifiedRadixCacheSWAMamba(unittest.TestCase):
         tree.sanity_check()
 
 
+# ===================================================================
+# Test: Helper functions
+# ===================================================================
+class TestUnifiedRadixCacheHelpers(unittest.TestCase):
+    """Tests for internal helper functions of UnifiedRadixCache."""
+
+    @classmethod
+    def setUpClass(cls):
+        set_global_server_args_for_scheduler(
+            ServerArgs(model_path="dummy", page_size=_PAGE_SIZE)
+        )
+
+    def _build_tree(
+        self,
+        kv_size: int = 128,
+        max_num_reqs: int = 10,
+        max_context_len: int = 128,
+    ):
+        from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
+
+        device = get_device()
+        req_to_token_pool = ReqToTokenPool(
+            size=max_num_reqs,
+            max_context_len=max_context_len,
+            device=device,
+            enable_memory_saver=False,
+        )
+        kv_pool = MHATokenToKVPool(
+            size=kv_size,
+            page_size=_PAGE_SIZE,
+            dtype=_DTYPE,
+            head_num=_HEAD_NUM,
+            head_dim=_HEAD_DIM,
+            layer_num=_NUM_LAYERS,
+            device=device,
+            enable_memory_saver=False,
+        )
+        allocator = TokenToKVPoolAllocator(
+            size=kv_size,
+            dtype=_DTYPE,
+            device=device,
+            kvcache=kv_pool,
+            need_sort=False,
+        )
+        tree = UnifiedRadixCache(
+            params=CacheInitParams(
+                req_to_token_pool=req_to_token_pool,
+                token_to_kv_pool_allocator=allocator,
+                page_size=_PAGE_SIZE,
+                disable=False,
+                component_names=(),  # Full attention only, no mamba/swa
+            ),
+        )
+        return tree, allocator
+
+    def test_readonly_does_not_modify_tree(self):
+        """Verify readonly match does not modify tree structure (no split)."""
+        tree, alloc = self._build_tree()
+
+        # Insert [1, 2, 3, 4, 5]
+        tree.insert(
+            InsertParams(
+                key=RadixKey([1, 2, 3, 4, 5]),
+                value=alloc.alloc(5),
+            )
+        )
+
+        def count_nodes(node):
+            count = 1
+            for child in node.children.values():
+                count += count_nodes(child)
+            return count
+
+        node_count_before = count_nodes(tree.root_node)
+        self.assertEqual(node_count_before, 2)  # root_node and [1, 2, 3, 4, 5]
+
+        # Regular match with partial key [1, 2] creates a split
+        value, best_node, best_value_len = tree._match_prefix_helper(RadixKey([1, 2]))
+        # Regular match with partial key [1, 2, 3, 4] creates a split
+        value, best_node, best_value_len = tree._match_prefix_helper(
+            RadixKey([1, 2, 3, 4])
+        )
+        self.assertEqual(best_value_len, 2)
+        self.assertEqual(best_node.key.token_ids, [3, 4])
+        node_count_after_regular = count_nodes(tree.root_node)
+        self.assertEqual(node_count_after_regular, node_count_before + 2)
+
+        # Readonly match with partial key [1, 2, 3] should NOT create a split
+        value, best_node, best_value_len = tree._match_prefix_helper_readonly(
+            RadixKey([1, 2, 3])
+        )
+        self.assertEqual(best_value_len, 1)
+        self.assertEqual(best_node.key.token_ids, [1, 2])
+        node_count_after_readonly = count_nodes(tree.root_node)
+        self.assertEqual(node_count_after_readonly, node_count_after_regular)
+
+        tree.sanity_check()
+
+
 if __name__ == "__main__":
     unittest.main()
