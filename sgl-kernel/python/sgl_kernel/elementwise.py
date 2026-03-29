@@ -120,6 +120,8 @@ def rmsnorm(
     ):
         return _rmsnorm_internal(input, weight, eps, out, enable_pdl)
     else:
+        if weight.dtype != input.dtype:
+            weight = weight.to(input.dtype)
         return _flashinfer_norm.rmsnorm(input, weight, eps, out, enable_pdl)
 
 
@@ -162,6 +164,8 @@ def fused_add_rmsnorm(
     ):
         _fused_add_rmsnorm_internal(input, residual, weight, eps, enable_pdl)
     else:
+        if weight.dtype != input.dtype:
+            weight = weight.to(input.dtype)
         _flashinfer_norm.fused_add_rmsnorm(input, residual, weight, eps, enable_pdl)
 
 
@@ -205,6 +209,8 @@ def gemma_rmsnorm(
     ):
         return _gemma_rmsnorm_internal(input, weight, eps, out, enable_pdl)
     else:
+        if weight.dtype != input.dtype:
+            weight = weight.to(input.dtype)
         return _flashinfer_norm.gemma_rmsnorm(input, weight, eps, out, enable_pdl)
 
 
@@ -247,6 +253,8 @@ def gemma_fused_add_rmsnorm(
     ):
         _gemma_fused_add_rmsnorm_internal(input, residual, weight, eps, enable_pdl)
     else:
+        if weight.dtype != input.dtype:
+            weight = weight.to(input.dtype)
         _flashinfer_norm.gemma_fused_add_rmsnorm(
             input, residual, weight, eps, enable_pdl
         )
