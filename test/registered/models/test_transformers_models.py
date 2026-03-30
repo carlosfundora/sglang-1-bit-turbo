@@ -10,6 +10,7 @@ import torch
 
 from sglang.srt.utils import is_hip, kill_process_tree
 from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci
+from sglang.test.run_eval import run_eval
 from sglang.test.runners import DEFAULT_PROMPTS, SRTRunner, check_close_model_outputs
 from sglang.test.test_utils import (
     DEFAULT_MODEL_NAME_FOR_TEST,
@@ -50,8 +51,6 @@ class TestTransformersFallbackEndpoint(CustomTestCase):
             num_examples=64,
             num_threads=32,
         )
-        from sglang.test.run_eval import run_eval
-
         metrics = run_eval(args)
         self.assertGreaterEqual(metrics["score"], self.mmlu_lower_bound)
 
@@ -63,8 +62,6 @@ class TestTransformersFallbackEndpoint(CustomTestCase):
             num_examples=200,
             num_threads=128,
         )
-        from sglang.test.run_eval import run_eval
-
         metrics = run_eval(args)
         print(f"{metrics=}")
         self.assertGreater(metrics["score"], self.gsm8k_lower_bound)
