@@ -7,7 +7,8 @@ from sglang.test.ascend.test_ascend_utils import (
     QWEN3_CODER_480B_A35B_INSTRUCT_W8A8_QUAROT_WEIGHTS_PATH,
 )
 from sglang.test.ci.ci_register import register_npu_ci
-from sglang.test.run_eval import run_eval as run_gsm8k
+from sglang.test.few_shot_gsm8k import run_eval as run_gsm8k
+from sglang.test.run_eval import run_eval
 from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
@@ -94,16 +95,29 @@ class TestDeepEpQwen(CustomTestCase):
         args = SimpleNamespace(
             base_url=self.base_url,
             model=self.model,
-            eval_name="gsm8k",
-            num_examples=200,
-            num_threads=128,
+            eval_name="mmlu",
+            num_examples=8,
+            num_threads=32,
+        )
+        metrics = run_eval(args)
+        self.assertGreater(metrics["score"], expect_score)
+
+    def test_gsm8k(self):
+        expect_accuracy = 0.91
+        args = SimpleNamespace(
             num_shots=8,
+            data_path=None,
+            num_questions=200,
+            max_new_tokens=512,
+            parallel=128,
+            host="http://127.0.0.1",
+            port=int(self.base_url.split(":")[-1]),
         )
         metrics = run_gsm8k(args)
         self.assertGreaterEqual(
-            metrics["score"],
-            expect_score,
-            f'Accuracy of {self.model} is {str(metrics["score"])}, is lower than {expect_score}',
+            metrics["accuracy"],
+            expect_accuracy,
+            f'Accuracy of {self.model} is {str(metrics["accuracy"])}, is lower than {expect_accuracy}',
         )
 
 

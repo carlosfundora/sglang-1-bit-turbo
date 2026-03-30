@@ -6,6 +6,7 @@ python3 -m unittest test_srt_engine.TestSRTEngine.test_4_sync_async_stream_combi
 import asyncio
 import json
 import unittest
+from types import SimpleNamespace
 
 import torch
 
@@ -14,6 +15,7 @@ from sglang.bench_offline_throughput import BenchArgs, throughput_test
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci
+from sglang.test.few_shot_gsm8k_engine import run_eval
 from sglang.test.test_utils import (
     DEFAULT_SMALL_EMBEDDING_MODEL_NAME_FOR_TEST,
     DEFAULT_SMALL_MODEL_NAME_FOR_TEST,
@@ -136,6 +138,18 @@ class TestSRTEngine(CustomTestCase):
             loop.run_until_complete(async_streaming(llm))
 
         llm.shutdown()
+
+    def test_5_gsm8k(self):
+
+        args = SimpleNamespace(
+            model_path=DEFAULT_SMALL_MODEL_NAME_FOR_TEST,
+            local_data_path=None,
+            num_shots=5,
+            num_questions=1400,
+        )
+
+        metrics = run_eval(args)
+        self.assertGreater(metrics["accuracy"], 0.33)
 
     def test_6_engine_cpu_offload(self):
         prompt = "Today is a sunny day and I like"

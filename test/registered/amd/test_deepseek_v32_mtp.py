@@ -5,7 +5,7 @@ import requests
 
 from sglang.srt.utils import kill_process_tree
 from sglang.test.ci.ci_register import register_amd_ci
-from sglang.test.run_eval import run_eval as run_eval_few_shot_gsm8k
+from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
 from sglang.test.send_one import BenchArgs, send_one_prompt
 from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
@@ -76,12 +76,13 @@ class TestDeepseekV32DPMTP(CustomTestCase):
         requests.get(self.base_url + "/flush_cache")
 
         args = SimpleNamespace(
-            base_url=self.base_url,
-            model=self.model,
-            eval_name="gsm8k",
-            num_examples=1400,
-            num_threads=1400,
             num_shots=20,
+            data_path=None,
+            num_questions=1400,
+            parallel=1400,
+            max_new_tokens=512,
+            host="http://127.0.0.1",
+            port=int(self.base_url.split(":")[-1]),
         )
         metrics = run_eval_few_shot_gsm8k(args)
         print(f"{metrics=}")
@@ -95,10 +96,10 @@ class TestDeepseekV32DPMTP(CustomTestCase):
         if is_in_ci():
             write_github_step_summary(
                 f"### test_gsm8k (deepseek-v32 mtp)\n"
-                f'{metrics["score"]=:.3f}\n'
+                f'{metrics["accuracy"]=:.3f}\n'
                 f"{avg_spec_accept_length=:.2f}\n"
             )
-            self.assertGreater(metrics["score"], 0.94)
+            self.assertGreater(metrics["accuracy"], 0.94)
             self.assertGreater(avg_spec_accept_length, 2.7)
 
     def test_bs_1_speed(self):
@@ -167,12 +168,13 @@ class TestDeepseekV32TPMTP(CustomTestCase):
         requests.get(self.base_url + "/flush_cache")
 
         args = SimpleNamespace(
-            base_url=self.base_url,
-            model=self.model,
-            eval_name="gsm8k",
-            num_examples=1400,
-            num_threads=1400,
             num_shots=20,
+            data_path=None,
+            num_questions=1400,
+            parallel=1400,
+            max_new_tokens=512,
+            host="http://127.0.0.1",
+            port=int(self.base_url.split(":")[-1]),
         )
         metrics = run_eval_few_shot_gsm8k(args)
         print(f"{metrics=}")
@@ -186,10 +188,10 @@ class TestDeepseekV32TPMTP(CustomTestCase):
         if is_in_ci():
             write_github_step_summary(
                 f"### test_gsm8k (deepseek-v32 mtp)\n"
-                f'{metrics["score"]=:.3f}\n'
+                f'{metrics["accuracy"]=:.3f}\n'
                 f"{avg_spec_accept_length=:.2f}\n"
             )
-            self.assertGreater(metrics["score"], 0.94)
+            self.assertGreater(metrics["accuracy"], 0.94)
             self.assertGreater(avg_spec_accept_length, 2.7)
 
     def test_bs_1_speed(self):

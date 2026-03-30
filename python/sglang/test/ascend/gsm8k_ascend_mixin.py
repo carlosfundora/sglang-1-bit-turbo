@@ -3,7 +3,7 @@ from abc import ABC
 from types import SimpleNamespace
 
 from sglang.srt.utils import kill_process_tree
-from sglang.test.run_eval import run_eval
+from sglang.test.few_shot_gsm8k import run_eval
 from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
@@ -54,16 +54,17 @@ class GSM8KAscendMixin(ABC):
 
     def test_gsm8k(self):
         args = SimpleNamespace(
-            base_url=self.base_url,
-            model=self.model,
-            eval_name="gsm8k",
-            num_examples=200,
-            num_threads=128,
             num_shots=self.gsm8k_num_shots,
+            data_path=None,
+            num_questions=200,
+            max_new_tokens=512,
+            parallel=128,
+            host="http://127.0.0.1",
+            port=int(self.base_url.split(":")[-1]),
         )
         metrics = run_eval(args)
         self.assertGreaterEqual(
-            metrics["score"],
+            metrics["accuracy"],
             self.accuracy,
-            f'Accuracy of {self.model} is {str(metrics["score"])}, is lower than {self.accuracy}',
+            f'Accuracy of {self.model} is {str(metrics["accuracy"])}, is lower than {self.accuracy}',
         )

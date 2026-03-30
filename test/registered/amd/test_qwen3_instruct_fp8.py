@@ -6,7 +6,7 @@ import requests
 
 from sglang.srt.utils import kill_process_tree
 from sglang.test.ci.ci_register import register_amd_ci
-from sglang.test.run_eval import run_eval as run_eval_few_shot_gsm8k
+from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
 from sglang.test.send_one import BenchArgs, send_one_prompt
 from sglang.test.test_utils import (
     DEFAULT_URL_FOR_TEST,
@@ -55,21 +55,22 @@ class TestQwen3Instruct2507FP8(CustomTestCase):
         requests.get(self.base_url + "/flush_cache")
 
         args = SimpleNamespace(
-            base_url=self.base_url,
-            model=self.model,
-            eval_name="gsm8k",
-            num_examples=1319,
-            num_threads=1319,
             num_shots=8,
+            data_path=None,
+            num_questions=1319,
+            parallel=1319,
+            max_new_tokens=512,
+            host="http://127.0.0.1",
+            port=int(self.base_url.split(":")[-1]),
         )
         metrics = run_eval_few_shot_gsm8k(args)
         print(f"{metrics=}")
 
         if is_in_ci():
             write_github_step_summary(
-                f"### test_gsm8k ({self.model})\n" f'{metrics["score"]=:.3f}\n'
+                f"### test_gsm8k ({self.model})\n" f'{metrics["accuracy"]=:.3f}\n'
             )
-            self.assertGreater(metrics["score"], 0.95)
+            self.assertGreater(metrics["accuracy"], 0.95)
 
     def test_bs_1_speed(self):
         args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)

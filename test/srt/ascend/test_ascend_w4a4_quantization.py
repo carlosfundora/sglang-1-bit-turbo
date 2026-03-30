@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 import requests
 
 from sglang.srt.utils import kill_process_tree
-from sglang.test.run_eval import run_eval
+from sglang.test.few_shot_gsm8k import run_eval
 from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
@@ -62,16 +62,18 @@ class TestAscendW4A4(CustomTestCase):
         base_url = DEFAULT_URL_FOR_TEST
         url = urlparse(base_url)
         args = SimpleNamespace(
-            base_url=self.base_url,
-            model=self.model,
-            eval_name="gsm8k",
-            num_examples=1319,
-            num_threads=64,
+            num_shots=5,
+            data_path=None,
+            num_questions=1319,
+            max_new_tokens=512,
+            parallel=64,
+            host=f"http://{url.hostname}",
+            port=int(url.port),
         )
         metrics = run_eval(args)
         print(metrics)
 
-        self.assertGreaterEqual(metrics["score"], 0.80)
+        self.assertGreaterEqual(metrics["accuracy"], 0.80)
         self.assertGreaterEqual(metrics["output_throughput"], 1000)
 
     def run_decode(self, max_new_tokens):

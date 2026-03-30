@@ -152,7 +152,7 @@ class TestKimiK25AiterMlaEvalMI35x(unittest.TestCase):
 
         from types import SimpleNamespace
 
-        from sglang.test.run_eval import run_eval as run_eval_few_shot_gsm8k
+        from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
 
         all_results = []
         summary = "### Kimi-K2.5 aiter MLA (MI35x)\n\n"
@@ -185,15 +185,16 @@ class TestKimiK25AiterMlaEvalMI35x(unittest.TestCase):
 
                     try:
                         args = SimpleNamespace(
-                            base_url=self.base_url,
-                            model=self.model,
-                            eval_name="gsm8k",
-                            num_examples=self.num_questions,
-                            num_threads=self.num_questions,
                             num_shots=8,
+                            data_path=None,
+                            num_questions=self.num_questions,
+                            parallel=self.num_questions,
+                            max_new_tokens=512,
+                            host="http://127.0.0.1",
+                            port=int(self.base_url.split(":")[-1]),
                         )
                         metrics = run_eval_few_shot_gsm8k(args)
-                        acc = metrics["score"]
+                        acc = metrics["accuracy"]
 
                         passed = acc >= config.accuracy_threshold
                         status = "PASS" if passed else "FAIL"

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from sglang.srt.utils import kill_process_tree
-from sglang.test.run_eval import run_eval as run_eval_few_shot_gsm8k
+from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
 from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
@@ -58,15 +58,18 @@ class TestAscendTp1Bf16(CustomTestCase):
 
                 try:
                     args = SimpleNamespace(
-                        base_url=self.base_url,
-                        model=self.model,
-                        eval_name="gsm8k",
-                        num_examples=1319,
-                        num_threads=32,
+                        num_shots=5,
+                        data_path=None,
+                        num_questions=1319,
+                        max_new_tokens=512,
+                        parallel=32,
+                        host=f"http://{self.url.hostname}",
+                        port=int(self.url.port),
                     )
+
                     metrics = run_eval_few_shot_gsm8k(args)
                     self.assertGreaterEqual(
-                        metrics["score"],
+                        metrics["accuracy"],
                         TEST_MODEL_MATRIX[model]["accuracy"],
                     )
                 finally:
