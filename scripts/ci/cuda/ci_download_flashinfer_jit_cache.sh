@@ -44,7 +44,7 @@ if [ "$FLASHINFER_JIT_CACHE_INSTALLED" = false ]; then
     if [ "$FLASHINFER_JIT_CACHE_INSTALLED" = false ]; then
         for i in {1..5}; do
             # Download wheel to cache directory (use pip directly as uv pip doesn't support download)
-            if timeout 1000 pip download "flashinfer-jit-cache==${FLASHINFER_PYTHON_REQUIRED}" \
+            if timeout 600 pip download "flashinfer-jit-cache==${FLASHINFER_PYTHON_REQUIRED}" \
                 --index-url "https://flashinfer.ai/whl/${CU_VERSION}" \
                 -d "${FLASHINFER_CACHE_DIR}"; then
 
