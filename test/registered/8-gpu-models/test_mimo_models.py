@@ -10,7 +10,7 @@ register_cuda_ci(est_time=200, suite="stage-c-test-8-gpu-h200")
 
 class TestMiMoV2Flash(GSM8KMixin, SpecDecodingMixin, DefaultServerBase):
     gsm8k_accuracy_thres = 0.75
-    gsm8k_num_examples = 1319
+    gsm8k_num_questions = 1319
     gsm8k_num_threads = 1319
     model = "XiaomiMiMo/MiMo-V2-Flash"
 
