@@ -6,7 +6,7 @@ import requests
 
 from sglang.srt.utils import kill_process_tree
 from sglang.test.ci.ci_register import register_amd_ci
-from sglang.test.few_shot_gsm8k import run_eval as run_eval
+from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
 from sglang.test.test_utils import (
     DEFAULT_DEEPEP_MODEL_NAME_FOR_TEST,
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
@@ -97,7 +97,7 @@ class TestPureDP(CustomTestCase):
             host="http://127.0.0.1",
             port=int(self.base_url.split(":")[-1]),
         )
-        metrics = run_eval(args)
+        metrics = run_eval_few_shot_gsm8k(args)
         print(f"{metrics=}")
 
         self.assertGreaterEqual(metrics["accuracy"], 0.935)
@@ -141,7 +141,7 @@ class TestMTP(CustomTestCase):
             host="http://127.0.0.1",
             port=int(self.base_url.split(":")[-1]),
         )
-        metrics = run_eval(args)
+        metrics = run_eval_few_shot_gsm8k(args)
         print(f"{metrics=}")
         self.assertGreaterEqual(metrics["accuracy"], 0.92)
 
@@ -194,7 +194,7 @@ class TestNormal(CustomTestCase):
             host="http://127.0.0.1",
             port=int(self.base_url.split(":")[-1]),
         )
-        metrics = run_eval(args)
+        metrics = run_eval_few_shot_gsm8k(args)
         print(f"{metrics=}")
 
         self.assertGreaterEqual(metrics["accuracy"], 0.935)
@@ -243,7 +243,7 @@ class TestLowLatency(CustomTestCase):
             host="http://127.0.0.1",
             port=int(self.base_url.split(":")[-1]),
         )
-        metrics = run_eval(args)
+        metrics = run_eval_few_shot_gsm8k(args)
         print(f"{metrics=}")
 
         self.assertGreaterEqual(metrics["accuracy"], 0.935)
@@ -291,7 +291,7 @@ class TestTBOwithNormal(CustomTestCase):
             host="http://127.0.0.1",
             port=int(self.base_url.split(":")[-1]),
         )
-        metrics = run_eval(args)
+        metrics = run_eval_few_shot_gsm8k(args)
         print(f"{metrics=}")
 
         self.assertGreaterEqual(metrics["accuracy"], 0.935)
@@ -341,7 +341,7 @@ class TestTBOwithLowLatency(CustomTestCase):
             host="http://127.0.0.1",
             port=int(self.base_url.split(":")[-1]),
         )
-        metrics = run_eval(args)
+        metrics = run_eval_few_shot_gsm8k(args)
         print(f"{metrics=}")
 
         self.assertGreaterEqual(metrics["accuracy"], 0.935)
@@ -393,7 +393,7 @@ class TestMTPwithTBONormal(CustomTestCase):
             host="http://127.0.0.1",
             port=int(self.base_url.split(":")[-1]),
         )
-        metrics = run_eval(args)
+        metrics = run_eval_few_shot_gsm8k(args)
         print(f"{metrics=}")
         self.assertGreaterEqual(metrics["accuracy"], 0.92)
 
@@ -453,7 +453,7 @@ class TestMTPwithTBOLowLatency(CustomTestCase):
             host="http://127.0.0.1",
             port=int(self.base_url.split(":")[-1]),
         )
-        metrics = run_eval(args)
+        metrics = run_eval_few_shot_gsm8k(args)
         print(f"{metrics=}")
         self.assertGreaterEqual(metrics["accuracy"], 0.92)
 

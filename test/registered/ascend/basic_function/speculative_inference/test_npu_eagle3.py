@@ -9,7 +9,7 @@ from sglang.test.ascend.test_ascend_utils import (
     QWEN3_8B_WEIGHTS_PATH,
 )
 from sglang.test.ci.ci_register import register_npu_ci
-from sglang.test.few_shot_gsm8k import run_eval as run_eval
+from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
 from sglang.test.test_utils import (
     DEFAULT_URL_FOR_TEST,
     CustomTestCase,
@@ -88,7 +88,7 @@ class TestNpuEagle3(CustomTestCase):
                 port=int(self.url.port),
             )
 
-            metrics = run_eval(args)
+            metrics = run_eval_few_shot_gsm8k(args)
             self.assertGreaterEqual(
                 metrics["accuracy"],
                 self.accuracy,

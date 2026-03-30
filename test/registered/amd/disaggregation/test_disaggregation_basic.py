@@ -8,7 +8,7 @@ import requests
 from transformers import AutoTokenizer
 
 from sglang.test.ci.ci_register import register_amd_ci
-from sglang.test.few_shot_gsm8k import run_eval as run_eval
+from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
 from sglang.test.server_fixtures.disaggregation_fixture import (
     PDDisaggregationServerBase,
 )
@@ -111,7 +111,7 @@ class TestDisaggregationAccuracy(PDDisaggregationServerBase):
             host=f"http://{self.base_host}",
             port=int(self.lb_port),
         )
-        metrics = run_eval(args)
+        metrics = run_eval_few_shot_gsm8k(args)
         print(f"Evaluation metrics: {metrics}")
 
         self.assertGreater(metrics["accuracy"], 0.70)
@@ -315,7 +315,7 @@ class TestDisaggregationMooncakeFailure(PDDisaggregationServerBase):
 
         # Expect lots of failure but the server cannot crash
         try:
-            metrics = run_eval(args)
+            metrics = run_eval_few_shot_gsm8k(args)
             print(f"Evaluation metrics: {metrics}")
         except Exception as e:
             print(f"Test encountered expected errors: {e}")
@@ -424,7 +424,7 @@ class TestDisaggregationSimulatedRetract(PDDisaggregationServerBase):
             host=f"http://{self.base_host}",
             port=int(self.lb_port),
         )
-        metrics = run_eval(args)
+        metrics = run_eval_few_shot_gsm8k(args)
         print(f"Evaluation metrics: {metrics}")
 
         self.assertGreater(metrics["accuracy"], 0.70)

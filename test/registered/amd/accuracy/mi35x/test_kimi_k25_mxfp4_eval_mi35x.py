@@ -154,7 +154,7 @@ class TestKimiK25MXFP4AiterMlaEvalMI35x(unittest.TestCase):
 
         from types import SimpleNamespace
 
-        from sglang.test.few_shot_gsm8k import run_eval as run_eval
+        from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
 
         all_results = []
         summary = "### Kimi-K2.5-MXFP4 aiter MLA (MI35x)\n\n"
@@ -195,7 +195,7 @@ class TestKimiK25MXFP4AiterMlaEvalMI35x(unittest.TestCase):
                             host="http://127.0.0.1",
                             port=int(self.base_url.split(":")[-1]),
                         )
-                        metrics = run_eval(args)
+                        metrics = run_eval_few_shot_gsm8k(args)
                         acc = metrics["accuracy"]
 
                         passed = acc >= config.accuracy_threshold
