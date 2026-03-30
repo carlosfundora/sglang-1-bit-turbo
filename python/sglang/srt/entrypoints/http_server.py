@@ -219,6 +219,39 @@ def get_global_state() -> _GlobalState:
     return _global_state
 
 
+async def _init_granian_worker() -> ServerArgs:
+    """Initialize a Granian worker by creating a full TokenizerManager.
+
+    Unlike init_multi_tokenizer (which creates a lightweight TokenizerWorker
+    that talks to a MultiTokenizerRouter), this creates a direct
+    TokenizerManager that connects to the scheduler, suitable for Granian's
+    single-tokenizer mode.
+    """
+    main_pid = get_main_process_id()
+    port_args, server_args, scheduler_info = read_from_shared_memory(
+        f"multi_tokenizer_args_{main_pid}"
+    )
+
+    tokenizer_manager = TokenizerManager(server_args, port_args)
+    template_manager = TemplateManager()
+    template_manager.initialize_templates(
+        tokenizer_manager=tokenizer_manager,
+        model_path=server_args.model_path,
+        chat_template=server_args.chat_template,
+        completion_template=server_args.completion_template,
+    )
+    tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
+
+    set_global_state(
+        _GlobalState(
+            tokenizer_manager=tokenizer_manager,
+            template_manager=template_manager,
+            scheduler_info=scheduler_info,
+        )
+    )
+    return server_args
+
+
 async def init_multi_tokenizer() -> ServerArgs:
     """
     Initialization function for multi-process tokenizer mode.
@@ -275,6 +308,10 @@ async def lifespan(fast_api_app: FastAPI):
     if getattr(fast_api_app, "is_single_tokenizer_mode", False):
         server_args = fast_api_app.server_args
         warmup_thread_kwargs = fast_api_app.warmup_thread_kwargs
+        thread_label = "Tokenizer"
+    elif envs.SGLANG_GRANIAN_PARENT_PID.get() is not None:
+        server_args = await _init_granian_worker()
+        warmup_thread_kwargs = dict(server_args=server_args)
         thread_label = "Tokenizer"
     else:
         # Initialize multi-tokenizer support for worker processes
@@ -1979,6 +2016,52 @@ def _wait_weights_ready():
     )
 
 
+def _close_main_process_sockets():
+    """Close the main process's ZMQ sockets before spawning Granian workers.
+
+    Granian workers create their own TokenizerManager with fresh ZMQ sockets.
+    The main process must release its sockets first to avoid binding conflicts
+    on the same IPC addresses.
+    """
+    if _global_state is None or _global_state.tokenizer_manager is None:
+        return
+    tm = _global_state.tokenizer_manager
+    for attr in ("recv_from_detokenizer", "send_to_scheduler"):
+        sock = getattr(tm, attr, None)
+        if sock is None:
+            continue
+        inner = getattr(sock, "socket", None)
+        if inner is not None:
+            inner.close()
+        elif hasattr(sock, "close"):
+            sock.close()
+
+
+def _run_granian_server(server_args):
+    """Launch Granian with HTTP/2 support."""
+    from granian import Granian
+    from granian.constants import HTTPModes, Interfaces, Loops
+
+    granian_kwargs = dict(
+        target="sglang.srt.entrypoints.http_server:app",
+        address=server_args.host,
+        port=server_args.port,
+        interface=Interfaces.ASGI,
+        http=HTTPModes.auto,
+        loop=Loops.uvloop,
+        log_level=server_args.log_level_http or server_args.log_level or "info",
+        workers=server_args.tokenizer_worker_num,
+    )
+
+    ssl_enabled = server_args.ssl_certfile and server_args.ssl_keyfile
+    if ssl_enabled:
+        granian_kwargs["ssl_cert"] = server_args.ssl_certfile
+        granian_kwargs["ssl_key"] = server_args.ssl_keyfile
+
+    server = Granian(**granian_kwargs)
+    server.serve()
+
+
 def _setup_and_run_http_server(
     server_args: ServerArgs,
     tokenizer_manager,
@@ -2014,6 +2097,33 @@ def _setup_and_run_http_server(
 
     if server_args.enable_metrics:
         add_prometheus_track_response_middleware(app)
+
+    # Use Granian for HTTP/2 server
+    if server_args.enable_http2:
+        # Reuse the multi-tokenizer shared memory mechanism to pass
+        # init args (port_args, server_args, scheduler_info) to
+        # Granian workers, which are independent processes.
+        multi_tokenizer_args_shm = write_data_for_multi_tokenizer(
+            port_args, server_args, scheduler_infos[0]
+        )
+        try:
+            if server_args.ssl_certfile:
+                logger.info(
+                    f"SSL enabled: certfile={server_args.ssl_certfile}, "
+                    f"keyfile={server_args.ssl_keyfile}"
+                )
+            logger.info(
+                f"Starting Granian HTTP/2 server on "
+                f"{server_args.host}:{server_args.port}"
+            )
+            # Set the main process PID for shared memory lookup
+            envs.SGLANG_GRANIAN_PARENT_PID.set(os.getpid())
+            _close_main_process_sockets()
+            _run_granian_server(server_args)
+        finally:
+            if multi_tokenizer_args_shm is not None:
+                multi_tokenizer_args_shm.unlink()
+        return
 
     # Pass additional arguments to the lifespan function.
     # They will be used for additional initialization setups.

@@ -321,6 +321,7 @@ class ServerArgs:
     ssl_ca_certs: Optional[str] = None
     ssl_keyfile_password: Optional[str] = None
     enable_ssl_refresh: bool = False
+    enable_http2: bool = False
 
     # Quantization and data type
     dtype: str = "auto"
@@ -901,6 +902,21 @@ class ServerArgs:
                 "--enable-ssl-refresh requires --ssl-certfile and --ssl-keyfile "
                 "to be specified."
             )
+
+        if self.enable_http2:
+            try:
+                import granian  # noqa: F401
+            except ImportError:
+                raise ValueError(
+                    "--enable-http2 requires the 'granian' package. "
+                    'Install it with: pip install "sglang[http2]"'
+                )
+            if self.enable_ssl_refresh:
+                raise ValueError(
+                    "--enable-ssl-refresh is not supported with --enable-http2. "
+                    "Granian does not support SSL certificate hot-reloading. "
+                    "Use Uvicorn (the default) or handle certificate rotation externally."
+                )
 
     def _handle_deprecated_args(self):
         # Handle deprecated tool call parsers
@@ -3767,6 +3783,14 @@ class ServerArgs:
             default=ServerArgs.enable_ssl_refresh,
             help="Enable automatic SSL certificate hot-reloading when cert/key "
             "files change on disk. Requires --ssl-certfile and --ssl-keyfile.",
+        )
+        parser.add_argument(
+            "--enable-http2",
+            action="store_true",
+            default=ServerArgs.enable_http2,
+            help="Use Granian (HTTP/2) instead of Uvicorn (HTTP/1.1) as the ASGI server. "
+            "Requires 'pip install sglang[http2]'. Serves h2c (cleartext HTTP/2) by default "
+            "and serves h2 over TLS when --ssl-certfile and --ssl-keyfile are provided.",
         )
 
         # Quantization and data type
