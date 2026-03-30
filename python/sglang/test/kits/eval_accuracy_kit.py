@@ -22,8 +22,10 @@ class GSM8KMixin:
 
     Required attributes on the test class:
         base_url: str
-        model: str
         gsm8k_accuracy_thres: float
+
+    Optional attributes:
+        model: str (if not set, auto-detected from server)
     """
 
     gsm8k_accuracy_thres: float = _THRESHOLD_NOT_SET
