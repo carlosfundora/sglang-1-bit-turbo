@@ -146,11 +146,9 @@ def generate_markdown_table():
     global all_case_info
     table_header = (
         "| tokens | heads | headsize | dtype "
-        "| device | torch | triton | v1 | v2 | speedup(vs triton) | speedup(vs v1)|"
+        "| device | torch | triton | v2 | speedup(vs triton) |"
     )
-    table_separator = (
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
-    )
+    table_separator = "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
 
     def shortly_dtype(dtype: torch.dtype) -> str:
         return str(dtype).removeprefix("torch.")
@@ -169,21 +167,17 @@ def generate_markdown_table():
             device,
             time_torch,
             time_triton,
-            time_v1,
             time_v2,
         ) = info
         dtype = shortly_dtype(dtype)
         device = shortly_device(device)
         improved_triton = time_triton / time_v2
-        improved_v1 = time_v1 / time_v2
         print(
             f"| {num_tokens} | {num_heads} | {head_size} "
             f"| {dtype} | {device} | {time_torch:.4f}ms "
             f"| {time_triton:.4f}ms "
-            f"| {time_v1:.4f}ms "
             f"| {time_v2:.4f}ms "
-            f"| {improved_triton:.4f}x "
-            f"| {improved_v1:.4f}x |"
+            f"| {improved_triton:.4f}x |"
         )
 
 
@@ -374,7 +368,6 @@ def test_merge_attn_states(
             device,
             time_torch,
             time_triton,
-            time_v1,
             time_v2,
         )
     )
