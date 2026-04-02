@@ -119,6 +119,16 @@ QUANTIZATION_CHOICES = [
     "quark_int4fp8_moe",
 ]
 
+
+def _is_hip_aiter_available() -> bool:
+    if not is_hip():
+        return False
+
+    if not envs.SGLANG_USE_AITER.get():
+        return False
+
+    return importlib.util.find_spec("aiter") is not None
+
 SPECULATIVE_DRAFT_MODEL_QUANTIZATION_CHOICES = [*QUANTIZATION_CHOICES, "unquant"]
 
 ATTENTION_BACKEND_CHOICES = [
@@ -1682,7 +1692,7 @@ class ServerArgs:
                     self.attention_backend = "trtllm_mha"
                 elif is_sm90_supported():
                     self.attention_backend = "fa3"
-                elif is_hip():
+                elif _is_hip_aiter_available():
                     self.attention_backend = "aiter"
                 else:
                     self.attention_backend = "triton"
@@ -1809,7 +1819,7 @@ class ServerArgs:
                     self.attention_backend, platform = "trtllm_mha", "sm100"
                 elif is_sm90_supported():
                     self.attention_backend, platform = "fa3", "sm90"
-                elif is_hip():
+                elif _is_hip_aiter_available():
                     self.attention_backend, platform = "aiter", "hip"
                 elif self.device == "xpu":
                     self.attention_backend, platform = "intel_xpu", "xpu"
@@ -2212,8 +2222,10 @@ class ServerArgs:
                 )
             ):
                 return "trtllm_mha"
-            elif is_hip():
+            elif _is_hip_aiter_available():
                 return "aiter"
+            elif is_hip():
+                return "triton"
             elif is_mps():
                 return "torch_native"
             else:
@@ -2227,7 +2239,7 @@ class ServerArgs:
             elif is_hip():
                 head_num = model_config.get_num_kv_heads(self.tp_size)
                 # TODO current aiter only support head number 16 or 128 head number
-                if head_num == 128 or head_num == 16:
+                if _is_hip_aiter_available() and (head_num == 128 or head_num == 16):
                     return "aiter"
                 else:
                     return "triton"
@@ -2362,6 +2374,25 @@ class ServerArgs:
                 "Setting attention backend to triton."
             )
             self.attention_backend = "triton"
+
+        if self.attention_backend == "aiter" and not _is_hip_aiter_available():
+            logger.warning(
+                "AITER backend was requested on ROCm, but aiter is unavailable or "
+                "SGLANG_USE_AITER is not enabled. Falling back to triton."
+            )
+            self.attention_backend = "triton"
+        if self.prefill_attention_backend == "aiter" and not _is_hip_aiter_available():
+            logger.warning(
+                "AITER prefill backend was requested on ROCm, but aiter is unavailable "
+                "or SGLANG_USE_AITER is not enabled. Falling back to triton."
+            )
+            self.prefill_attention_backend = "triton"
+        if self.decode_attention_backend == "aiter" and not _is_hip_aiter_available():
+            logger.warning(
+                "AITER decode backend was requested on ROCm, but aiter is unavailable "
+                "or SGLANG_USE_AITER is not enabled. Falling back to triton."
+            )
+            self.decode_attention_backend = "triton"
 
         if (
             self.prefill_attention_backend == "fa4"
