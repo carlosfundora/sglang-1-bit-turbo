@@ -61,7 +61,7 @@ cxx_flags = ["-O3"]
 libraries = ["hiprtc", "amdhip64", "c10", "torch", "torch_python"]
 extra_link_args = ["-Wl,-rpath,$ORIGIN/../../torch/lib", f"-L/usr/lib/{arch}-linux-gnu"]
 
-default_target = "gfx942"
+default_target = "gfx1030"
 amdgpu_target = os.environ.get("AMDGPU_TARGET", default_target)
 
 if torch.cuda.is_available():
@@ -72,21 +72,32 @@ if torch.cuda.is_available():
 else:
     print(f"Warning: torch.cuda not available. Using default target: {amdgpu_target}")
 
-if amdgpu_target not in ["gfx942", "gfx950"]:
+gfx103x_targets = {"gfx1030", "gfx1031", "gfx1035"}
+if amdgpu_target in gfx103x_targets - {"gfx1030"}:
     print(
-        f"Warning: Unsupported GPU architecture detected '{amdgpu_target}'. Expected 'gfx942' or 'gfx950'."
+        f"Warning: Normalizing unsupported RDNA2 target '{amdgpu_target}' to 'gfx1030'."
+    )
+    amdgpu_target = "gfx1030"
+
+if amdgpu_target not in ["gfx942", "gfx950", "gfx1030"]:
+    print(
+        "Warning: Unsupported GPU architecture detected "
+        f"'{amdgpu_target}'. Expected one of gfx942, gfx950, gfx1030."
     )
     sys.exit(1)
 
-fp8_macro = (
-    "-DHIP_FP8_TYPE_FNUZ" if amdgpu_target == "gfx942" else "-DHIP_FP8_TYPE_E4M3"
-)
+enable_fp8 = amdgpu_target in {"gfx942", "gfx950"}
+fp8_macro = None
+if amdgpu_target == "gfx942":
+    fp8_macro = "-DHIP_FP8_TYPE_FNUZ"
+elif amdgpu_target == "gfx950":
+    fp8_macro = "-DHIP_FP8_TYPE_E4M3"
 
 # Dynamic shared-memory budget for the TopK kernels.
 # - gfx942 (MI300/MI325): LDS is typically 64KB per workgroup -> keep dynamic smem <= ~48KB
 #   (leaves room for static shared allocations in the kernel).
 # - gfx95x (MI350): LDS is larger (e.g. 160KB per CU) -> allow the original 128KB dynamic smem.
-topk_dynamic_smem_bytes = 48 * 1024 if amdgpu_target == "gfx942" else 32 * 1024 * 4
+topk_dynamic_smem_bytes = 48 * 1024 if amdgpu_target in {"gfx942", "gfx1030"} else 32 * 1024 * 4
 
 hipcc_flags = [
     "-DNDEBUG",
@@ -97,10 +108,16 @@ hipcc_flags = [
     "-std=c++17",
     f"--amdgpu-target={amdgpu_target}",
     "-DENABLE_BF16",
-    "-DENABLE_FP8",
-    fp8_macro,
     f"-DSGL_TOPK_DYNAMIC_SMEM_BYTES={topk_dynamic_smem_bytes}",
 ]
+
+if enable_fp8:
+    hipcc_flags.extend(["-DENABLE_FP8", fp8_macro])
+else:
+    print(
+        "Warning: Building sgl-kernel ROCm extension without FP8 support on "
+        f"{amdgpu_target}. This is intentional for RDNA2 baseline compatibility."
+    )
 
 ext_modules = [
     CUDAExtension(

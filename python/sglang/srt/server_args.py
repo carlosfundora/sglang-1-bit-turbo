@@ -65,7 +65,7 @@ from sglang.srt.utils.common import (
     torch_release,
     xpu_has_xmx_support,
 )
-from sglang.srt.utils.hf_transformers_utils import check_gguf_file
+from sglang.srt.utils.hf_transformers_utils import check_gguf_file, get_config
 from sglang.srt.utils.network import NetworkAddress, get_free_port, wait_port_available
 from sglang.utils import is_in_ci
 
@@ -2946,6 +2946,9 @@ class ServerArgs:
             self.speculative_algorithm = "EAGLE"
 
         if self.speculative_algorithm in ("EAGLE", "EAGLE3", "STANDALONE"):
+            if self.speculative_algorithm == "EAGLE3":
+                self._validate_eagle3_draft_model()
+
             if self.speculative_algorithm == "STANDALONE" and self.enable_dp_attention:
                 # TODO: support dp attention for standalone speculative decoding
                 raise ValueError(
@@ -3091,6 +3094,33 @@ class ServerArgs:
                 raise ValueError(
                     "Currently ngram speculative decoding does not support dp attention."
                 )
+
+    def _validate_eagle3_draft_model(self):
+        if self.speculative_draft_model_path is None:
+            raise ValueError(
+                "EAGLE3 requires --speculative-draft-model-path pointing to a trained EAGLE3 draft checkpoint."
+            )
+
+        draft_config = get_config(
+            self.speculative_draft_model_path,
+            trust_remote_code=self.trust_remote_code,
+            revision=self.speculative_draft_model_revision,
+        )
+        draft_architectures = list(getattr(draft_config, "architectures", []) or [])
+        has_eagle_architecture = any(
+            "eagle" in architecture.lower() for architecture in draft_architectures
+        )
+        has_eagle_config = getattr(draft_config, "eagle_config", None) is not None
+
+        if has_eagle_architecture or has_eagle_config:
+            return
+
+        raise ValueError(
+            "EAGLE3 requires a trained EAGLE3 draft checkpoint. "
+            f"Draft model '{self.speculative_draft_model_path}' has architectures "
+            f"{draft_architectures or ['<missing>']} and no eagle_config. "
+            "Use STANDALONE for plain draft-model speculation, or provide an EAGLE3 draft artifact."
+        )
 
     def _handle_load_format(self):
         if (

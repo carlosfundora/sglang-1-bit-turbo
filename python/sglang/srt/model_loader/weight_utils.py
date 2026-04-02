@@ -947,7 +947,9 @@ def get_gguf_extra_tensor_names(
     gguf_file: str, gguf_to_hf_name_map: Dict[str, str]
 ) -> List[str]:
     import gguf
+    from sglang.srt.utils.gguf_compat import ensure_prism_gguf_compat
 
+    ensure_prism_gguf_compat()
     reader = gguf.GGUFReader(gguf_file)
     expected_gguf_keys = set(gguf_to_hf_name_map.keys())
     exact_gguf_keys = set([tensor.name for tensor in reader.tensors])
@@ -964,7 +966,12 @@ def gguf_quant_weights_iterator(
     """
 
     import gguf
+    from sglang.srt.utils.gguf_compat import (
+        ensure_prism_gguf_compat,
+        gguf_type_name,
+    )
 
+    ensure_prism_gguf_compat()
     reader = gguf.GGUFReader(gguf_file)
 
     for tensor in reader.tensors:
@@ -972,7 +979,7 @@ def gguf_quant_weights_iterator(
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
 
-            if weight_type.name != "F32":
+            if gguf_type_name(weight_type) != "F32":
                 weight_type_name = name.replace("weight", "qweight_type")
                 weight_type = torch.tensor(weight_type)
                 yield weight_type_name, weight_type
@@ -983,7 +990,7 @@ def gguf_quant_weights_iterator(
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
 
-            if weight_type.name != "F32":
+            if gguf_type_name(weight_type) != "F32":
                 name = name.replace("weight", "qweight")
             param = torch.tensor(weight)
             yield name, param

@@ -2835,8 +2835,15 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
         k_comp = self._compress_heads(cache_k, self.head_dim)
         v_comp = self._compress_heads(cache_v, self.v_head_dim)
 
-        self.k_buffer[layer_idx][loc] = k_comp
-        self.v_buffer[layer_idx][loc] = v_comp
+        if _is_hip:
+            # HIP has been faulting on advanced-index writes into the packed uint8
+            # TurboQuant buffers; use index_copy_ on the row axis instead.
+            loc = loc.to(device=self.k_buffer[layer_idx].device, dtype=torch.long)
+            self.k_buffer[layer_idx].index_copy_(0, loc, k_comp.contiguous())
+            self.v_buffer[layer_idx].index_copy_(0, loc, v_comp.contiguous())
+        else:
+            self.k_buffer[layer_idx][loc] = k_comp
+            self.v_buffer[layer_idx][loc] = v_comp
         self._deq_dirty_k[layer_idx] = True
         self._deq_dirty_v[layer_idx] = True
 

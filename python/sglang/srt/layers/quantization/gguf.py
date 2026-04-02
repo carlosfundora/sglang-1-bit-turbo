@@ -7,6 +7,8 @@ import warnings
 from typing import TYPE_CHECKING, Any, List, Optional
 
 import gguf
+import gguf.quants as gguf_quants
+import numpy as np
 import torch
 from gguf import GGMLQuantizationType as WeightType
 from torch.nn.parameter import Parameter, UninitializedParameter
@@ -20,6 +22,12 @@ from sglang.srt.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
+from sglang.srt.utils.gguf_compat import (
+    PRISM_Q1_0,
+    PRISM_Q1_0_G128,
+    ensure_prism_gguf_compat,
+    gguf_type_name,
+)
 from sglang.srt.utils import is_cuda, is_hip, is_musa, is_xpu, set_weight_attrs
 
 if TYPE_CHECKING:
@@ -33,6 +41,8 @@ _is_hip = is_hip()
 _is_xpu = is_xpu()
 _is_musa = is_musa()
 
+ensure_prism_gguf_compat()
+
 if _is_cuda or _is_musa:
     from sgl_kernel import gelu_and_mul, moe_align_block_size, moe_sum, silu_and_mul
     from sgl_kernel.quantization import (
@@ -44,7 +54,13 @@ if _is_cuda or _is_musa:
         ggml_mul_mat_vec_a8,
     )
 else:
-    if not _is_hip:
+    if _is_hip:
+        warnings.warn(
+            "HIP uses a compatibility fallback for GGUF quantization in this fork. "
+            "EAGLE/TurboQuant runtime remains native, but GGUF weight matmuls may "
+            "dequantize through a slower path."
+        )
+    else:
         warnings.warn(f"Only CUDA and MUSA support GGUF quantization currently.")
 
 logger = logging.getLogger(__name__)
@@ -56,7 +72,10 @@ class GGUFConfig(QuantizationConfig):
     def __init__(self, modules_to_not_convert: list[str] | None = None) -> None:
         super().__init__()
         if _is_hip:
-            warnings.warn(f"Only CUDA and MUSA support GGUF quantization currently.")
+            warnings.warn(
+                "HIP GGUF quantization support in this fork uses a compatibility "
+                "fallback path for unsupported kernels."
+            )
         self.modules_to_not_convert = modules_to_not_convert or []
 
     def __repr__(self) -> str:
@@ -123,6 +142,10 @@ KQUANT_TYPES = {
     WeightType.Q5_K,
     WeightType.Q6_K,
 }
+PRISM_Q1_TYPES = {
+    PRISM_Q1_0,
+    PRISM_Q1_0_G128,
+}
 IMATRIX_QUANT_TYPES = {
     WeightType.IQ1_M,
     WeightType.IQ1_S,
@@ -137,14 +160,76 @@ IMATRIX_QUANT_TYPES = {
 # TODO(Isotr0py): Currently, we don't have MMQ kernel for I-Matrix quantization.
 # Consolidate DEQUANT_TYPES, MMVQ_QUANT_TYPES and MMQ_QUANT_TYPES after we add
 # MMQ kernel for I-Matrix quantization.
-DEQUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES
+DEQUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES | PRISM_Q1_TYPES
 MMVQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES
 MMQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES
+
+
+def _dequantize_with_gguf_quants(
+    qweight: torch.Tensor,
+    qweight_type: int,
+    *,
+    dtype: torch.dtype,
+    rows: int,
+    cols: int,
+) -> torch.Tensor:
+    qweight_np = qweight.detach().to(device="cpu", dtype=torch.uint8).contiguous().numpy()
+    dequant = gguf_quants.dequantize(qweight_np, qweight_type)
+    dequant = np.ascontiguousarray(dequant.reshape(rows, cols))
+    return torch.from_numpy(dequant).to(device=qweight.device, dtype=dtype)
+
+
+def _get_hip_prism_cpu_weight(
+    qweight: torch.Tensor,
+    qweight_type: int,
+    *,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    cache = getattr(qweight, "_sglang_hip_prism_cpu_weight_cache", None)
+    cache_key = (int(qweight_type), str(dtype), tuple(qweight.shape))
+    if cache is not None and cache.get("key") == cache_key:
+        return cache["weight"]
+
+    block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
+    rows = qweight.shape[0]
+    cols = qweight.shape[1] // type_size * block_size
+    qweight_np = qweight.detach().to(device="cpu", dtype=torch.uint8).contiguous().numpy()
+    dequant = gguf_quants.dequantize(qweight_np, qweight_type)
+    dequant = np.ascontiguousarray(dequant.reshape(rows, cols))
+    weight = torch.from_numpy(dequant).to(dtype=dtype).contiguous()
+    qweight._sglang_hip_prism_cpu_weight_cache = {"key": cache_key, "weight": weight}
+    return weight
+
+
+def _dequantize_gguf_weight(
+    qweight: torch.Tensor,
+    qweight_type: int,
+    *,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
+    rows = qweight.shape[0]
+    cols = qweight.shape[1] // type_size * block_size
+
+    if (_is_cuda or _is_musa) and qweight_type not in PRISM_Q1_TYPES:
+        return ggml_dequantize(qweight, qweight_type, rows, cols, dtype)
+
+    return _dequantize_with_gguf_quants(
+        qweight, qweight_type, dtype=dtype, rows=rows, cols=cols
+    )
 
 
 def fused_mul_mat_gguf(
     x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
 ) -> torch.Tensor:
+    has_fast_gguf = _is_cuda or _is_musa
+    if _is_hip and qweight_type in PRISM_Q1_TYPES:
+        logger.warning_once(
+            "HIP PRISM Q1 uses a CPU matmul compatibility bridge in this fork."
+        )
+        weight_cpu = _get_hip_prism_cpu_weight(qweight, qweight_type, dtype=x.dtype)
+        x_cpu = x.to(device="cpu", dtype=weight_cpu.dtype)
+        return (x_cpu @ weight_cpu.T).to(device=x.device, dtype=x.dtype)
     if qweight_type in IMATRIX_QUANT_TYPES:
         mmvq_safe = 8 if qweight.shape[0] > 5120 else 16
     else:
@@ -157,23 +242,19 @@ def fused_mul_mat_gguf(
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
     # enable MMVQ in contiguous batching with batch_size=1
-    if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
+    if has_fast_gguf and x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
         y = ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
     # Use MMQ Kernel if it's available (standard + k-quants)
-    elif qweight_type in MMQ_QUANT_TYPES:
+    elif has_fast_gguf and qweight_type in MMQ_QUANT_TYPES:
         y = ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
     # If there is no available MMQ kernel, fallback to dequantize
     elif qweight_type in DEQUANT_TYPES:
-        block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
-        shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
-        weight = ggml_dequantize(qweight, qweight_type, *shape, x.dtype)
+        weight = _dequantize_gguf_weight(qweight, qweight_type, dtype=x.dtype)
         y = x @ weight.T
     else:
-        # Raise an error if the quantization type is not supported.
-        # Might be useful if llama.cpp adds a new quantization type.
-        # Wrap to GGMLQuantizationType IntEnum to make sure it's a valid type.
-        qweight_type = WeightType(qweight_type)
-        raise NotImplementedError(f"Unsupported GGUF quantization type: {qweight_type}")
+        raise NotImplementedError(
+            f"Unsupported GGUF quantization type: {gguf_type_name(qweight_type)}"
+        )
     return y
 
 
@@ -187,21 +268,32 @@ def fused_moe_gguf(
     qweight_type2: int,
     activation: str,
 ) -> torch.Tensor:
+    has_fast_gguf = _is_cuda or _is_musa
+
     def act(x: torch.Tensor):
-        d = x.shape[-1] // 2
-        output_shape = x.shape[:-1] + (d,)
-        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        if has_fast_gguf:
+            d = x.shape[-1] // 2
+            output_shape = x.shape[:-1] + (d,)
+            out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+            if activation == "silu":
+                silu_and_mul(out, x)
+            elif activation == "gelu":
+                gelu_and_mul(out, x)
+            else:
+                raise ValueError(f"Unsupported activation: {activation}")
+            return out
+        gate, up = x.chunk(2, dim=-1)
         if activation == "silu":
-            silu_and_mul(out, x)
-        elif activation == "gelu":
-            gelu_and_mul(out, x)
-        else:
-            raise ValueError(f"Unsupported activation: {activation}")
-        return out
+            return torch.nn.functional.silu(gate) * up
+        if activation == "gelu":
+            return torch.nn.functional.gelu(gate) * up
+        raise ValueError(f"Unsupported activation: {activation}")
 
     out_hidden_states = torch.empty_like(x)
     # unless we decent expert reuse we are better off running moe_vec kernel
     if (
+        has_fast_gguf
+        and
         qweight_type2 in MMQ_QUANT_TYPES
         and qweight_type in MMQ_QUANT_TYPES
         and x.shape[0] > 64
@@ -242,7 +334,11 @@ def fused_moe_gguf(
         )
         # TODO(FlamingoPg): maybe we can use moe_sum_reduce here?
         moe_sum(out, out_hidden_states)
-    elif qweight_type2 in MMVQ_QUANT_TYPES and qweight_type in MMVQ_QUANT_TYPES:
+    elif (
+        has_fast_gguf
+        and qweight_type2 in MMVQ_QUANT_TYPES
+        and qweight_type in MMVQ_QUANT_TYPES
+    ):
         num_tokens, _ = x.shape
         E, N, _ = w1.shape
         top_k = topk_ids.shape[1]
@@ -294,17 +390,14 @@ def apply_gguf_embedding(
     if qweight_type in UNQUANTIZED_TYPES:
         return torch.embedding(qweight, x)
     elif qweight_type in DEQUANT_TYPES:
-        block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
         x_flat = x.flatten()
-        assert hidden_size == qweight.shape[1] // type_size * block_size
         quant = torch.index_select(qweight, dim=0, index=x_flat)
-        dequant = ggml_dequantize(
-            quant, qweight_type, hidden_size, x_flat.shape[0], dtype
-        )
+        dequant = _dequantize_gguf_weight(quant, qweight_type, dtype=dtype or torch.float16)
         return dequant.view(*x.shape, hidden_size)
     else:
-        qweight_type = WeightType(qweight_type)
-        raise NotImplementedError(f"Unsupported GGUF quantization type: {qweight_type}")
+        raise NotImplementedError(
+            f"Unsupported GGUF quantization type: {gguf_type_name(qweight_type)}"
+        )
 
 
 class GGUFLinearMethod(LinearMethodBase):
@@ -366,9 +459,9 @@ class GGUFLinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module):
         qweight_type = layer.qweight_type.weight_type
         if not (qweight_type in UNQUANTIZED_TYPES or qweight_type in DEQUANT_TYPES):
-            qweight_type = WeightType(qweight_type)
             raise ValueError(
-                f"Unsupported GGUF quantization type {qweight_type} in layer {layer}."
+                f"Unsupported GGUF quantization type {gguf_type_name(qweight_type)} "
+                f"in layer {layer}."
             )
         # For MergedColumnParallelLinear and QKVParallelLinear, we need to
         # materialize the padded weight parameter for CUDA Graph compatibility.

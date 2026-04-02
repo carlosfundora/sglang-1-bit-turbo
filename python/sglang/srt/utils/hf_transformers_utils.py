@@ -462,6 +462,7 @@ def _ensure_gguf_version():
     resulting in packaging.version.InvalidVersion: Invalid version: 'N/A'."""
     try:
         import gguf
+        from sglang.srt.utils.gguf_compat import ensure_prism_gguf_compat
 
         if not hasattr(gguf, "__version__"):
             import importlib.metadata
@@ -470,6 +471,7 @@ def _ensure_gguf_version():
                 gguf.__version__ = importlib.metadata.version("gguf")
             except Exception:
                 gguf.__version__ = "0.0.0"
+        ensure_prism_gguf_compat()
     except ImportError:
         pass
 

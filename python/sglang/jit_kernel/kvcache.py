@@ -31,6 +31,9 @@ def _jit_kvcache_module(row_bytes: int) -> Module:
 @cache_once
 def can_use_store_cache(size: int) -> bool:
     logger = logging.getLogger(__name__)
+    if torch.version.hip:
+        logger.info("Disable JIT KV-Cache kernel on HIP; using native cache writes.")
+        return False
     if size % 4 != 0:
         logger.warning(
             f"Unsupported row_bytes={size} for JIT KV-Cache kernel:"

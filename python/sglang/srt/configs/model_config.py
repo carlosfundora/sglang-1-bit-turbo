@@ -907,6 +907,7 @@ class ModelConfig:
             "awq",
             "gptq",
             "fp8",
+            "gguf",
             "compressed_tensors",
             "compressed-tensors",
             "fbgemm_fp8",

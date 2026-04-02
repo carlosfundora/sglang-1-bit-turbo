@@ -26,13 +26,15 @@ def _resolve_future_token_ids_native(input_ids, future_token_ids_map):
     )
 
 
-if _is_cuda or _is_hip:
+if _is_cuda:
     from sglang.jit_kernel.resolve_future_token_ids import (
         resolve_future_token_ids_cuda,
     )
 
     _resolve_future_token_ids = resolve_future_token_ids_cuda
 else:
+    # ROCm currently lacks the tvm_ffi-backed JIT path used by the CUDA helper.
+    # Keep HIP on the native tensor fallback so baseline serving remains usable.
     _resolve_future_token_ids = _resolve_future_token_ids_native
 
 
