@@ -2,19 +2,19 @@ import torch
 import triton
 import triton.language as tl
 
-from sglang.srt.utils import is_cuda
+from sglang.srt.utils import is_cuda, is_hip
 
 _FLASHMLA_CREATE_KV_BLOCK_SIZE = 4096
 FLASHMLA_CREATE_KV_BLOCK_SIZE_TRITON = tl.constexpr(_FLASHMLA_CREATE_KV_BLOCK_SIZE)
 
 _is_cuda = is_cuda()
+_hip_kv_mismatch_logged = False
 
 if _is_cuda:
     from sgl_kernel import concat_mla_absorb_q
 
-
 @triton.jit
-def create_flashinfer_kv_indices_triton(
+def _create_flashinfer_kv_indices_triton_kernel(
     req_to_token_ptr,  # [max_batch, max_context_len]
     req_pool_indices_ptr,
     page_kernel_lens_ptr,
@@ -50,6 +50,111 @@ def create_flashinfer_kv_indices_triton(
             mask=mask,
         )
         tl.store(kv_indices_ptr + kv_indices_offset + offset, data, mask=mask)
+
+
+def _create_flashinfer_kv_indices_hip_fallback(
+    bs,
+    req_to_token_ptr,
+    req_pool_indices_ptr,
+    page_kernel_lens_ptr,
+    kv_indptr,
+    kv_start_idx,
+    kv_indices_ptr,
+    req_to_token_ptr_stride,
+):
+    global _hip_kv_mismatch_logged
+    del req_to_token_ptr_stride
+    if bs <= 0:
+        return
+
+    req_to_token_cpu = req_to_token_ptr.detach().contiguous().to(device="cpu")
+    req_pool_indices = req_pool_indices_ptr[:bs].detach().to(device="cpu").tolist()
+    page_kernel_lens = page_kernel_lens_ptr[:bs].detach().to(device="cpu").tolist()
+    kv_indptr_cpu = kv_indptr[: bs + 1].detach().to(device="cpu").tolist()
+    if kv_start_idx is None:
+        kv_starts = [0] * bs
+    else:
+        kv_starts = kv_start_idx[:bs].detach().to(device="cpu").tolist()
+
+    total_len = int(kv_indptr_cpu[bs]) if bs > 0 else 0
+    kv_indices_cpu = (
+        torch.empty(total_len, dtype=kv_indices_ptr.dtype, device="cpu")
+        if total_len > 0
+        else None
+    )
+
+    for pid in range(bs):
+        kv_len = int(page_kernel_lens[pid])
+        if kv_len <= 0:
+            continue
+        req_pool_index = int(req_pool_indices[pid])
+        if req_pool_index < 0 or req_pool_index >= req_to_token_cpu.size(0):
+            _hip_kv_mismatch_logged = True
+            continue
+        kv_offset = int(kv_indptr_cpu[pid])
+        next_kv_offset = int(kv_indptr_cpu[pid + 1])
+        kv_start = int(kv_starts[pid])
+        writable_len = max(0, next_kv_offset - kv_offset)
+        available_src_len = max(0, req_to_token_cpu.size(1) - kv_start)
+        available_dst_len = max(0, kv_indices_ptr.numel() - kv_offset)
+        actual_len = min(kv_len, writable_len, available_src_len, available_dst_len)
+
+        if actual_len <= 0:
+            _hip_kv_mismatch_logged = True
+            continue
+
+        if (
+            actual_len != kv_len or kv_offset + actual_len > kv_indices_ptr.numel()
+        ) and not _hip_kv_mismatch_logged:
+            _hip_kv_mismatch_logged = True
+
+        kv_end = kv_start + actual_len
+        src_tokens = req_to_token_cpu[req_pool_index, kv_start:kv_end].contiguous()
+        if kv_indices_cpu is not None:
+            kv_indices_cpu[kv_offset : kv_offset + actual_len].copy_(
+                src_tokens.to(dtype=kv_indices_cpu.dtype)
+            )
+
+    if total_len > 0 and kv_indices_cpu is not None:
+        kv_indices_ptr[:total_len].copy_(
+            kv_indices_cpu.to(device=kv_indices_ptr.device, dtype=kv_indices_ptr.dtype)
+        )
+
+
+class _CreateFlashinferKvIndicesLauncher:
+    def __getitem__(self, grid):
+        if isinstance(grid, tuple):
+            bs = int(grid[0])
+        else:
+            bs = int(grid)
+
+        if is_hip():
+            def launch(
+                req_to_token_ptr,
+                req_pool_indices_ptr,
+                page_kernel_lens_ptr,
+                kv_indptr,
+                kv_start_idx,
+                kv_indices_ptr,
+                req_to_token_ptr_stride,
+            ):
+                return _create_flashinfer_kv_indices_hip_fallback(
+                    bs,
+                    req_to_token_ptr,
+                    req_pool_indices_ptr,
+                    page_kernel_lens_ptr,
+                    kv_indptr,
+                    kv_start_idx,
+                    kv_indices_ptr,
+                    req_to_token_ptr_stride,
+                )
+
+            return launch
+
+        return _create_flashinfer_kv_indices_triton_kernel[grid]
+
+
+create_flashinfer_kv_indices_triton = _CreateFlashinferKvIndicesLauncher()
 
 
 def get_num_page_per_block_flashmla(page_size: int = 64) -> int:

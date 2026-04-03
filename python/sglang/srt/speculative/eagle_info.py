@@ -3,6 +3,7 @@ from copy import copy
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -39,7 +40,7 @@ from sglang.srt.speculative.spec_utils import (
     get_src_tgt_cache_loc,
     get_target_cache_loc,
 )
-from sglang.srt.utils import is_cuda, next_power_of_2
+from sglang.srt.utils import is_cuda, is_hip, next_power_of_2
 
 if is_cuda():
     from sgl_kernel import (
@@ -49,6 +50,64 @@ if is_cuda():
     )
 
 logger = logging.getLogger(__name__)
+
+
+def _build_kv_indptr_for_hip(
+    paged_kernel_lens: torch.Tensor, device: torch.device
+) -> tuple[torch.Tensor, int]:
+    paged_kernel_lens_cpu = paged_kernel_lens.detach().contiguous().to(
+        "cpu", dtype=torch.int32
+    )
+    cum_kv_seq_len_cpu = torch.zeros(
+        (paged_kernel_lens_cpu.numel() + 1,), dtype=torch.int32
+    )
+    cum_kv_seq_len_cpu[1:] = torch.cumsum(paged_kernel_lens_cpu, dim=0)
+    total = int(cum_kv_seq_len_cpu[-1].item())
+    return cum_kv_seq_len_cpu.to(device=device), total
+
+def _validate_hip_spec_metadata(
+    req_pool_indices: torch.Tensor,
+    paged_kernel_lens: torch.Tensor,
+    cum_kv_seq_len: torch.Tensor,
+    req_to_token: torch.Tensor,
+    draft_token_num: int,
+):
+    errors = []
+    if req_pool_indices.ndim != 1:
+        errors.append(f"req_pool_indices.ndim={req_pool_indices.ndim}")
+    if paged_kernel_lens.ndim != 1:
+        errors.append(f"paged_kernel_lens.ndim={paged_kernel_lens.ndim}")
+    if req_pool_indices.numel() != paged_kernel_lens.numel():
+        errors.append(
+            f"batch_mismatch=req_pool_indices:{req_pool_indices.numel()} "
+            f"paged_kernel_lens:{paged_kernel_lens.numel()}"
+        )
+    if paged_kernel_lens.numel() > 0 and int(paged_kernel_lens.min().item()) < 0:
+        errors.append(f"min_paged_kernel_len={int(paged_kernel_lens.min().item())}")
+    if cum_kv_seq_len.ndim != 1:
+        errors.append(f"cum_kv_seq_len.ndim={cum_kv_seq_len.ndim}")
+    expected_indptr = req_pool_indices.numel() + 1
+    if cum_kv_seq_len.numel() != expected_indptr:
+        errors.append(
+            f"cum_kv_seq_len.numel={cum_kv_seq_len.numel()} expected={expected_indptr}"
+        )
+    total_from_lens = int(paged_kernel_lens.sum().item()) if paged_kernel_lens.numel() else 0
+    total_from_indptr = int(cum_kv_seq_len[-1].item()) if cum_kv_seq_len.numel() else 0
+    if total_from_lens != total_from_indptr:
+        errors.append(
+            f"lens_sum={total_from_lens} indptr_total={total_from_indptr}"
+        )
+    if req_pool_indices.numel() > 0:
+        max_req = int(req_pool_indices.max().item())
+        if max_req >= req_to_token.shape[0]:
+            errors.append(
+                f"max_req_pool_index={max_req} req_rows={req_to_token.shape[0]}"
+            )
+
+    if errors:
+        raise RuntimeError(
+            "ROCm speculative metadata validation failed: " + ", ".join(errors)
+        )
 
 
 @dataclass
@@ -166,6 +225,8 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
     ):
         device = req_pool_indices.device
         batch_size = len(req_pool_indices)
+        req_pool_indices = req_pool_indices.contiguous()
+        req_to_token = req_to_token.contiguous()
         qo_indptr = torch.arange(
             0,
             (1 + batch_size) * self.draft_token_num,
@@ -173,12 +234,28 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
             dtype=torch.int32,
             device=device,
         )
-        cum_kv_seq_len = torch.zeros(
-            (batch_size + 1,), dtype=torch.int32, device=device
-        )
-
+        paged_kernel_lens = paged_kernel_lens.to(
+            device=device, dtype=torch.int32
+        ).contiguous().clone()
         paged_kernel_lens = paged_kernel_lens + self.draft_token_num
-        cum_kv_seq_len[1:] = torch.cumsum(paged_kernel_lens, dim=0)
+        if is_hip():
+            cum_kv_seq_len, paged_kernel_lens_sum = _build_kv_indptr_for_hip(
+                paged_kernel_lens, device
+            )
+        else:
+            cum_kv_seq_len = torch.zeros(
+                (batch_size + 1,), dtype=torch.int32, device=device
+            )
+            cum_kv_seq_len[1:] = torch.cumsum(paged_kernel_lens, dim=0)
+
+        if is_hip():
+            _validate_hip_spec_metadata(
+                req_pool_indices=req_pool_indices,
+                paged_kernel_lens=paged_kernel_lens,
+                cum_kv_seq_len=cum_kv_seq_len,
+                req_to_token=req_to_token,
+                draft_token_num=self.draft_token_num,
+            )
 
         kv_indices = torch.empty(
             paged_kernel_lens_sum + self.draft_token_num * batch_size,
@@ -522,14 +599,24 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
             batch.seq_lens.add_(accept_length + 1)
             batch.seq_lens_cpu.add_(accept_length_cpu + 1)
 
+            frozen_seq_lens, frozen_seq_lens_cpu = (
+                EagleDraftInput._freeze_seq_lens_for_draft_extend(
+                    batch.seq_lens,
+                    batch.seq_lens_cpu,
+                    batch.req_to_token_pool.req_to_token,
+                )
+            )
             draft_input = EagleDraftInput(
                 hidden_states=batch.spec_info.hidden_states[accept_index],
                 verified_id=verified_id,
                 accept_length=accept_length,
                 accept_length_cpu=accept_length_list,
-                seq_lens_for_draft_extend=batch.seq_lens,
-                seq_lens_for_draft_extend_cpu=batch.seq_lens_cpu,
-                req_pool_indices_for_draft_extend=batch.req_pool_indices,
+                # Freeze these tensors for the follow-up draft extend. Reusing the
+                # live batch views lets later scheduler mutations corrupt the draft
+                # metadata on slower HIP paths, which surfaces as impossible seq_lens.
+                seq_lens_for_draft_extend=frozen_seq_lens,
+                seq_lens_for_draft_extend_cpu=frozen_seq_lens_cpu,
+                req_pool_indices_for_draft_extend=batch.req_pool_indices.clone(),
             )
 
             return EagleVerifyOutput(
@@ -583,6 +670,13 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                         next_power_of_2(self.draft_token_num),
                     )
 
+                frozen_seq_lens, frozen_seq_lens_cpu = (
+                    EagleDraftInput._freeze_seq_lens_for_draft_extend(
+                        batch.seq_lens[unfinished_index_device],
+                        batch.seq_lens_cpu[unfinished_index],
+                        batch.req_to_token_pool.req_to_token,
+                    )
+                )
                 draft_input = EagleDraftInput(
                     hidden_states=batch.spec_info.hidden_states[
                         unfinished_accept_index
@@ -590,11 +684,11 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                     verified_id=predict[unfinished_accept_index],
                     accept_length_cpu=draft_input_accept_length_cpu,
                     accept_length=accept_length[unfinished_index_device],
-                    seq_lens_for_draft_extend=batch.seq_lens[unfinished_index_device],
-                    seq_lens_for_draft_extend_cpu=batch.seq_lens_cpu[unfinished_index],
+                    seq_lens_for_draft_extend=frozen_seq_lens,
+                    seq_lens_for_draft_extend_cpu=frozen_seq_lens_cpu,
                     req_pool_indices_for_draft_extend=batch.req_pool_indices[
                         unfinished_index_device
-                    ],
+                    ].clone(),
                 )
             else:
                 draft_input = EagleDraftInput.create_idle_input(
@@ -672,6 +766,19 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
             )
             pt += extend_len
 
+    @staticmethod
+    def _freeze_seq_lens_for_draft_extend(
+        seq_lens: torch.Tensor,
+        seq_lens_cpu,
+        req_to_token: torch.Tensor,
+    ):
+        max_seq_len = req_to_token.shape[1]
+        frozen_seq_lens = torch.clamp(seq_lens.clone(), min=0, max=max_seq_len)
+        frozen_seq_lens_cpu = np.clip(
+            np.asarray(seq_lens_cpu, dtype=np.int64), 0, max_seq_len
+        ).astype(np.int32)
+        return frozen_seq_lens, frozen_seq_lens_cpu
+
     @classmethod
     def create_idle_input(
         cls,
@@ -735,11 +842,15 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
         bs = self.accept_length.numel()
         qo_indptr = torch.zeros((bs + 1,), dtype=torch.int32, device=device)
         qo_indptr[1:] = torch.cumsum(self.accept_length, dim=0)
-        cum_kv_seq_len = torch.zeros((bs + 1,), dtype=torch.int32, device=device)
-        cum_kv_seq_len[1:] = torch.cumsum(paged_kernel_lens, dim=0)
-
-        if paged_kernel_lens_sum is None:
-            paged_kernel_lens_sum = cum_kv_seq_len[-1]
+        if is_hip():
+            cum_kv_seq_len, paged_kernel_lens_sum = _build_kv_indptr_for_hip(
+                paged_kernel_lens, device
+            )
+        else:
+            cum_kv_seq_len = torch.zeros((bs + 1,), dtype=torch.int32, device=device)
+            cum_kv_seq_len[1:] = torch.cumsum(paged_kernel_lens, dim=0)
+            if paged_kernel_lens_sum is None:
+                paged_kernel_lens_sum = int(cum_kv_seq_len[-1].item())
 
         kv_indices = torch.empty(
             paged_kernel_lens_sum, dtype=torch.int32, device=device

@@ -1031,6 +1031,15 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 self.model_config.dtype = torch.float16
                 if torch.cuda.get_device_capability()[1] < 5:
                     raise RuntimeError("SGLang only supports sm75 and above.")
+            elif _is_hip and self.server_args.dtype == "auto":
+                # gfx1030-class ROCm works for baseline serving here, but the Triton
+                # decode path still trips over BF16 codegen. Keep HIP on FP16 by
+                # default unless the operator explicitly requested another dtype.
+                logger.info(
+                    "ROCm auto dtype resolved to float16 to avoid BF16 decode failures on HIP."
+                )
+                self.server_args.dtype = "float16"
+                self.model_config.dtype = torch.float16
 
         set_cuda_arch()
 

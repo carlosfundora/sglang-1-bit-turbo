@@ -17,6 +17,7 @@ from sglang.srt.layers.linear import QKVParallelLinear, RowParallelLinear
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.pooler import Pooler, PoolingType
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.layers.quantization.gguf import _dequantize_gguf_weight
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.rotary_embedding import get_rope
 from sglang.srt.layers.utils import PPMissingLayer, get_layer_id
@@ -557,8 +558,22 @@ class Qwen3ForCausalLM(nn.Module):
                 else:
                     logger.warning(f"Parameter {name} not found in params_dict")
 
+    def _export_dense_vocab_weight(self, layer: nn.Module) -> torch.Tensor:
+        if hasattr(layer, "weight"):
+            return layer.weight
+        if hasattr(layer, "qweight") and hasattr(layer, "qweight_type"):
+            return _dequantize_gguf_weight(
+                layer.qweight,
+                layer.qweight_type.weight_type,
+                dtype=torch.float16,
+            )
+        raise AttributeError(f"{type(layer).__name__} does not expose a vocab weight")
+
+    def get_embed(self):
+        return self._export_dense_vocab_weight(self.model.embed_tokens)
+
     def get_embed_and_head(self):
-        return self.model.embed_tokens.weight, self.lm_head.weight
+        return self.get_embed(), self._export_dense_vocab_weight(self.lm_head)
 
     def set_embed_and_head(self, embed, head):
         del self.model.embed_tokens.weight

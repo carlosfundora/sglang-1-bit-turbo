@@ -5,9 +5,12 @@ from typing import TYPE_CHECKING
 import torch
 
 from sglang.jit_kernel.utils import cache_once, load_jit, make_cpp_args
+from sglang.srt.utils import is_hip
 
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
+
+_is_hip = is_hip()
 
 
 @cache_once
@@ -29,6 +32,11 @@ def clamp_position_cuda(seq_lens: torch.Tensor) -> torch.Tensor:
 
     Supported dtypes: torch.int32, torch.int64.
     """
+    if _is_hip:
+        # ROCm does not ship the tvm_ffi-backed JIT helper in this environment.
+        # Keep HIP on the native tensor fallback so baseline serving can proceed.
+        return torch.clamp(seq_lens - 1, min=0).to(seq_lens.dtype)
+
     dst = torch.empty_like(seq_lens)
     module = _jit_clamp_position_module(seq_lens.dtype)
     module.clamp_position(dst, seq_lens)

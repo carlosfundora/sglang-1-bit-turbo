@@ -962,8 +962,19 @@ class ServerArgs:
         # In speculative scenario:
         # - If `speculative_draft_model_quantization` is specified, the draft model uses this quantization method.
         # - Otherwise, the draft model defaults to the same quantization as the target model.
+        #   Keep safetensors/local draft checkpoints unquantized by default even when
+        #   the target model is GGUF. Inheriting GGUF here leaves draft Linear weights
+        #   uninitialized because the draft checkpoint only stores plain tensors.
         if self.speculative_draft_model_quantization is None:
-            self.speculative_draft_model_quantization = self.quantization
+            draft_uses_gguf = False
+            if self.speculative_draft_model_path:
+                if check_gguf_file(self.speculative_draft_model_path):
+                    draft_uses_gguf = True
+                elif self.speculative_draft_load_format == "gguf":
+                    draft_uses_gguf = True
+            self.speculative_draft_model_quantization = (
+                self.quantization if draft_uses_gguf else None
+            )
         elif self.speculative_draft_model_quantization == "unquant":
             self.speculative_draft_model_quantization = None
 

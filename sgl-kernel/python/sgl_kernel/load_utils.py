@@ -56,22 +56,35 @@ def _load_architecture_specific_ops():
     sgl_kernel_dir = Path(__file__).parent
     logger.debug(f"[sgl_kernel] sgl_kernel directory: {sgl_kernel_dir}")
 
+    use_arch_specific_variant = torch.version.hip is None
+
     # Determine which version to load based on GPU architecture
-    if compute_capability == 90:
+    if compute_capability == 90 and use_arch_specific_variant:
         ops_subdir = "sm90"
         variant_name = "SM90 (Hopper/H100 with fast math optimization)"
-    elif compute_capability is not None:
+    elif compute_capability is not None and use_arch_specific_variant:
         ops_subdir = "sm100"
         variant_name = f"SM{compute_capability} (precise math for compatibility)"
     else:
-        ops_subdir = "sm100"
-        variant_name = "CPU/No GPU detected (using precise math)"
+        ops_subdir = None
+        if torch.version.hip is not None:
+            variant_name = (
+                f"HIP/ROCm compute capability {compute_capability} "
+                "(using fallback common_ops)"
+            )
+        else:
+            variant_name = "CPU/No GPU detected (using fallback common_ops)"
 
     # Look for the compiled module with any valid extension
 
-    ops_pattern = str(sgl_kernel_dir / ops_subdir / "common_ops.*")
-    raw_matching_files = glob.glob(ops_pattern)
-    matching_files = _filter_compiled_extensions(raw_matching_files)
+    if ops_subdir is not None:
+        ops_pattern = str(sgl_kernel_dir / ops_subdir / "common_ops.*")
+        raw_matching_files = glob.glob(ops_pattern)
+        matching_files = _filter_compiled_extensions(raw_matching_files)
+    else:
+        ops_pattern = "(skipped for fallback-only runtime)"
+        raw_matching_files = []
+        matching_files = []
 
     logger.debug(f"[sgl_kernel] Attempting to load {variant_name}")
     logger.debug(f"[sgl_kernel] Looking for library matching pattern: {ops_pattern}")

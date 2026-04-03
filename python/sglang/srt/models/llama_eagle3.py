@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from sglang.srt.utils import add_prefix
+from sglang.srt.utils import add_prefix, is_hip
 
 # Adapted from
 # https://github.com/SafeAILab/EAGLE/blob/main/eagle/model/cnets.py
@@ -24,6 +24,7 @@ from typing import Iterable, Optional, Tuple
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 from transformers import LlamaConfig
 
 from sglang.srt.distributed import get_pp_group
@@ -38,6 +39,8 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.llama import LlamaDecoderLayer, LlamaForCausalLM, LlamaMLP
+
+_is_hip = is_hip()
 
 
 class LlamaDecoderLayer(LlamaDecoderLayer):
@@ -125,6 +128,7 @@ class LlamaModel(nn.Module):
             config.hidden_size,
             prefix=add_prefix("embed_tokens", prefix),
         )
+        self._embed_tokens_cpu = None
 
         if hasattr(config, "target_hidden_size"):
             self.hidden_size_in = config.target_hidden_size
@@ -140,6 +144,30 @@ class LlamaModel(nn.Module):
         self.midlayer = LlamaDecoderLayer(config, 0, quant_config, prefix)
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+    def _lookup_embed_tokens_hip_safe(self, input_ids: torch.Tensor) -> torch.Tensor:
+        weight = self.embed_tokens.weight.detach()
+        cpu_ids = input_ids.detach().to(device="cpu", dtype=torch.long)
+
+        if self._embed_tokens_cpu is None:
+            self._embed_tokens_cpu = True
+
+        flat_ids = cpu_ids.reshape(-1)
+        cpu_embeds = torch.empty(
+            (flat_ids.numel(), weight.shape[1]),
+            dtype=weight.dtype,
+            device="cpu",
+        )
+        for row_idx, token_id in enumerate(flat_ids.tolist()):
+            token_row = weight.narrow(0, int(token_id), 1).to(
+                device="cpu",
+                dtype=weight.dtype,
+                non_blocking=False,
+            )
+            cpu_embeds[row_idx].copy_(token_row[0])
+
+        cpu_embeds = cpu_embeds.reshape(*cpu_ids.shape, weight.shape[1])
+        return cpu_embeds.to(device=input_ids.device, dtype=weight.dtype, non_blocking=False)
 
     def forward(
         self,
@@ -158,10 +186,19 @@ class LlamaModel(nn.Module):
             ):
                 assert embeds is not None
                 embeds = torch.cat(
-                    [embeds[:-1], self.embed_tokens(input_ids[-1].unsqueeze(0))]
+                    [
+                        embeds[:-1],
+                        self._lookup_embed_tokens_hip_safe(input_ids[-1].unsqueeze(0))
+                        if _is_hip
+                        else self.embed_tokens(input_ids[-1].unsqueeze(0)),
+                    ]
                 )
             if embeds is None:
-                embeds = self.embed_tokens(input_ids)
+                embeds = (
+                    self._lookup_embed_tokens_hip_safe(input_ids)
+                    if _is_hip
+                    else self.embed_tokens(input_ids)
+                )
         else:
             embeds = input_embeds
 
@@ -170,6 +207,15 @@ class LlamaModel(nn.Module):
 
         hidden_states = forward_batch.spec_info.hidden_states
         if hidden_states.shape[-1] != embeds.shape[-1]:
+            # Some EAGLE3 checkpoints and compatibility drafts emit a 2x hidden-state
+            # concat while the canonical projection expects 3x. Align to the learned
+            # projection width so the draft can still execute.
+            expected_in = self.fc.in_features
+            current_in = hidden_states.shape[-1]
+            if current_in < expected_in:
+                hidden_states = F.pad(hidden_states, (0, expected_in - current_in))
+            elif current_in > expected_in:
+                hidden_states = hidden_states[..., :expected_in]
             hidden_states = self.fc(hidden_states)
 
         # idle batch

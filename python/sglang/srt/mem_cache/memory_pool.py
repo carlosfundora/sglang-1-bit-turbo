@@ -2661,9 +2661,18 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
         centroids, boundaries = get_codebook(self.tq_bit_width)
         self.tq_centroids = centroids.to(self.device)
         self.tq_boundaries = boundaries.to(self.device)
+        if _is_hip:
+            # gfx1030 has been faulting in the GPU indexing path used by the
+            # compression routine. Keep CPU mirrors for a functional fallback.
+            self.tq_centroids_cpu = centroids.cpu()
+            self.tq_boundaries_cpu = boundaries.cpu()
+        else:
+            self.tq_centroids_cpu = None
+            self.tq_boundaries_cpu = None
 
         # One rotation matrix per head_dim (shared across all heads and layers)
         self.tq_Pi = generate_rotation_matrix(self.head_dim, seed=42).to(self.device)
+        self.tq_Pi_cpu = self.tq_Pi.cpu() if _is_hip else None
         self.tq_scale = math.sqrt(self.head_dim)
 
         pb = packed_bytes_per_dim(self.head_dim, self.tq_bit_width)
@@ -2739,8 +2748,53 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
 
         T = data.shape[0]
         n_levels = 2 ** self.tq_bit_width
-        result = torch.zeros(T, self.head_num * self.tq_bytes_per_head,
-                             dtype=torch.uint8, device=data.device)
+        result = torch.zeros(
+            T,
+            self.head_num * self.tq_bytes_per_head,
+            dtype=torch.uint8,
+            device=data.device,
+        )
+
+        if _is_hip:
+            # The HIP path has been hitting indexSelectSmallIndex faults while
+            # compressing packed KV buffers. Materialize the entire tensor on CPU
+            # first so the rest of the compression work avoids device indexing.
+            detached = data.detach().contiguous()
+            torch.cuda.synchronize(detached.device)
+            cpu_data = detached.to(device="cpu", dtype=torch.float32, non_blocking=False)
+            if not cpu_data.is_contiguous():
+                cpu_data = cpu_data.contiguous()
+            cpu_result = torch.zeros(
+                T,
+                self.head_num * self.tq_bytes_per_head,
+                dtype=torch.uint8,
+            )
+            tq_pi = self.tq_Pi_cpu
+            tq_boundaries = self.tq_boundaries_cpu
+            for h in range(self.head_num):
+                head_data = cpu_data[:, h, :dim]
+                norms = head_data.norm(dim=1, keepdim=True).clamp(min=1e-8)
+                head_norm = head_data / norms
+
+                Y = head_norm @ tq_pi.T * self.tq_scale
+                indices = torch.searchsorted(tq_boundaries, Y.reshape(-1))
+                indices = indices.clamp(0, n_levels - 1).reshape(T, dim)
+
+                padded = pad_for_packing(dim, self.tq_bit_width)
+                if padded > dim:
+                    indices = torch.nn.functional.pad(
+                        indices, (0, padded - dim), value=0
+                    )
+                packed = pack_indices(indices, self.tq_bit_width)
+
+                off = h * self.tq_bytes_per_head
+                cpu_result[:, off : off + self.tq_packed_per_head] = packed
+                norms_h = norms.squeeze(1).half()
+                cpu_result[:, off + self.tq_packed_per_head : off + self.tq_bytes_per_head] = (
+                    norms_h.view(torch.uint8).reshape(T, 2)
+                )
+
+            return cpu_result.to(device=data.device, non_blocking=False)
 
         for h in range(self.head_num):
             head_data = data[:, h, :dim].float()  # (T, dim)
@@ -2765,6 +2819,44 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
 
         return result
 
+    def _validate_hip_kv_write(
+        self,
+        layer_idx: int,
+        loc: torch.Tensor,
+        k_comp: torch.Tensor,
+        v_comp: torch.Tensor,
+        cache_k: torch.Tensor,
+        cache_v: torch.Tensor,
+    ) -> torch.Tensor:
+        loc = loc.to(device=self.k_buffer[layer_idx].device, dtype=torch.long).contiguous()
+
+        errors = []
+        if loc.ndim != 1:
+            errors.append(f"loc.ndim={loc.ndim}")
+        if loc.numel() != k_comp.shape[0] or loc.numel() != v_comp.shape[0]:
+            errors.append(
+                "row_count_mismatch="
+                f"loc={loc.numel()} k_comp={k_comp.shape[0]} v_comp={v_comp.shape[0]}"
+            )
+        if loc.numel() > 0:
+            min_loc = int(loc.min().item())
+            max_loc = int(loc.max().item())
+            if min_loc < 0:
+                errors.append(f"min_loc={min_loc}")
+            if max_loc >= self.k_buffer[layer_idx].shape[0]:
+                errors.append(
+                    f"max_loc={max_loc} buffer_rows={self.k_buffer[layer_idx].shape[0]}"
+                )
+        else:
+            min_loc = max_loc = -1
+
+        if errors:
+            raise RuntimeError(
+                "ROCm TurboQuant KV write validation failed: " + ", ".join(errors)
+            )
+
+        return loc
+
     def _decompress_heads(self, compressed: torch.Tensor, dim: int,
                           out: torch.Tensor, n_active: int):
         """Decompress (n_active, head_num * bytes) -> out[:n_active, head_num, dim]."""
@@ -2774,6 +2866,31 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
         )
 
         if n_active <= 0:
+            return
+
+        if _is_hip:
+            comp_cpu = compressed[:n_active].detach().contiguous().to("cpu")
+            cpu_out = torch.empty(
+                (n_active, self.head_num, dim), dtype=out.dtype, device="cpu"
+            )
+
+            for h in range(self.head_num):
+                off = h * self.tq_bytes_per_head
+                packed = comp_cpu[:, off : off + self.tq_packed_per_head]
+                norms_raw = comp_cpu[
+                    :, off + self.tq_packed_per_head : off + self.tq_bytes_per_head
+                ]
+
+                norms = norms_raw.view(torch.float16).reshape(n_active).float()
+
+                padded = pad_for_packing(dim, self.tq_bit_width)
+                indices = unpack_indices(packed, padded, self.tq_bit_width)[:, :dim]
+
+                y_hat = self.tq_centroids_cpu[indices.long()] / self.tq_scale
+                restored = (y_hat @ self.tq_Pi_cpu) * norms.unsqueeze(1)
+                cpu_out[:, h, :dim] = restored.to(cpu_out.dtype)
+
+            out[:n_active].copy_(cpu_out.to(device=out.device, dtype=out.dtype))
             return
 
         comp = compressed[:n_active]
@@ -2831,6 +2948,8 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
         if cache_k.dtype != self.dtype:
             cache_k = cache_k.to(self.dtype)
             cache_v = cache_v.to(self.dtype)
+        cache_k = cache_k.contiguous()
+        cache_v = cache_v.contiguous()
 
         k_comp = self._compress_heads(cache_k, self.head_dim)
         v_comp = self._compress_heads(cache_v, self.v_head_dim)
@@ -2838,9 +2957,34 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
         if _is_hip:
             # HIP has been faulting on advanced-index writes into the packed uint8
             # TurboQuant buffers; use index_copy_ on the row axis instead.
-            loc = loc.to(device=self.k_buffer[layer_idx].device, dtype=torch.long)
-            self.k_buffer[layer_idx].index_copy_(0, loc, k_comp.contiguous())
-            self.v_buffer[layer_idx].index_copy_(0, loc, v_comp.contiguous())
+            loc = self._validate_hip_kv_write(
+                layer_idx, loc, k_comp, v_comp, cache_k, cache_v
+            )
+            if loc.numel() > 0:
+                sorted_loc, perm = torch.sort(loc)
+                k_sorted = k_comp.index_select(0, perm).contiguous()
+                v_sorted = v_comp.index_select(0, perm).contiguous()
+                row_start = int(sorted_loc[0].item())
+                row_stop = int(sorted_loc[-1].item()) + 1
+                is_dense_run = (
+                    sorted_loc.numel() == (row_stop - row_start)
+                    and torch.equal(
+                        sorted_loc,
+                        torch.arange(
+                            row_start,
+                            row_stop,
+                            dtype=sorted_loc.dtype,
+                            device=sorted_loc.device,
+                        ),
+                    )
+                )
+                if is_dense_run:
+                    self.k_buffer[layer_idx][row_start:row_stop].copy_(k_sorted)
+                    self.v_buffer[layer_idx][row_start:row_stop].copy_(v_sorted)
+                else:
+                    self.k_buffer[layer_idx].index_copy_(0, sorted_loc, k_sorted)
+                    self.v_buffer[layer_idx].index_copy_(0, sorted_loc, v_sorted)
+                torch.cuda.synchronize(self.k_buffer[layer_idx].device)
         else:
             self.k_buffer[layer_idx][loc] = k_comp
             self.v_buffer[layer_idx][loc] = v_comp

@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from typing import List, Optional, Tuple
 
@@ -63,11 +64,13 @@ from sglang.srt.utils import (
     empty_context,
     get_available_gpu_memory,
     is_cuda,
+    is_hip,
     is_npu,
     next_power_of_2,
 )
 from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
 
+_is_hip = is_hip()
 _is_npu = is_npu()
 
 if is_cuda():
@@ -155,8 +158,6 @@ class EAGLEWorker(TpModelWorker):
                 memory_pool_config=target_worker.model_runner.memory_pool_config,
             )
 
-        embed, head = self.target_worker.model_runner.model.get_embed_and_head()
-
         if self.speculative_algorithm.is_eagle3():
             # most cases EAGLE3 models don't share lm_head
             # but some models (e.g. nvidia/gpt-oss-120b-Eagle3) shares
@@ -164,17 +165,44 @@ class EAGLEWorker(TpModelWorker):
                 hasattr(self.draft_model_runner.model, "load_lm_head_from_target")
                 and self.draft_model_runner.model.load_lm_head_from_target
             ):
+                embed, head = self.target_worker.model_runner.model.get_embed_and_head()
                 self.draft_model_runner.model.set_embed_and_head(embed, head)
             else:
-                self.draft_model_runner.model.set_embed(embed)
+                embed = None
+                skip_target_embed_share = os.getenv(
+                    "SGLANG_EAGLE_SKIP_TARGET_EMBED_SHARE", ""
+                ).lower() in {"1", "true", "yes", "on"}
+                if not skip_target_embed_share:
+                    try:
+                        embed = self.target_worker.model_runner.model.get_embed()
+                        self.draft_model_runner.model.set_embed(embed)
+                    except torch.OutOfMemoryError:
+                        logger.warning(
+                            "Skipping target embedding share for EAGLE3 draft because "
+                            "the target embedding export exhausted GPU memory. "
+                            "Continuing with the draft-local embedding."
+                        )
+                        torch.cuda.empty_cache()
+                    except Exception as exc:
+                        logger.warning(
+                            "Skipping target embedding share for EAGLE3 draft and "
+                            "continuing with the draft-local embedding: %s",
+                            exc,
+                        )
 
             # grab hot token ids
             if self.draft_model_runner.model.hot_token_id is not None:
-                self.hot_token_id = self.draft_model_runner.model.hot_token_id.to(
+                embed_device = (
                     embed.device
+                    if embed is not None
+                    else next(self.draft_model_runner.model.parameters()).device
+                )
+                self.hot_token_id = self.draft_model_runner.model.hot_token_id.to(
+                    embed_device
                 )
 
         else:
+            embed, head = self.target_worker.model_runner.model.get_embed_and_head()
             if self.hot_token_id is not None:
                 head = head.clone()
                 self.hot_token_id = self.hot_token_id.to(head.device)
@@ -1012,8 +1040,20 @@ class EAGLEWorker(TpModelWorker):
     def capture_for_decode(
         self, logits_output: LogitsProcessorOutput, draft_input: EagleDraftInput
     ):
-        probs = torch.softmax(logits_output.next_token_logits, dim=-1)
-        draft_input.topk_p, draft_input.topk_index = fast_topk(probs, self.topk, dim=-1)
+        logits = logits_output.next_token_logits
+        if _is_hip:
+            cpu_logits = logits.detach().to(device="cpu", dtype=torch.float32)
+            cpu_probs = torch.softmax(cpu_logits, dim=-1)
+            cpu_topk_p, cpu_topk_index = torch.topk(cpu_probs, self.topk, dim=-1)
+            draft_input.topk_p = cpu_topk_p.to(device=logits.device, dtype=logits.dtype)
+            draft_input.topk_index = cpu_topk_index.to(
+                device=logits.device, dtype=torch.int32
+            )
+        else:
+            probs = torch.softmax(logits, dim=-1)
+            draft_input.topk_p, draft_input.topk_index = fast_topk(
+                probs, self.topk, dim=-1
+            )
         draft_input.hidden_states = logits_output.hidden_states
 
     def update_weights_from_tensor(self, recv_req: UpdateWeightsFromTensorReqInput):

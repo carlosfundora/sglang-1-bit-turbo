@@ -378,6 +378,18 @@ class RotaryEmbedding(MultiPlatformOp):
                 )
         return query, key
 
+    def forward_hip(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+        fused_set_kv_buffer_arg: Optional[Union[FusedSetKVBufferArg, dict]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # ROCm has been faulting in the CUDA-style rotary kernel path on the
+        # OpenCoder/Llama baseline. Use the native PyTorch path for stability.
+        return self.forward_native(positions, query, key, offsets, None)
+
     def extra_repr(self) -> str:
         s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"
         s += f", max_position_embeddings={self.max_position_embeddings}"
