@@ -22,6 +22,12 @@ def gguf_type_name(qtype: int | object) -> str:
         qtype_int = int(qtype)  # type: ignore[arg-type]
     except Exception:
         return str(qtype)
+    try:
+        import gguf
+
+        return gguf.GGMLQuantizationType(qtype_int).name
+    except Exception:
+        pass
     return PRISM_TYPE_NAMES.get(qtype_int, str(qtype_int))
 
 

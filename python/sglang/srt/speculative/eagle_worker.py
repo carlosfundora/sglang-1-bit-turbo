@@ -142,6 +142,7 @@ class EAGLEWorker(TpModelWorker):
         with (
             ctx
         ), speculative_moe_backend_context(), speculative_moe_a2a_backend_context():
+            logger.info("EAGLE draft worker init: entering TpModelWorker super().__init__")
             super().__init__(
                 server_args=server_args,
                 gpu_id=gpu_id,
@@ -157,6 +158,7 @@ class EAGLEWorker(TpModelWorker):
                 token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
                 memory_pool_config=target_worker.model_runner.memory_pool_config,
             )
+            logger.info("EAGLE draft worker init: TpModelWorker super().__init__ complete")
 
         if self.speculative_algorithm.is_eagle3():
             # most cases EAGLE3 models don't share lm_head
@@ -165,6 +167,7 @@ class EAGLEWorker(TpModelWorker):
                 hasattr(self.draft_model_runner.model, "load_lm_head_from_target")
                 and self.draft_model_runner.model.load_lm_head_from_target
             ):
+                logger.info("EAGLE draft worker init: sharing target embed + lm_head")
                 embed, head = self.target_worker.model_runner.model.get_embed_and_head()
                 self.draft_model_runner.model.set_embed_and_head(embed, head)
             else:
@@ -172,10 +175,21 @@ class EAGLEWorker(TpModelWorker):
                 skip_target_embed_share = os.getenv(
                     "SGLANG_EAGLE_SKIP_TARGET_EMBED_SHARE", ""
                 ).lower() in {"1", "true", "yes", "on"}
-                if not skip_target_embed_share:
+                if skip_target_embed_share:
+                    logger.info(
+                        "EAGLE draft worker init: skipping target embedding share "
+                        "because SGLANG_EAGLE_SKIP_TARGET_EMBED_SHARE is enabled"
+                    )
+                else:
                     try:
+                        logger.info(
+                            "EAGLE draft worker init: attempting target embedding share"
+                        )
                         embed = self.target_worker.model_runner.model.get_embed()
                         self.draft_model_runner.model.set_embed(embed)
+                        logger.info(
+                            "EAGLE draft worker init: target embedding share complete"
+                        )
                     except torch.OutOfMemoryError:
                         logger.warning(
                             "Skipping target embedding share for EAGLE3 draft because "
@@ -189,6 +203,8 @@ class EAGLEWorker(TpModelWorker):
                             "continuing with the draft-local embedding: %s",
                             exc,
                         )
+                if embed is None:
+                    logger.info("EAGLE draft worker init: using draft-local embedding")
 
             # grab hot token ids
             if self.draft_model_runner.model.hot_token_id is not None:
@@ -227,11 +243,13 @@ class EAGLEWorker(TpModelWorker):
             self.eagle_use_aux_hidden_state = eagle_config.get(
                 "use_aux_hidden_state", True
             )
+        logger.info("EAGLE draft worker init: initializing attention backend and cuda graphs")
         with self.draft_tp_context(
             self.draft_model_runner.tp_group
         ), speculative_moe_backend_context(), speculative_moe_a2a_backend_context():
             self.init_attention_backend()
             self.init_cuda_graphs()
+        logger.info("EAGLE draft worker init: attention backend and cuda graphs ready")
 
         # Some dummy tensors
         self.num_new_pages_per_topk = torch.empty(
@@ -404,11 +422,25 @@ class EAGLEWorker(TpModelWorker):
         # We need the full hidden states to prefill the KV cache of the draft model.
         model_worker_batch = batch.get_model_worker_batch()
         model_worker_batch.capture_hidden_mode = CaptureHiddenMode.FULL
+        if _is_hip:
+            logger.info(
+                "EAGLE target extend start: batch_size=%s seq_lens_sum=%s",
+                batch.batch_size(),
+                batch.seq_lens_sum,
+            )
         batch_result = self.target_worker.forward_batch_generation(model_worker_batch)
         logits_output, next_token_ids = (
             batch_result.logits_output,
             batch_result.next_token_ids,
         )
+        if _is_hip:
+            logger.info(
+                "EAGLE target extend done: next_token_shape=%s hidden_states_shape=%s",
+                tuple(next_token_ids.shape),
+                None
+                if logits_output.hidden_states is None
+                else tuple(logits_output.hidden_states.shape),
+            )
         return (
             logits_output,
             next_token_ids,
@@ -939,7 +971,51 @@ class EAGLEWorker(TpModelWorker):
         forward_batch.return_logprob = False
         if mm_input_embeds is not None:
             forward_batch.mm_input_embeds = mm_input_embeds
+        if _is_hip and forward_batch.extend_seq_lens_cpu is not None:
+            recomputed_positions = torch.cat(
+                [
+                    torch.arange(
+                        int(prefix_len),
+                        int(prefix_len) + int(extend_len),
+                        dtype=torch.int64,
+                    )
+                    for prefix_len, extend_len in zip(
+                        forward_batch.extend_prefix_lens_cpu,
+                        forward_batch.extend_seq_lens_cpu,
+                    )
+                ],
+                dim=0,
+            ).to(forward_batch.input_ids.device, non_blocking=False)
+            forward_batch.positions = recomputed_positions
+        if _is_hip:
+            logger.info(
+                "EAGLE draft extend start: forward_mode=%s hidden_states_shape=%s next_token_shape=%s seq_lens_cpu=%s",
+                forward_batch.forward_mode,
+                tuple(hidden_states.shape),
+                tuple(next_token_ids.shape),
+                None if seq_lens_cpu is None else seq_lens_cpu.tolist(),
+            )
+            positions_cpu = forward_batch.positions.detach().to(device="cpu", dtype=torch.int64)
+            logger.info(
+                "EAGLE draft extend metadata: extend_prefix_lens_cpu=%s extend_seq_lens_cpu=%s positions_shape=%s positions_head=%s positions_tail=%s positions_min=%s positions_max=%s",
+                forward_batch.extend_prefix_lens_cpu,
+                forward_batch.extend_seq_lens_cpu,
+                tuple(forward_batch.positions.shape),
+                positions_cpu[: min(16, positions_cpu.numel())].tolist(),
+                positions_cpu[-min(16, positions_cpu.numel()) :].tolist(),
+                None if positions_cpu.numel() == 0 else int(positions_cpu.min().item()),
+                None if positions_cpu.numel() == 0 else int(positions_cpu.max().item()),
+            )
         logits_output = self.draft_model_runner.forward(forward_batch).logits_output
+        if _is_hip:
+            torch.cuda.synchronize()
+            logger.info(
+                "EAGLE draft extend forward done: logits_shape=%s hidden_states_shape=%s",
+                tuple(logits_output.next_token_logits.shape),
+                None
+                if logits_output.hidden_states is None
+                else tuple(logits_output.hidden_states.shape),
+            )
         maybe_detect_nan(logits_output.next_token_logits, "draft_extend_for_prefill")
         assert isinstance(forward_batch.spec_info, EagleDraftInput)
         assert forward_batch.spec_info is batch.spec_info
@@ -1042,6 +1118,12 @@ class EAGLEWorker(TpModelWorker):
     ):
         logits = logits_output.next_token_logits
         if _is_hip:
+            logger.info(
+                "EAGLE capture_for_decode start: logits_shape=%s logits_dtype=%s",
+                tuple(logits.shape),
+                logits.dtype,
+            )
+        if _is_hip:
             cpu_logits = logits.detach().to(device="cpu", dtype=torch.float32)
             cpu_probs = torch.softmax(cpu_logits, dim=-1)
             cpu_topk_p, cpu_topk_index = torch.topk(cpu_probs, self.topk, dim=-1)
@@ -1055,6 +1137,12 @@ class EAGLEWorker(TpModelWorker):
                 probs, self.topk, dim=-1
             )
         draft_input.hidden_states = logits_output.hidden_states
+        if _is_hip:
+            logger.info(
+                "EAGLE capture_for_decode done: topk_p_shape=%s topk_index_shape=%s",
+                tuple(draft_input.topk_p.shape),
+                tuple(draft_input.topk_index.shape),
+            )
 
     def update_weights_from_tensor(self, recv_req: UpdateWeightsFromTensorReqInput):
         monkey_patch_torch_reductions()

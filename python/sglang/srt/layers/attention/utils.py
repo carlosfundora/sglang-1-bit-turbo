@@ -1,3 +1,6 @@
+import logging
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -8,10 +11,29 @@ _FLASHMLA_CREATE_KV_BLOCK_SIZE = 4096
 FLASHMLA_CREATE_KV_BLOCK_SIZE_TRITON = tl.constexpr(_FLASHMLA_CREATE_KV_BLOCK_SIZE)
 
 _is_cuda = is_cuda()
+logger = logging.getLogger(__name__)
 _hip_kv_mismatch_logged = False
 
 if _is_cuda:
     from sgl_kernel import concat_mla_absorb_q
+
+
+def _rocm_debug_kv_enabled() -> bool:
+    return os.getenv("SGLANG_ROCM_DEBUG_KV", "0") == "1"
+
+
+def _hip_debug_sync(label: str, tensor: torch.Tensor | None = None) -> None:
+    if not _rocm_debug_kv_enabled():
+        return
+    device = getattr(tensor, "device", None)
+    if device is None or device.type != "cuda":
+        return
+    try:
+        torch.cuda.synchronize(device)
+    except Exception:
+        logger.exception("HIP debug synchronize failed at %s", label)
+        raise
+
 
 @triton.jit
 def _create_flashinfer_kv_indices_triton_kernel(
@@ -67,6 +89,24 @@ def _create_flashinfer_kv_indices_hip_fallback(
     if bs <= 0:
         return
 
+    if _rocm_debug_kv_enabled():
+        logger.warning(
+            "HIP KV fallback start: bs=%s req_to_token=%s dtype=%s contiguous=%s "
+            "req_pool_indices=%s page_kernel_lens=%s kv_indptr=%s kv_start_idx=%s "
+            "kv_indices=%s dtype=%s contiguous=%s",
+            bs,
+            tuple(req_to_token_ptr.shape),
+            req_to_token_ptr.dtype,
+            req_to_token_ptr.is_contiguous(),
+            tuple(req_pool_indices_ptr.shape),
+            tuple(page_kernel_lens_ptr.shape),
+            tuple(kv_indptr.shape),
+            None if kv_start_idx is None else tuple(kv_start_idx.shape),
+            tuple(kv_indices_ptr.shape),
+            kv_indices_ptr.dtype,
+            kv_indices_ptr.is_contiguous(),
+        )
+    _hip_debug_sync("before_req_to_token_cpu", req_to_token_ptr)
     req_to_token_cpu = req_to_token_ptr.detach().contiguous().to(device="cpu")
     req_pool_indices = req_pool_indices_ptr[:bs].detach().to(device="cpu").tolist()
     page_kernel_lens = page_kernel_lens_ptr[:bs].detach().to(device="cpu").tolist()
@@ -89,7 +129,15 @@ def _create_flashinfer_kv_indices_hip_fallback(
             continue
         req_pool_index = int(req_pool_indices[pid])
         if req_pool_index < 0 or req_pool_index >= req_to_token_cpu.size(0):
-            _hip_kv_mismatch_logged = True
+            if not _hip_kv_mismatch_logged:
+                logger.warning(
+                    "HIP KV fallback rejected invalid req_pool_index: pid=%s "
+                    "req_pool_index=%s pool_height=%s",
+                    pid,
+                    req_pool_index,
+                    req_to_token_cpu.size(0),
+                )
+                _hip_kv_mismatch_logged = True
             continue
         kv_offset = int(kv_indptr_cpu[pid])
         next_kv_offset = int(kv_indptr_cpu[pid + 1])
@@ -100,12 +148,38 @@ def _create_flashinfer_kv_indices_hip_fallback(
         actual_len = min(kv_len, writable_len, available_src_len, available_dst_len)
 
         if actual_len <= 0:
-            _hip_kv_mismatch_logged = True
+            if not _hip_kv_mismatch_logged:
+                logger.warning(
+                    "HIP KV fallback skipped empty segment: pid=%s kv_len=%s "
+                    "kv_offset=%s next_kv_offset=%s kv_start=%s src_width=%s "
+                    "total_indices=%s",
+                    pid,
+                    kv_len,
+                    kv_offset,
+                    next_kv_offset,
+                    kv_start,
+                    req_to_token_cpu.size(1),
+                    kv_indices_ptr.numel(),
+                )
+                _hip_kv_mismatch_logged = True
             continue
 
         if (
             actual_len != kv_len or kv_offset + actual_len > kv_indices_ptr.numel()
         ) and not _hip_kv_mismatch_logged:
+            logger.warning(
+                "HIP KV fallback clamped mismatched segment: pid=%s kv_len=%s "
+                "actual_len=%s kv_offset=%s next_kv_offset=%s kv_start=%s "
+                "src_width=%s total_indices=%s",
+                pid,
+                kv_len,
+                actual_len,
+                kv_offset,
+                next_kv_offset,
+                kv_start,
+                req_to_token_cpu.size(1),
+                kv_indices_ptr.numel(),
+            )
             _hip_kv_mismatch_logged = True
 
         kv_end = kv_start + actual_len
@@ -116,9 +190,11 @@ def _create_flashinfer_kv_indices_hip_fallback(
             )
 
     if total_len > 0 and kv_indices_cpu is not None:
+        _hip_debug_sync("before_kv_indices_copy", kv_indices_ptr)
         kv_indices_ptr[:total_len].copy_(
             kv_indices_cpu.to(device=kv_indices_ptr.device, dtype=kv_indices_ptr.dtype)
         )
+        _hip_debug_sync("after_kv_indices_copy", kv_indices_ptr)
 
 
 class _CreateFlashinferKvIndicesLauncher:

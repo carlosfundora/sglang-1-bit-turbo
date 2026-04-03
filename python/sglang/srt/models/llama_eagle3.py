@@ -20,6 +20,7 @@ from sglang.srt.utils import add_prefix, is_hip
 """Inference-only LLaMA-EAGLE model compatible with HuggingFace weights."""
 
 import copy
+import logging
 from typing import Iterable, Optional, Tuple
 
 import torch
@@ -40,6 +41,8 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTe
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.llama import LlamaDecoderLayer, LlamaForCausalLM, LlamaMLP
 
+
+logger = logging.getLogger(__name__)
 _is_hip = is_hip()
 
 
@@ -150,6 +153,9 @@ class LlamaModel(nn.Module):
         cpu_ids = input_ids.detach().to(device="cpu", dtype=torch.long)
 
         if self._embed_tokens_cpu is None:
+            logger.info(
+                "LlamaEagle3 HIP-safe draft embedding lookup enabled; using row-wise CPU copies"
+            )
             self._embed_tokens_cpu = True
 
         flat_ids = cpu_ids.reshape(-1)
@@ -216,6 +222,8 @@ class LlamaModel(nn.Module):
                 hidden_states = F.pad(hidden_states, (0, expected_in - current_in))
             elif current_in > expected_in:
                 hidden_states = hidden_states[..., :expected_in]
+            if hidden_states.dtype != self.fc.weight.dtype:
+                hidden_states = hidden_states.to(self.fc.weight.dtype)
             hidden_states = self.fc(hidden_states)
 
         # idle batch

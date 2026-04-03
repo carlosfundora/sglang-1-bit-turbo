@@ -66,6 +66,7 @@ class RotaryEmbedding(MultiPlatformOp):
         self.base = base
         self.is_neox_style = is_neox_style
         self.dtype = dtype
+        self._cos_sin_cache_cpu = None
 
         cache = self._compute_cos_sin_cache()
         # NOTE(ByronHsu): cache needs to be in FP32 for numerical stability
@@ -171,13 +172,44 @@ class RotaryEmbedding(MultiPlatformOp):
         self.cos_sin_cache = torch.cat((self.cos_sin_cache, new_rows), dim=0).to(
             device=device, dtype=dtype
         )
+        self._cos_sin_cache_cpu = None
+
+    def _get_cos_sin_cache_cpu(self) -> torch.Tensor:
+        cache_key = (tuple(self.cos_sin_cache.shape), str(self.cos_sin_cache.dtype))
+        cache = self._cos_sin_cache_cpu
+        if cache is not None and cache.get("key") == cache_key:
+            return cache["value"]
+
+        cpu_cache = (
+            self.cos_sin_cache.detach()
+            .to(device="cpu", dtype=self.cos_sin_cache.dtype, non_blocking=False)
+            .contiguous()
+        )
+        self._cos_sin_cache_cpu = {"key": cache_key, "value": cpu_cache}
+        return cpu_cache
+
+    def _index_cos_sin_cache(self, positions: torch.Tensor) -> torch.Tensor:
+        positions = positions.flatten()
+        if positions.numel() > 0:
+            needed_max_pos = int(positions.detach().to(device="cpu").max().item())
+            self._ensure_cos_sin_cache_length(needed_max_pos)
+        if not _is_hip:
+            return self.cos_sin_cache.index_select(0, positions)
+
+        cpu_positions = positions.detach().to(device="cpu", dtype=torch.long)
+        cpu_cos_sin = self._get_cos_sin_cache_cpu().index_select(0, cpu_positions)
+        return cpu_cos_sin.to(
+            device=self.cos_sin_cache.device,
+            dtype=self.cos_sin_cache.dtype,
+            non_blocking=False,
+        )
 
     def get_cos_sin_with_position(self, positions):
         assert positions.ndim == 1, (
             "2D positions (multimodal RoPE) are not supported by the base "
             "RotaryEmbedding. Override this method in a subclass (e.g. MRotaryEmbedding)."
         )
-        cos_sin = self.cos_sin_cache.index_select(0, positions.flatten())
+        cos_sin = self._index_cos_sin_cache(positions)
         last_dim = cos_sin.size()[-1]
         cos, sin = (
             cos_sin.reshape(-1, 2, last_dim // 2).repeat(1, 1, 2).chunk(2, dim=-2)
@@ -215,7 +247,7 @@ class RotaryEmbedding(MultiPlatformOp):
         if hasattr(self, "sin_cos_cache"):
             cos_sin = self.sin_cos_cache
         else:
-            cos_sin = self.cos_sin_cache.index_select(0, positions)
+            cos_sin = self._index_cos_sin_cache(positions)
         cos, sin = cos_sin.chunk(2, dim=-1)
 
         query_shape = query.shape

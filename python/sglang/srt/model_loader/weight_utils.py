@@ -974,12 +974,15 @@ def gguf_quant_weights_iterator(
     ensure_prism_gguf_compat()
     reader = gguf.GGUFReader(gguf_file)
 
+    def is_unquantized_gguf_type(weight_type) -> bool:
+        return gguf_type_name(weight_type) in {"F32", "F16", "BF16"}
+
     for tensor in reader.tensors:
         if tensor.name in gguf_to_hf_name_map:
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
 
-            if gguf_type_name(weight_type) != "F32":
+            if not is_unquantized_gguf_type(weight_type):
                 weight_type_name = name.replace("weight", "qweight_type")
                 weight_type = torch.tensor(weight_type)
                 yield weight_type_name, weight_type
@@ -990,7 +993,7 @@ def gguf_quant_weights_iterator(
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
 
-            if gguf_type_name(weight_type) != "F32":
+            if not is_unquantized_gguf_type(weight_type):
                 name = name.replace("weight", "qweight")
             param = torch.tensor(weight)
             yield name, param

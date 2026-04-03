@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import warnings
 from typing import TYPE_CHECKING, Any, List, Optional
 
@@ -182,11 +183,9 @@ def _dequantize_with_gguf_quants(
 def _get_hip_prism_cpu_weight(
     qweight: torch.Tensor,
     qweight_type: int,
-    *,
-    dtype: torch.dtype,
 ) -> torch.Tensor:
     cache = getattr(qweight, "_sglang_hip_prism_cpu_weight_cache", None)
-    cache_key = (int(qweight_type), str(dtype), tuple(qweight.shape))
+    cache_key = (int(qweight_type), tuple(qweight.shape))
     if cache is not None and cache.get("key") == cache_key:
         return cache["weight"]
 
@@ -196,8 +195,35 @@ def _get_hip_prism_cpu_weight(
     qweight_np = qweight.detach().to(device="cpu", dtype=torch.uint8).contiguous().numpy()
     dequant = gguf_quants.dequantize(qweight_np, qweight_type)
     dequant = np.ascontiguousarray(dequant.reshape(rows, cols))
-    weight = torch.from_numpy(dequant).to(dtype=dtype).contiguous()
+    weight = torch.from_numpy(dequant).to(dtype=torch.float32).contiguous()
     qweight._sglang_hip_prism_cpu_weight_cache = {"key": cache_key, "weight": weight}
+    return weight
+
+
+def _get_hip_prism_output_dtype(x: torch.Tensor) -> torch.dtype:
+    if os.environ.get("SGLANG_PRISM_HIP_FORCE_INPUT_DTYPE", "").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return x.dtype
+    # Prism Q1 models are far more sensitive to quantization error than the
+    # usual GGUF paths. Preserve fp32 through the HIP compatibility bridge
+    # instead of immediately collapsing back to fp16/bf16 after every matmul.
+    if x.dtype in (torch.float16, torch.bfloat16):
+        return torch.float32
+    return x.dtype
+
+
+def _get_hip_quant_cpu_qweight(qweight: torch.Tensor) -> torch.Tensor:
+    cache = getattr(qweight, "_sglang_hip_quant_cpu_qweight_cache", None)
+    cache_key = (str(qweight.dtype), tuple(qweight.shape))
+    if cache is not None and cache.get("key") == cache_key:
+        return cache["weight"]
+
+    weight = qweight.detach().to(device="cpu", dtype=torch.uint8).contiguous()
+    qweight._sglang_hip_quant_cpu_qweight_cache = {"key": cache_key, "weight": weight}
     return weight
 
 
@@ -227,9 +253,11 @@ def fused_mul_mat_gguf(
         logger.warning_once(
             "HIP PRISM Q1 uses a CPU matmul compatibility bridge in this fork."
         )
-        weight_cpu = _get_hip_prism_cpu_weight(qweight, qweight_type, dtype=x.dtype)
-        x_cpu = x.to(device="cpu", dtype=weight_cpu.dtype)
-        return (x_cpu @ weight_cpu.T).to(device=x.device, dtype=x.dtype)
+        weight_cpu = _get_hip_prism_cpu_weight(qweight, qweight_type)
+        out_dtype = _get_hip_prism_output_dtype(x)
+        x_cpu = x.to(device="cpu", dtype=torch.float32)
+        y_cpu = x_cpu @ weight_cpu.T
+        return y_cpu.to(device=x.device, dtype=out_dtype, non_blocking=False)
     if qweight_type in IMATRIX_QUANT_TYPES:
         mmvq_safe = 8 if qweight.shape[0] > 5120 else 16
     else:
@@ -391,8 +419,36 @@ def apply_gguf_embedding(
         return torch.embedding(qweight, x)
     elif qweight_type in DEQUANT_TYPES:
         x_flat = x.flatten()
-        quant = torch.index_select(qweight, dim=0, index=x_flat)
-        dequant = _dequantize_gguf_weight(quant, qweight_type, dtype=dtype or torch.float16)
+        if _is_hip:
+            logger.warning_once(
+                "HIP GGUF embedding uses a CPU gather compatibility fallback in this fork."
+            )
+            out_dtype = dtype
+            if out_dtype is None:
+                if qweight_type in PRISM_Q1_TYPES:
+                    out_dtype = (
+                        torch.float16
+                        if os.environ.get(
+                            "SGLANG_PRISM_HIP_FORCE_INPUT_DTYPE", ""
+                        ).lower()
+                        in ("1", "true", "yes", "on")
+                        else torch.float32
+                    )
+                else:
+                    out_dtype = torch.float16
+            quant = torch.index_select(
+                _get_hip_quant_cpu_qweight(qweight),
+                dim=0,
+                index=x_flat.detach().to(device="cpu", dtype=torch.long),
+            )
+            dequant = _dequantize_gguf_weight(
+                quant, qweight_type, dtype=out_dtype
+            ).to(device=x.device, dtype=out_dtype, non_blocking=False)
+        else:
+            quant = torch.index_select(qweight, dim=0, index=x_flat)
+            dequant = _dequantize_gguf_weight(
+                quant, qweight_type, dtype=dtype or torch.float16
+            )
         return dequant.view(*x.shape, hidden_size)
     else:
         raise NotImplementedError(

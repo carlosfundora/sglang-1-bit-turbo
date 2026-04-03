@@ -2056,9 +2056,15 @@ class GGUFModelLoader(BaseModelLoader):
 
         local_model_path = self._prepare_weights(model_config.model_path)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
-        # we can only know if tie word embeddings after mapping weights
-        if "lm_head.weight" in get_gguf_extra_tensor_names(
-            local_model_path, gguf_weights_map
+        # GGUF exporters often omit the explicit output head when it is tied to
+        # the token embedding table. HuggingFace architecture names are not
+        # consistent here (`lm_head.weight` vs `output.weight`), so accept both.
+        gguf_extra_tensor_names = set(
+            get_gguf_extra_tensor_names(local_model_path, gguf_weights_map)
+        )
+        if (
+            "lm_head.weight" in gguf_extra_tensor_names
+            or "output.weight" in gguf_extra_tensor_names
         ):
             model_config.hf_config.update({"tie_word_embeddings": True})
 

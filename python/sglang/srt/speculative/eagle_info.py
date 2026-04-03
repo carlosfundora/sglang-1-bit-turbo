@@ -1,4 +1,5 @@
 import logging
+import os
 from copy import copy
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -65,6 +66,11 @@ def _build_kv_indptr_for_hip(
     total = int(cum_kv_seq_len_cpu[-1].item())
     return cum_kv_seq_len_cpu.to(device=device), total
 
+
+def _rocm_spec_debug_enabled() -> bool:
+    return is_hip() and os.getenv("SGLANG_ROCM_DEBUG_KV", "0") == "1"
+
+
 def _validate_hip_spec_metadata(
     req_pool_indices: torch.Tensor,
     paged_kernel_lens: torch.Tensor,
@@ -103,6 +109,18 @@ def _validate_hip_spec_metadata(
             errors.append(
                 f"max_req_pool_index={max_req} req_rows={req_to_token.shape[0]}"
             )
+
+    if _rocm_spec_debug_enabled():
+        logger.info(
+            "ROCM speculative debug batch=%s draft_token_num=%s req_to_token_shape=%s "
+            "lens_shape=%s lens_sum=%s indptr_total=%s",
+            req_pool_indices.numel(),
+            draft_token_num,
+            tuple(req_to_token.shape),
+            tuple(paged_kernel_lens.shape),
+            total_from_lens,
+            total_from_indptr,
+        )
 
     if errors:
         raise RuntimeError(
