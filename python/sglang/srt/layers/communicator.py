@@ -207,7 +207,7 @@ class AttnTpContext:
             and get_moe_a2a_backend().is_none()
             and not enable_moe_dense_fully_dp()
             and get_global_server_args().disable_piecewise_cuda_graph
-            and get_global_server_args().speculative_algorithm != "EAGLE3"
+            and get_global_server_args().speculative_algorithm not in ["EAGLE3", "P_EAGLE"]
         )
         if get_global_server_args().enable_attn_tp_input_scattered:
             if not self.allow_input_scattered:

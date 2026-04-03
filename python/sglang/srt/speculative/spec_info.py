@@ -17,6 +17,7 @@ class SpeculativeAlgorithm(Enum):
 
     EAGLE = auto()
     EAGLE3 = auto()
+    P_EAGLE = auto()
     STANDALONE = auto()
     NGRAM = auto()
     NONE = auto()
@@ -34,11 +35,21 @@ class SpeculativeAlgorithm(Enum):
         return self == SpeculativeAlgorithm.NONE
 
     def is_eagle(self) -> bool:
-        # NOTE: EAGLE3 is a variant of EAGLE
-        return self == SpeculativeAlgorithm.EAGLE or self == SpeculativeAlgorithm.EAGLE3
+        # NOTE: EAGLE3 and P_EAGLE are variants of EAGLE
+        return self in {
+            SpeculativeAlgorithm.EAGLE,
+            SpeculativeAlgorithm.EAGLE3,
+            SpeculativeAlgorithm.P_EAGLE,
+        }
 
     def is_eagle3(self) -> bool:
-        return self == SpeculativeAlgorithm.EAGLE3
+        return self in {
+            SpeculativeAlgorithm.EAGLE3,
+            SpeculativeAlgorithm.P_EAGLE,
+        }
+
+    def is_p_eagle(self) -> bool:
+        return self == SpeculativeAlgorithm.P_EAGLE
 
     def is_standalone(self) -> bool:
         return self == SpeculativeAlgorithm.STANDALONE

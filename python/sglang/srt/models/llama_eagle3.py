@@ -116,6 +116,12 @@ class LlamaModel(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
+        if not hasattr(self.config, "parallel_drafting"):
+            self.config.parallel_drafting = False
+        if not hasattr(self.config, "mask_token_id") or self.config.mask_token_id is None:
+            self.config.mask_token_id = (
+                self.config.pad_token_id if self.config.pad_token_id is not None else 0
+            )
 
         rope_scaling = config.rope_parameters
         self.is_mrope_enabled = (
@@ -143,10 +149,62 @@ class LlamaModel(nn.Module):
             config.hidden_size,
             bias=getattr(config, "bias", False),
         )
+        self.parallel_drafting = bool(self.config.parallel_drafting)
+        self.mask_token_id = int(self.config.mask_token_id)
+        self.mask_hidden = nn.Parameter(torch.zeros(1, 1, self.fc.in_features))
 
         self.midlayer = LlamaDecoderLayer(config, 0, quant_config, prefix)
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+    def prepare_p_eagle_inputs(
+        self,
+        last_token_ids: torch.Tensor,
+        fused_hidden_states: torch.Tensor,
+        k: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if k < 1:
+            raise ValueError(f"k must be >= 1, got {k}")
+
+        if last_token_ids.dim() == 1:
+            last_token_ids = last_token_ids.unsqueeze(-1)
+        if last_token_ids.dim() != 2 or last_token_ids.shape[1] != 1:
+            raise ValueError("last_token_ids must have shape [batch, 1]")
+
+        if fused_hidden_states.dim() != 3 or fused_hidden_states.shape[1] != 1:
+            raise ValueError("fused_hidden_states must have shape [batch, 1, hidden*3]")
+
+        if fused_hidden_states.shape[-1] != self.fc.in_features:
+            raise ValueError(
+                f"Expected fused hidden size {self.fc.in_features}, got {fused_hidden_states.shape[-1]}"
+            )
+
+        batch = last_token_ids.shape[0]
+        device = last_token_ids.device
+        hidden_dtype = fused_hidden_states.dtype
+        if k == 1:
+            all_hidden_states = fused_hidden_states
+            input_ids = last_token_ids
+        else:
+            mask_hidden = self.mask_hidden.to(device=device, dtype=hidden_dtype).expand(
+                batch, k - 1, -1
+            )
+            all_hidden_states = torch.cat([fused_hidden_states, mask_hidden], dim=1)
+            mask_token_ids = torch.full(
+                (batch, k - 1),
+                self.mask_token_id,
+                dtype=last_token_ids.dtype,
+                device=device,
+            )
+            input_ids = torch.cat([last_token_ids, mask_token_ids], dim=1)
+
+        embeds = (
+            self._lookup_embed_tokens_hip_safe(input_ids)
+            if _is_hip
+            else self.embed_tokens(input_ids)
+        )
+        projected_hidden_states = self.fc(all_hidden_states.to(self.fc.weight.dtype))
+        return embeds, projected_hidden_states
 
     def _lookup_embed_tokens_hip_safe(self, input_ids: torch.Tensor) -> torch.Tensor:
         weight = self.embed_tokens.weight.detach()

@@ -2987,9 +2987,11 @@ class ServerArgs:
         if self.speculative_algorithm == "NEXTN":
             self.speculative_algorithm = "EAGLE"
 
-        if self.speculative_algorithm in ("EAGLE", "EAGLE3", "STANDALONE"):
-            if self.speculative_algorithm == "EAGLE3":
-                self._validate_eagle3_draft_model()
+        if self.speculative_algorithm in ("EAGLE", "EAGLE3", "P_EAGLE", "STANDALONE"):
+            if self.speculative_algorithm in ("EAGLE3", "P_EAGLE"):
+                self._validate_eagle3_draft_model(
+                    require_parallel_drafting=self.speculative_algorithm == "P_EAGLE"
+                )
 
             if self.speculative_algorithm == "STANDALONE" and self.enable_dp_attention:
                 # TODO: support dp attention for standalone speculative decoding
@@ -3004,7 +3006,8 @@ class ServerArgs:
                 )
 
             if (
-                self.speculative_algorithm in ["EAGLE", "EAGLE3", "STANDALONE"]
+                self.speculative_algorithm
+                in ["EAGLE", "EAGLE3", "P_EAGLE", "STANDALONE"]
                 and envs.SGLANG_ENABLE_SPEC_V2.get()
             ):
                 self.disable_overlap_schedule = False
@@ -3137,10 +3140,10 @@ class ServerArgs:
                     "Currently ngram speculative decoding does not support dp attention."
                 )
 
-    def _validate_eagle3_draft_model(self):
+    def _validate_eagle3_draft_model(self, require_parallel_drafting: bool = False):
         if self.speculative_draft_model_path is None:
             raise ValueError(
-                "EAGLE3 requires --speculative-draft-model-path pointing to a trained EAGLE3 draft checkpoint."
+                "EAGLE3/P_EAGLE requires --speculative-draft-model-path pointing to a trained EAGLE-family draft checkpoint."
             )
 
         draft_config = get_config(
@@ -3152,16 +3155,28 @@ class ServerArgs:
         has_eagle_architecture = any(
             "eagle" in architecture.lower() for architecture in draft_architectures
         )
-        has_eagle_config = getattr(draft_config, "eagle_config", None) is not None
+        eagle_config = getattr(draft_config, "eagle_config", None) or {}
+        has_eagle_config = bool(eagle_config)
+        has_parallel_drafting = bool(
+            getattr(draft_config, "parallel_drafting", False)
+            or eagle_config.get("parallel_drafting", False)
+            or getattr(draft_config, "speculative_algorithm", None) == "P_EAGLE"
+        )
 
         if has_eagle_architecture or has_eagle_config:
+            if require_parallel_drafting and not has_parallel_drafting:
+                raise ValueError(
+                    "P_EAGLE requires a draft checkpoint with parallel drafting metadata. "
+                    f"Draft model '{self.speculative_draft_model_path}' does not advertise "
+                    "'parallel_drafting: true' in config.json or eagle_config."
+                )
             return
 
         raise ValueError(
-            "EAGLE3 requires a trained EAGLE3 draft checkpoint. "
+            "EAGLE3/P_EAGLE requires a trained EAGLE-family draft checkpoint. "
             f"Draft model '{self.speculative_draft_model_path}' has architectures "
             f"{draft_architectures or ['<missing>']} and no eagle_config. "
-            "Use STANDALONE for plain draft-model speculation, or provide an EAGLE3 draft artifact."
+            "Use STANDALONE for plain draft-model speculation, or provide an EAGLE/P_EAGLE draft artifact."
         )
 
     def _handle_load_format(self):
@@ -4768,7 +4783,7 @@ class ServerArgs:
         parser.add_argument(
             "--speculative-algorithm",
             type=str,
-            choices=["EAGLE", "EAGLE3", "NEXTN", "STANDALONE", "NGRAM"],
+            choices=["EAGLE", "EAGLE3", "P_EAGLE", "NEXTN", "STANDALONE", "NGRAM"],
             help="Speculative algorithm.",
         )
         parser.add_argument(
