@@ -5,6 +5,8 @@ __pycache__/
 
 # C extensions
 *.so
+# Pre-built sgl_kernel for ROCm gfx1030 (RDNA2)
+!sgl-kernel/python/sgl_kernel/common_ops.cpython-312-x86_64-linux-gnu.so
 
 # Distribution / packaging
 .Python
@@ -209,6 +211,8 @@ work_dirs/
 *.so
 *.dylib
 *.dll
+# Pre-built sgl_kernel for ROCm gfx1030 (RDNA2)
+!sgl-kernel/python/sgl_kernel/common_ops.cpython-312-x86_64-linux-gnu.so
 
 # Fortran module files
 *.mod
