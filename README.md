@@ -1,6 +1,6 @@
 <div align="center">
 <img src="assets/sgl-1-bit-turbo-eagle.png" alt="SGLang 1-Bit Turbo" width="600"></img>
-
+</div>
 
 
 
