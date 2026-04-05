@@ -44,7 +44,7 @@ _is_musa = is_musa()
 
 ensure_prism_gguf_compat()
 
-if _is_cuda or _is_musa:
+if _is_cuda or _is_musa or _is_hip:
     from sgl_kernel import gelu_and_mul, moe_align_block_size, moe_sum, silu_and_mul
     from sgl_kernel.quantization import (
         ggml_dequantize,
@@ -55,14 +55,7 @@ if _is_cuda or _is_musa:
         ggml_mul_mat_vec_a8,
     )
 else:
-    if _is_hip:
-        warnings.warn(
-            "HIP uses a compatibility fallback for GGUF quantization in this fork. "
-            "EAGLE/TurboQuant runtime remains native, but GGUF weight matmuls may "
-            "dequantize through a slower path."
-        )
-    else:
-        warnings.warn(f"Only CUDA and MUSA support GGUF quantization currently.")
+    warnings.warn(f"Only CUDA, MUSA, and HIP/ROCm support GGUF quantization currently.")
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +241,7 @@ def _dequantize_gguf_weight(
 def fused_mul_mat_gguf(
     x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
 ) -> torch.Tensor:
-    has_fast_gguf = _is_cuda or _is_musa
+    has_fast_gguf = _is_cuda or _is_musa or _is_hip
     if _is_hip and qweight_type in PRISM_Q1_TYPES:
         logger.warning_once(
             "HIP PRISM Q1 uses a CPU matmul compatibility bridge in this fork."
@@ -296,7 +289,7 @@ def fused_moe_gguf(
     qweight_type2: int,
     activation: str,
 ) -> torch.Tensor:
-    has_fast_gguf = _is_cuda or _is_musa
+    has_fast_gguf = _is_cuda or _is_musa or _is_hip
 
     def act(x: torch.Tensor):
         if has_fast_gguf:

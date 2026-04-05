@@ -38,6 +38,7 @@ include_dirs = [
     root / "include",
     root / "include" / "impl",
     root / "csrc",
+    root / "csrc" / "quantization" / "gguf",
 ]
 
 sources = [
@@ -51,6 +52,7 @@ sources = [
     "csrc/moe/moe_align_kernel.cu",
     "csrc/moe/moe_topk_softmax_kernels.cu",
     "csrc/moe/moe_topk_sigmoid_kernels.cu",
+    "csrc/quantization/gguf/gguf_kernel.cu",
     "csrc/speculative/eagle_utils.cu",
     "csrc/speculative/speculative_sampling.hip",
     "csrc/kvcacheio/transfer.cu",

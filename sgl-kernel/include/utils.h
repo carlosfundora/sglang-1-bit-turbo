@@ -384,7 +384,8 @@ constexpr auto FP8_E4M3_MAX = 224.0f;
 using FP8_TYPE = c10::Float8_e4m3fn;
 C10_HOST_DEVICE constexpr auto FP8_E4M3_MAX = std::numeric_limits<FP8_TYPE>::max();
 #else
-#error "fp8 is not supported in this processor (arch < gfx942)."
+// FP8 not available on this ROCm arch (e.g. RDNA2/gfx1030) - silently skip.
+// Kernels that don't use FP8 (like GGUF) can still compile.
 #endif  // HIP_FP8_TYPE_E4M3
 #endif  // HIP_FP8_TYPE_FNUZ
 #endif  // USE_ROCM
