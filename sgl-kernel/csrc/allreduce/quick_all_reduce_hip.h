@@ -7,7 +7,7 @@
 
 #include "quick_all_reduce.cuh"
 
-#define CUDA_CHECK(err)                                                                               \
+#define HIP_CHECK(err)                                                                               \
   do {                                                                                               \
     hipError_t err_ = (err);                                                                         \
     if (err_ != hipSuccess) {                                                                        \
@@ -141,18 +141,18 @@ struct DeviceComms {
     static int64_t data_buffer_size = 2 * this->kMaxProblemSize;
     int64_t total_buffer_size = flags_buffer_size + data_buffer_size;
     data_offset = flags_buffer_size;
-    CUDA_CHECK(hipExtMallocWithFlags((void**)&dbuffer, total_buffer_size, hipDeviceMallocUncached));
+    HIP_CHECK(hipExtMallocWithFlags((void**)&dbuffer, total_buffer_size, hipDeviceMallocUncached));
 
     // Clear the flags buffer.
-    CUDA_CHECK(hipMemset(dbuffer, 0, flags_buffer_size));
+    HIP_CHECK(hipMemset(dbuffer, 0, flags_buffer_size));
 
     // Device-side list of IPC buffers.
     buffer_list.resize(world_size);
-    CUDA_CHECK(hipMalloc(&dbuffer_list, world_size * sizeof(uint8_t*)));
+    HIP_CHECK(hipMalloc(&dbuffer_list, world_size * sizeof(uint8_t*)));
 
     // Create IPC handles for rank's communication buffer.
     all_buffer_ipc_handles.resize(world_size);
-    CUDA_CHECK(hipIpcGetMemHandle(&buffer_ipc_handle, dbuffer));
+    HIP_CHECK(hipIpcGetMemHandle(&buffer_ipc_handle, dbuffer));
 
     initialized = true;
   }
@@ -173,12 +173,12 @@ struct DeviceComms {
     if (initialized) {
       for (int i = 0; i < world_size; i++) {
         if (i != rank) {
-          CUDA_CHECK(hipIpcCloseMemHandle(dbuffer_list[i]));
+          HIP_CHECK(hipIpcCloseMemHandle(dbuffer_list[i]));
         }
       }
 
-      CUDA_CHECK(hipFree(dbuffer));
-      CUDA_CHECK(hipFree(dbuffer_list));
+      HIP_CHECK(hipFree(dbuffer));
+      HIP_CHECK(hipFree(dbuffer_list));
 
       initialized = false;
     }
@@ -194,14 +194,14 @@ struct DeviceComms {
     // Note: For our own rank, we do not need to open a handle.
     for (int i = 0; i < world_size; i++) {
       if (i != rank) {
-        CUDA_CHECK(
+        HIP_CHECK(
             hipIpcOpenMemHandle((void**)&buffer_list[i], all_buffer_ipc_handles[i], hipIpcMemLazyEnablePeerAccess));
       } else {
         buffer_list[i] = dbuffer;
       }
     }
 
-    CUDA_CHECK(hipMemcpy(dbuffer_list, buffer_list.data(), world_size * sizeof(uint8_t*), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dbuffer_list, buffer_list.data(), world_size * sizeof(uint8_t*), hipMemcpyHostToDevice));
   }
 
   template <typename T, bool cast_bf2half>
@@ -229,7 +229,7 @@ struct DeviceComms {
         TWOSHOT_DISPATCH(CodecFP)
         break;
     }
-    CUDA_CHECK(hipGetLastError());
+    HIP_CHECK(hipGetLastError());
     // Rotate the flag color.
     flag_color += divceil(N, grid);
   }

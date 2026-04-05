@@ -9,7 +9,7 @@
  */
 #include <ATen/core/TensorBase.h>
 #include <ATen/core/TensorBody.h>
-#include <c10/hip/HIPStream.h>
+#include <ATen/hip/impl/HIPStreamMasqueradingAsCUDA.h>
 #include <c10/macros/Macros.h>
 #include <c10/util/Exception.h>
 #include <hip/hip_runtime.h>
@@ -445,7 +445,7 @@ void fast_topk_interface(
   CHECK_CUDA(lengths);
   const auto params = get_params(score, lengths, row_starts_opt, indices);
   const auto B = score.size(0);
-  const auto stream = at::cuda::getCurrentCUDAStream().stream();
+  const auto stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA().stream();
   const auto grid = dim3{static_cast<uint32_t>(B)};
   const auto block = dim3{kThreadsPerBlock};
   setup_kernel_smem_once<topk_kernel, kSmem>();
@@ -481,7 +481,7 @@ void fast_topk_transform_interface(
   TORCH_CHECK(prefill_bs <= B);  // prefill_bs should be smaller than expanded bs
 
   // launch kernel
-  const auto stream = at::cuda::getCurrentCUDAStream().stream();
+  const auto stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA().stream();
   const auto grid = dim3{static_cast<uint32_t>(B)};
   const auto block = dim3{kThreadsPerBlock};
   const auto src_stride = src_page_table.stride(0);
@@ -534,7 +534,7 @@ void fast_topk_transform_ragged_interface(
   TORCH_CHECK(topk_indices_offset.size(0) == B);
 
   // launch kernel
-  const auto stream = at::cuda::getCurrentCUDAStream().stream();
+  const auto stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA().stream();
   const auto grid = dim3{static_cast<uint32_t>(B)};
   const auto block = dim3{kThreadsPerBlock};
 

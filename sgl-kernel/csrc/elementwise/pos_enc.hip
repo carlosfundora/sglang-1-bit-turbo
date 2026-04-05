@@ -4,7 +4,7 @@
 // https://github.com/vllm-project/vllm/blob/014ece97c7aa49084a1119dca792af081a18dbc1/csrc/pos_encoding_kernels.cu
 
 #include <ATen/hip/HIPContext.h>
-#include <c10/hip/HIPGuard.h>
+#include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
 #include <torch/all.h>
 
 #include "utils_hip.h"
@@ -176,8 +176,8 @@ void rotary_embedding(
 
   dim3 grid(num_tokens);
   dim3 block(std::min<int64_t>(num_heads * rot_dim / 2, 512));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
-  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
+  const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(query));
+  const hipStream_t stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
   DISPATCH_FLOAT_TYPES(query.scalar_type(), "rotary_embedding", [&] {
     if (is_neox) {
      hipLaunchKernelGGL(( rotary_embedding_kernel<scalar_t, true>), dim3(grid), dim3(block), 0, stream, 

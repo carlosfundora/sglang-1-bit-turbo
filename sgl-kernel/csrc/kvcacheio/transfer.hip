@@ -301,7 +301,7 @@ void transfer_kv_launcher(
   const uintptr_t* src_v_tbl_ptr = IsMLA || !src_v_layers.defined() ? nullptr : src_v_layers.data_ptr<uintptr_t>();
   const uintptr_t* dst_v_tbl_ptr = IsMLA || !dst_v_layers.defined() ? nullptr : dst_v_layers.data_ptr<uintptr_t>();
 
-  hipStream_t torch_current_stream = at::cuda::getCurrentCUDAStream();
+  hipStream_t torch_current_stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
   if constexpr (PageHeadLayout) {
    hipLaunchKernelGGL(( transfer_page_head_kernel_impl<SrcOffsetFn, DstOffsetFn>), dim3(grid_dim), dim3(threads_per_block), 0, torch_current_stream, 
         src_k_ptr,
@@ -343,7 +343,7 @@ void transfer_kv_launcher(
         src_v_tbl_ptr,
         dst_v_tbl_ptr);
   }
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  C10_HIP_KERNEL_LAUNCH_CHECK();
 }
 
 void transfer_kv_per_layer(
@@ -824,8 +824,8 @@ inline void transfer_kv_page_first_direct_impl(
   std::vector<size_t> batch_sizes;
   std::vector<size_t> attrs_idxs(1, 0);
   cudaMemcpyAttributes attrs{};
-  const int device_id = at::cuda::current_device();
-  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
+  const int device_id = at::hip::current_device();
+  const hipStream_t stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
 
   auto append_copy = [&](void* src, void* dst, size_t size_bytes) {
     batch_srcs.push_back(src);

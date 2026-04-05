@@ -19,7 +19,7 @@ limitations under the License.
 ==============================================================================*/
 
 #include <ATen/hip/HIPContext.h>
-#include <c10/hip/HIPGuard.h>
+#include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
 #include <torch/all.h>
 
 #ifndef USE_ROCM
@@ -532,8 +532,8 @@ void topk_sigmoid(
   const bool needs_workspace = !is_pow_2 || num_experts > 256;
   const int64_t workspace_size = needs_workspace ? num_tokens * num_experts : 0;
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(gating_output));
-  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
+  const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(gating_output));
+  const hipStream_t stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
   torch::Tensor sigmoid_workspace =
       torch::empty({workspace_size}, gating_output.options().dtype(at::ScalarType::Float));
 

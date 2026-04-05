@@ -17,7 +17,7 @@
  */
 
 #include <ATen/hip/HIPContext.h>
-#include <c10/hip/HIPGuard.h>
+#include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
 #include <torch/all.h>
 
 #ifndef USE_ROCM
@@ -89,8 +89,8 @@ void silu_and_mul(at::Tensor& out, at::Tensor& input) {
   int64_t num_tokens = input.numel() / input.size(-1);
   dim3 grid(num_tokens);
 
-  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const hipStream_t stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
+  const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(input));
 
   DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FLOAT_FP16(input.scalar_type(), c_type, [&] {
     uint32_t vec_size = 16 / sizeof(c_type);
@@ -111,8 +111,8 @@ void gelu_tanh_and_mul(at::Tensor& out, at::Tensor& input) {
   int64_t num_tokens = input.numel() / input.size(-1);
   dim3 grid(num_tokens);
 
-  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const hipStream_t stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
+  const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(input));
 
   DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FLOAT_FP16(input.scalar_type(), c_type, [&] {
     uint32_t vec_size = 16 / sizeof(c_type);
@@ -133,8 +133,8 @@ void gelu_and_mul(at::Tensor& out, at::Tensor& input) {
   int64_t num_tokens = input.numel() / input.size(-1);
   dim3 grid(num_tokens);
 
-  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const hipStream_t stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
+  const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(input));
 
   DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FLOAT_FP16(input.scalar_type(), c_type, [&] {
     uint32_t vec_size = 16 / sizeof(c_type);
@@ -157,8 +157,8 @@ void gelu_quick(at::Tensor& out, const at::Tensor& input) {
   int64_t num_tokens = input.numel() / input.size(-1);
   dim3 grid(num_tokens);
 
-  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const hipStream_t stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
+  const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(input));
 
   DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FLOAT_FP16(input.scalar_type(), c_type, [&] {
     uint32_t vec_size = 16 / sizeof(c_type);

@@ -150,7 +150,7 @@ void ApplyTokenBitmaskInplaceDispatchToBitsPerThread(
   const int32_t num_bits_per_thread = CeilDiv(vocab_size, THREADS_PER_THREAD_BLOCK * num_blocks_per_row);
 
   const dim3 block(THREADS_PER_THREAD_BLOCK);
-  hipStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+  hipStream_t stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA().stream();
 
   if (num_bits_per_thread <= 4 && kAlignment <= 4) {
     const dim3 grid(CeilDiv(vocab_size, THREADS_PER_THREAD_BLOCK * 4), num_rows);

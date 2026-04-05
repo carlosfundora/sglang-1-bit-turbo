@@ -17,7 +17,7 @@ limitations under the License.
 
 #include <ATen/ATen.h>
 #include <ATen/hip/HIPContext.h>
-#include <c10/hip/HIPGuard.h>
+#include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
 
 #include <THH/THHAtomics.cuh>
 
@@ -325,7 +325,7 @@ void moe_align_block_size(
     torch::Tensor num_tokens_post_pad,
     torch::Tensor cumsum_buffer,
     bool pad_sorted_token_ids) {
-  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
+  const hipStream_t stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
 
   int threads = 1024;
   threads = ((threads + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
