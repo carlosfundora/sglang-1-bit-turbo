@@ -38,7 +38,9 @@ def _dequantize_prism_q1_blocks(blocks: np.ndarray, block_size: int) -> np.ndarr
     return values
 
 
-def _dequantize_prism_q1(data: np.ndarray, block_size: int, type_size: int) -> np.ndarray:
+def _dequantize_prism_q1(
+    data: np.ndarray, block_size: int, type_size: int
+) -> np.ndarray:
     rows = np.ascontiguousarray(data.view(np.uint8))
     if rows.shape[-1] % type_size != 0:
         raise ValueError(

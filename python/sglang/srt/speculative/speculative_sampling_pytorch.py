@@ -97,9 +97,9 @@ def tree_speculative_sampling_target_only_pytorch(
                     break
                 else:
                     # REJECT — record target mass for correction step
-                    draft_probs[bx, cur_prob_offset, draft_token_id] = (
-                        target_probs[bx, cur_prob_offset, draft_token_id]
-                    )
+                    draft_probs[bx, cur_prob_offset, draft_token_id] = target_probs[
+                        bx, cur_prob_offset, draft_token_id
+                    ]
                     cur_index = retrive_next_sibling_cpu[bx][cur_index]
 
             if cur_index == -1:

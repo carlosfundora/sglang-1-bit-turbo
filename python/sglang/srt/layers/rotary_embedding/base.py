@@ -203,9 +203,12 @@ class RotaryEmbedding(MultiPlatformOp):
             )
             if pos_min < 0 or pos_max >= hard_limit:
                 import logging
+
                 logging.getLogger(__name__).warning(
                     "Rotary positions out of range: min=%d max=%d limit=%d, clamping",
-                    pos_min, pos_max, hard_limit,
+                    pos_min,
+                    pos_max,
+                    hard_limit,
                 )
                 positions = positions.clamp(min=0, max=hard_limit - 1)
                 pos_max = hard_limit - 1

@@ -4,7 +4,7 @@ This section describes the basic functions and features supported by the Ascend 
 questions, please [open an issue](https://github.com/sgl-project/sglang/issues).
 
 If you want to know the meaning and usage of each parameter,
-click [Server Arguments](https://docs.sglang.io/advanced_features/server_arguments.html).
+click [Server Arguments](../../advanced_features/server_arguments.md).
 
 ## Model and tokenizer
 

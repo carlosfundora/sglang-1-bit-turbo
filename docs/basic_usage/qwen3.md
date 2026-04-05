@@ -21,7 +21,7 @@ SGLang supports prefix caching for Qwen3-Next models named `MambaRadixCache`, wh
 - `extra_buffer`: An optimized version that is compatible with features like page size > 1, overlap schedule, and speculative decoding. It also supports storing mamba state in branching positions. However, it requires two extra mamba spaces for a ping-pong buffer for each request. To enable it, add the argument `--mamba-scheduler-strategy extra_buffer` when launching the server.
 
 ### EAGLE Speculative Decoding
-**Description**: SGLang has supported Qwen3-Next models with [EAGLE speculative decoding](https://docs.sglang.io/advanced_features/speculative_decoding.html#EAGLE-Decoding).
+**Description**: SGLang has supported Qwen3-Next models with [EAGLE speculative decoding](../advanced_features/speculative_decoding.md#EAGLE-Decoding).
 
 **Usage**:
 Add arguments `--speculative-algorithm`, `--speculative-num-steps`, `--speculative-eagle-topk` and `--speculative-num-draft-tokens` to enable this feature. For example:

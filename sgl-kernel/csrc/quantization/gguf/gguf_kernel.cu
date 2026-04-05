@@ -4,8 +4,8 @@
 #include <torch/all.h>
 
 #ifdef USE_ROCM
-#include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include <hip/hip_runtime.h>
 #else
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>

@@ -240,7 +240,7 @@ void build_tree_kernel_efficient(
     } else if (draft_token_num > 8) {
       num_bytes_per_item = 2;
     }
-   hipLaunchKernelGGL(( build_tree_efficient_partial_packed), dim3(grid), dim3(block), 0, stream, 
+   hipLaunchKernelGGL(( build_tree_efficient_partial_packed), dim3(grid), dim3(block), 0, stream,
         static_cast<int64_t*>(parent_list.data_ptr()),
         static_cast<int64_t*>(selected_index.data_ptr()),
         static_cast<int64_t*>(verified_seq_len.data_ptr()),
@@ -254,7 +254,7 @@ void build_tree_kernel_efficient(
         int32_t(draft_token_num),
         num_bytes_per_item);
   } else {
-   hipLaunchKernelGGL(( build_tree_efficient), dim3(grid), dim3(block), 0, stream, 
+   hipLaunchKernelGGL(( build_tree_efficient), dim3(grid), dim3(block), 0, stream,
         static_cast<int64_t*>(parent_list.data_ptr()),
         static_cast<int64_t*>(selected_index.data_ptr()),
         static_cast<int64_t*>(verified_seq_len.data_ptr()),
@@ -394,7 +394,7 @@ void verify_tree_greedy(
   dim3 grid(batch_size);
   dim3 block(1);
 
- hipLaunchKernelGGL(( VerifyTreeGreedy<int32_t, int64_t>), dim3(grid), dim3(block), 0, stream, 
+ hipLaunchKernelGGL(( VerifyTreeGreedy<int32_t, int64_t>), dim3(grid), dim3(block), 0, stream,
       static_cast<int32_t*>(predicts.data_ptr()),
       static_cast<int32_t*>(accept_index.data_ptr()),
       static_cast<int32_t*>(accept_token_num.data_ptr()),

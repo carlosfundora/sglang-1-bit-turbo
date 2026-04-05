@@ -180,7 +180,7 @@ void rotary_embedding(
   const hipStream_t stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
   DISPATCH_FLOAT_TYPES(query.scalar_type(), "rotary_embedding", [&] {
     if (is_neox) {
-     hipLaunchKernelGGL(( rotary_embedding_kernel<scalar_t, true>), dim3(grid), dim3(block), 0, stream, 
+     hipLaunchKernelGGL(( rotary_embedding_kernel<scalar_t, true>), dim3(grid), dim3(block), 0, stream,
           positions.data_ptr<int64_t>(),
           query.data_ptr<scalar_t>(),
           key.has_value() ? key->data_ptr<scalar_t>() : nullptr,
@@ -193,7 +193,7 @@ void rotary_embedding(
           num_kv_heads,
           head_size);
     } else {
-     hipLaunchKernelGGL(( rotary_embedding_kernel<scalar_t, false>), dim3(grid), dim3(block), 0, stream, 
+     hipLaunchKernelGGL(( rotary_embedding_kernel<scalar_t, false>), dim3(grid), dim3(block), 0, stream,
           positions.data_ptr<int64_t>(),
           query.data_ptr<scalar_t>(),
           key.has_value() ? key->data_ptr<scalar_t>() : nullptr,

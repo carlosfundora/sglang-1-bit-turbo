@@ -31,7 +31,6 @@ from sglang.srt.speculative.eagle_utils import verify_tree_greedy_func
 from sglang.srt.speculative.spec_info import SpecInput, SpecInputType
 from sglang.srt.speculative.spec_utils import (
     SIMULATE_ACC_LEN,
-    TREE_SPEC_KERNEL_AVAILABLE,
     align_evict_mask_to_page_size,
     assign_req_to_token_pool_func,
     create_accept_length_filter,
@@ -53,8 +52,8 @@ logger = logging.getLogger(__name__)
 def _build_kv_indptr_for_hip(
     paged_kernel_lens: torch.Tensor, device: torch.device
 ) -> tuple[torch.Tensor, int]:
-    paged_kernel_lens_cpu = paged_kernel_lens.detach().contiguous().to(
-        "cpu", dtype=torch.int32
+    paged_kernel_lens_cpu = (
+        paged_kernel_lens.detach().contiguous().to("cpu", dtype=torch.int32)
     )
     cum_kv_seq_len_cpu = torch.zeros(
         (paged_kernel_lens_cpu.numel() + 1,), dtype=torch.int32
@@ -94,12 +93,12 @@ def _validate_hip_spec_metadata(
         errors.append(
             f"cum_kv_seq_len.numel={cum_kv_seq_len.numel()} expected={expected_indptr}"
         )
-    total_from_lens = int(paged_kernel_lens.sum().item()) if paged_kernel_lens.numel() else 0
+    total_from_lens = (
+        int(paged_kernel_lens.sum().item()) if paged_kernel_lens.numel() else 0
+    )
     total_from_indptr = int(cum_kv_seq_len[-1].item()) if cum_kv_seq_len.numel() else 0
     if total_from_lens != total_from_indptr:
-        errors.append(
-            f"lens_sum={total_from_lens} indptr_total={total_from_indptr}"
-        )
+        errors.append(f"lens_sum={total_from_lens} indptr_total={total_from_indptr}")
     if req_pool_indices.numel() > 0:
         max_req = int(req_pool_indices.max().item())
         if max_req >= req_to_token.shape[0]:
@@ -249,9 +248,9 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
             dtype=torch.int32,
             device=device,
         )
-        paged_kernel_lens = paged_kernel_lens.to(
-            device=device, dtype=torch.int32
-        ).contiguous().clone()
+        paged_kernel_lens = (
+            paged_kernel_lens.to(device=device, dtype=torch.int32).contiguous().clone()
+        )
         paged_kernel_lens = paged_kernel_lens + self.draft_token_num
         if is_hip():
             cum_kv_seq_len, paged_kernel_lens_sum = _build_kv_indptr_for_hip(

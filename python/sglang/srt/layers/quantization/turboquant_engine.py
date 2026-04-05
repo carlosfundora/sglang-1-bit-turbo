@@ -12,9 +12,8 @@ from __future__ import annotations
 import math
 from typing import Dict, Optional, Tuple
 
-import torch
 import numpy as np
-
+import torch
 
 # ---------------------------------------------------------------------------
 # Lloyd-Max codebook for N(0,1)
@@ -57,7 +56,7 @@ def get_codebook(bit_width: int) -> Tuple[torch.Tensor, torch.Tensor]:
         boundaries: (2^bit_width - 1,) float32  (inner boundaries only)
     """
     if bit_width not in _CODEBOOK_CACHE:
-        n_levels = 2 ** bit_width
+        n_levels = 2**bit_width
         centroids, boundaries = _compute_lloyd_max_gaussian(n_levels)
         _CODEBOOK_CACHE[bit_width] = (
             torch.tensor(centroids, dtype=torch.float32),
@@ -115,9 +114,7 @@ def unpack_4bit(packed: torch.Tensor, orig_last_dim: int) -> torch.Tensor:
     lo = (packed & 0x0F).to(torch.int32)
     hi = ((packed >> 4) & 0x0F).to(torch.int32)
     result = torch.stack([lo, hi], dim=-1)
-    return result.reshape(*packed.shape[:-1], packed.shape[-1] * 2)[
-        ..., :orig_last_dim
-    ]
+    return result.reshape(*packed.shape[:-1], packed.shape[-1] * 2)[..., :orig_last_dim]
 
 
 def pack_2bit(indices: torch.Tensor) -> torch.Tensor:
@@ -125,10 +122,12 @@ def pack_2bit(indices: torch.Tensor) -> torch.Tensor:
     d = indices.shape[-1]
     assert d % 4 == 0, f"Last dim must be multiple of 4, got {d}"
     idx = indices.to(torch.uint8)
-    return (idx[..., 0::4]
-            | (idx[..., 1::4] << 2)
-            | (idx[..., 2::4] << 4)
-            | (idx[..., 3::4] << 6))
+    return (
+        idx[..., 0::4]
+        | (idx[..., 1::4] << 2)
+        | (idx[..., 2::4] << 4)
+        | (idx[..., 3::4] << 6)
+    )
 
 
 def unpack_2bit(packed: torch.Tensor, orig_last_dim: int) -> torch.Tensor:
@@ -138,9 +137,7 @@ def unpack_2bit(packed: torch.Tensor, orig_last_dim: int) -> torch.Tensor:
     v2 = ((packed >> 4) & 0x03).to(torch.int32)
     v3 = ((packed >> 6) & 0x03).to(torch.int32)
     result = torch.stack([v0, v1, v2, v3], dim=-1)
-    return result.reshape(*packed.shape[:-1], packed.shape[-1] * 4)[
-        ..., :orig_last_dim
-    ]
+    return result.reshape(*packed.shape[:-1], packed.shape[-1] * 4)[..., :orig_last_dim]
 
 
 def pack_3bit(indices: torch.Tensor) -> torch.Tensor:
@@ -165,7 +162,11 @@ def unpack_3bit(packed: torch.Tensor, orig_last_dim: int) -> torch.Tensor:
     shape = packed.shape[:-1]
     n_groups = packed.shape[-1] // 3
     p = packed.reshape(*shape, n_groups, 3)
-    b0, b1, b2 = p[..., 0].to(torch.int32), p[..., 1].to(torch.int32), p[..., 2].to(torch.int32)
+    b0, b1, b2 = (
+        p[..., 0].to(torch.int32),
+        p[..., 1].to(torch.int32),
+        p[..., 2].to(torch.int32),
+    )
     v0 = b0 & 0x07
     v1 = (b0 >> 3) & 0x07
     v2 = ((b0 >> 6) | (b1 << 2)) & 0x07
@@ -189,7 +190,9 @@ def pack_indices(indices: torch.Tensor, bit_width: int) -> torch.Tensor:
     raise ValueError(f"Unsupported bit_width: {bit_width}")
 
 
-def unpack_indices(packed: torch.Tensor, orig_last_dim: int, bit_width: int) -> torch.Tensor:
+def unpack_indices(
+    packed: torch.Tensor, orig_last_dim: int, bit_width: int
+) -> torch.Tensor:
     """Dispatch to the right unpacking function based on bit_width."""
     if bit_width == 4:
         return unpack_4bit(packed, orig_last_dim)
@@ -247,9 +250,13 @@ def mixed_bit_config(effective_bits: float, n_groups: int) -> list:
         return [bw] * n_groups
 
 
-def mixed_compressed_bytes(kv_lora_rank: int, group_size: int,
-                           qk_rope_head_dim: int, group_bits: list,
-                           use_qjl: bool = False) -> int:
+def mixed_compressed_bytes(
+    kv_lora_rank: int,
+    group_size: int,
+    qk_rope_head_dim: int,
+    group_bits: list,
+    use_qjl: bool = False,
+) -> int:
     """Calculate total compressed bytes for mixed-bit layout."""
     total = 0
     for g, bw in enumerate(group_bits):
@@ -264,9 +271,13 @@ def mixed_compressed_bytes(kv_lora_rank: int, group_size: int,
     return total
 
 
-def mixed_compress_latent(latent: torch.Tensor, group_bits: list,
-                          group_size: int, rotations: dict,
-                          device: torch.device) -> tuple:
+def mixed_compress_latent(
+    latent: torch.Tensor,
+    group_bits: list,
+    group_size: int,
+    rotations: dict,
+    device: torch.device,
+) -> tuple:
     """Compress latent with per-group variable bit-width.
 
     Returns (list_of_packed, norms_tensor, latent_mse_or_None).
@@ -280,7 +291,7 @@ def mixed_compress_latent(latent: torch.Tensor, group_bits: list,
         g_start = g * group_size
         g_end = min(g_start + group_size, latent.shape[1])
         g_dim = g_end - g_start
-        n_levels = 2 ** bw
+        n_levels = 2**bw
 
         centroids, boundaries = get_codebook(bw)
         centroids = centroids.to(device)
@@ -310,10 +321,15 @@ def mixed_compress_latent(latent: torch.Tensor, group_bits: list,
     return all_packed, norms_tensor, latent_mse
 
 
-def mixed_decompress_latent(all_packed: list, norms: torch.Tensor,
-                            group_bits: list, group_size: int,
-                            kv_lora_rank: int, rotations: dict,
-                            device: torch.device) -> torch.Tensor:
+def mixed_decompress_latent(
+    all_packed: list,
+    norms: torch.Tensor,
+    group_bits: list,
+    group_size: int,
+    kv_lora_rank: int,
+    rotations: dict,
+    device: torch.device,
+) -> torch.Tensor:
     """Decompress latent from per-group variable bit-width packed data."""
     T = all_packed[0].shape[0]
     norms_f = norms.float()
@@ -393,15 +409,11 @@ def turboquant_quantize_packed(
         all_indices.append(indices)
 
     full_indices = torch.cat(all_indices, dim=1)
-    norms_out = (
-        torch.stack(all_norms, dim=1) if len(all_norms) > 1 else all_norms[0]
-    )
+    norms_out = torch.stack(all_norms, dim=1) if len(all_norms) > 1 else all_norms[0]
 
     padded_N = pad_for_packing(N, bit_width)
     if padded_N > N:
-        full_indices = torch.nn.functional.pad(
-            full_indices, (0, padded_N - N), value=0
-        )
+        full_indices = torch.nn.functional.pad(full_indices, (0, padded_N - N), value=0)
 
     packed = pack_indices(full_indices, bit_width)
 

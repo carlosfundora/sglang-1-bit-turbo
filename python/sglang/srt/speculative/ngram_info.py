@@ -29,7 +29,6 @@ from sglang.srt.mem_cache.common import (
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.speculative.spec_info import SpecInput, SpecInputType
 from sglang.srt.speculative.spec_utils import (
-    TREE_SPEC_KERNEL_AVAILABLE,
     assign_req_to_token_pool,
     get_src_tgt_cache_loc,
     get_target_cache_loc,

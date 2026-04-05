@@ -303,7 +303,7 @@ void transfer_kv_launcher(
 
   hipStream_t torch_current_stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
   if constexpr (PageHeadLayout) {
-   hipLaunchKernelGGL(( transfer_page_head_kernel_impl<SrcOffsetFn, DstOffsetFn>), dim3(grid_dim), dim3(threads_per_block), 0, torch_current_stream, 
+   hipLaunchKernelGGL(( transfer_page_head_kernel_impl<SrcOffsetFn, DstOffsetFn>), dim3(grid_dim), dim3(threads_per_block), 0, torch_current_stream,
         src_k_ptr,
         dst_k_ptr,
         src_v_ptr,
@@ -324,7 +324,7 @@ void transfer_kv_launcher(
         page_size,
         head_num);
   } else {
-   hipLaunchKernelGGL(( transfer_kernel_impl<SrcOffsetFn, DstOffsetFn, IsMLA>), dim3(grid_dim), dim3(threads_per_block), 0, torch_current_stream, 
+   hipLaunchKernelGGL(( transfer_kernel_impl<SrcOffsetFn, DstOffsetFn, IsMLA>), dim3(grid_dim), dim3(threads_per_block), 0, torch_current_stream,
         src_k_ptr,
         dst_k_ptr,
         src_v_ptr,

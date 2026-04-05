@@ -73,9 +73,7 @@ def _tree_spec_sampling_kernel(
     coin = tl.load(uniform_samples_ptr + row_off + 0).to(tl.float32)
 
     # accept_index[bx, 0] = last_accepted_retrive_idx
-    tl.store(
-        accept_index_ptr + bx * num_spec_steps + 0, last_accepted_retrive_idx
-    )
+    tl.store(accept_index_ptr + bx * num_spec_steps + 0, last_accepted_retrive_idx)
     num_accepted: tl.int32 = 0
     # cur_index must be int64 (from retrive_next_token loads)
     cur_index = last_accepted_retrive_idx * 0  # int64 zero
@@ -105,7 +103,9 @@ def _tree_spec_sampling_kernel(
 
                         # target_probs[bx, cur_prob_offset, draft_token_id]
                         tp_addr = (
-                            prob_batch_off + cur_prob_offset * vocab_size + draft_token_id
+                            prob_batch_off
+                            + cur_prob_offset * vocab_size
+                            + draft_token_id
                         )
                         target_prob_single = tl.load(target_probs_ptr + tp_addr).to(
                             tl.float32
@@ -122,7 +122,10 @@ def _tree_spec_sampling_kernel(
                             coin = tl.load(
                                 uniform_samples_ptr + row_off + cur_index
                             ).to(tl.float32)
-                            tl.store(predicts_ptr + last_accepted_retrive_idx, draft_token_id.to(tl.int32))
+                            tl.store(
+                                predicts_ptr + last_accepted_retrive_idx,
+                                draft_token_id.to(tl.int32),
+                            )
                             num_accepted += 1
                             tl.store(
                                 accept_index_ptr + bx * num_spec_steps + num_accepted,
@@ -132,9 +135,7 @@ def _tree_spec_sampling_kernel(
                             accepted_this_depth = 1
                         else:
                             # REJECT — copy target mass into draft_probs for correction
-                            tl.store(
-                                draft_probs_ptr + tp_addr, target_prob_single
-                            )
+                            tl.store(draft_probs_ptr + tp_addr, target_prob_single)
                             cur_index = tl.load(
                                 retrive_next_sibling_ptr + row_off + cur_index
                             )
@@ -161,8 +162,12 @@ def _tree_spec_sampling_kernel(
     for v_start in tl.static_range(0, vocab_size, BLOCK_V):
         offs = v_start + tl.arange(0, BLOCK_V)
         mask = offs < vocab_size
-        t_vals = tl.load(target_probs_ptr + target_row_base + offs, mask=mask, other=0.0).to(tl.float32)
-        d_vals = tl.load(draft_probs_ptr + draft_row_base + offs, mask=mask, other=0.0).to(tl.float32)
+        t_vals = tl.load(
+            target_probs_ptr + target_row_base + offs, mask=mask, other=0.0
+        ).to(tl.float32)
+        d_vals = tl.load(
+            draft_probs_ptr + draft_row_base + offs, mask=mask, other=0.0
+        ).to(tl.float32)
         relu_vals = tl.maximum(t_vals - d_vals, 0.0)
         sum_relu += tl.sum(relu_vals)
 
@@ -177,8 +182,12 @@ def _tree_spec_sampling_kernel(
         if found == 0:
             offs = v_start + tl.arange(0, BLOCK_V)
             mask = offs < vocab_size
-            t_vals = tl.load(target_probs_ptr + target_row_base + offs, mask=mask, other=0.0).to(tl.float32)
-            d_vals = tl.load(draft_probs_ptr + draft_row_base + offs, mask=mask, other=0.0).to(tl.float32)
+            t_vals = tl.load(
+                target_probs_ptr + target_row_base + offs, mask=mask, other=0.0
+            ).to(tl.float32)
+            d_vals = tl.load(
+                draft_probs_ptr + draft_row_base + offs, mask=mask, other=0.0
+            ).to(tl.float32)
             relu_vals = tl.maximum(t_vals - d_vals, 0.0)
 
             block_cumsum = tl.cumsum(relu_vals, axis=0)

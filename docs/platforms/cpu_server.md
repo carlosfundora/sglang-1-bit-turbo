@@ -252,7 +252,7 @@ python -m sglang.bench_serving -h
 ```
 
 Additionally, requests can be formatted using
-[the OpenAI Completions API](https://docs.sglang.io/basic_usage/openai_api_completions.html)
+[the OpenAI Completions API](../basic_usage/openai_api_completions.ipynb)
 and sent via the command line (e.g., using `curl`) or through your own scripts.
 
 ## Example Usage Commands

@@ -23,13 +23,13 @@ from sglang.srt.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
+from sglang.srt.utils import is_cuda, is_hip, is_musa, is_xpu, set_weight_attrs
 from sglang.srt.utils.gguf_compat import (
     PRISM_Q1_0,
     PRISM_Q1_0_G128,
     ensure_prism_gguf_compat,
     gguf_type_name,
 )
-from sglang.srt.utils import is_cuda, is_hip, is_musa, is_xpu, set_weight_attrs
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
@@ -154,7 +154,9 @@ IMATRIX_QUANT_TYPES = {
 # TODO(Isotr0py): Currently, we don't have MMQ kernel for I-Matrix quantization.
 # Consolidate DEQUANT_TYPES, MMVQ_QUANT_TYPES and MMQ_QUANT_TYPES after we add
 # MMQ kernel for I-Matrix quantization.
-DEQUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES | PRISM_Q1_TYPES
+DEQUANT_TYPES = (
+    STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES | PRISM_Q1_TYPES
+)
 MMVQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES
 MMQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES
 
@@ -167,7 +169,9 @@ def _dequantize_with_gguf_quants(
     rows: int,
     cols: int,
 ) -> torch.Tensor:
-    qweight_np = qweight.detach().to(device="cpu", dtype=torch.uint8).contiguous().numpy()
+    qweight_np = (
+        qweight.detach().to(device="cpu", dtype=torch.uint8).contiguous().numpy()
+    )
     dequant = gguf_quants.dequantize(qweight_np, qweight_type)
     dequant = np.ascontiguousarray(dequant.reshape(rows, cols))
     return torch.from_numpy(dequant).to(device=qweight.device, dtype=dtype)
@@ -185,7 +189,9 @@ def _get_hip_prism_cpu_weight(
     block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
     rows = qweight.shape[0]
     cols = qweight.shape[1] // type_size * block_size
-    qweight_np = qweight.detach().to(device="cpu", dtype=torch.uint8).contiguous().numpy()
+    qweight_np = (
+        qweight.detach().to(device="cpu", dtype=torch.uint8).contiguous().numpy()
+    )
     dequant = gguf_quants.dequantize(qweight_np, qweight_type)
     dequant = np.ascontiguousarray(dequant.reshape(rows, cols))
     weight = torch.from_numpy(dequant).to(dtype=torch.float32).contiguous()
@@ -314,8 +320,7 @@ def fused_moe_gguf(
     # unless we decent expert reuse we are better off running moe_vec kernel
     if (
         has_fast_gguf
-        and
-        qweight_type2 in MMQ_QUANT_TYPES
+        and qweight_type2 in MMQ_QUANT_TYPES
         and qweight_type in MMQ_QUANT_TYPES
         and x.shape[0] > 64
     ):
@@ -434,9 +439,9 @@ def apply_gguf_embedding(
                 dim=0,
                 index=x_flat.detach().to(device="cpu", dtype=torch.long),
             )
-            dequant = _dequantize_gguf_weight(
-                quant, qweight_type, dtype=out_dtype
-            ).to(device=x.device, dtype=out_dtype, non_blocking=False)
+            dequant = _dequantize_gguf_weight(quant, qweight_type, dtype=out_dtype).to(
+                device=x.device, dtype=out_dtype, non_blocking=False
+            )
         else:
             quant = torch.index_select(qweight, dim=0, index=x_flat)
             dequant = _dequantize_gguf_weight(

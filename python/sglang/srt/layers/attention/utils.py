@@ -205,6 +205,7 @@ class _CreateFlashinferKvIndicesLauncher:
             bs = int(grid)
 
         if is_hip():
+
             def launch(
                 req_to_token_ptr,
                 req_pool_indices_ptr,

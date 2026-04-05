@@ -341,7 +341,7 @@ void moe_align_block_size(
       const int32_t shared_mem_size = ((threads + 1) * num_experts + (num_experts + 1)) * sizeof(int32_t);
 
       auto small_batch_expert_kernel = moe_align_block_size_small_batch_expert_kernel<scalar_t, fill_threads>;
-     hipLaunchKernelGGL(( small_batch_expert_kernel), dim3(1), dim3(fill_threads + threads), shared_mem_size, stream, 
+     hipLaunchKernelGGL(( small_batch_expert_kernel), dim3(1), dim3(fill_threads + threads), shared_mem_size, stream,
           topk_ids.data_ptr<scalar_t>(),
           sorted_token_ids.data_ptr<int32_t>(),
           experts_ids.data_ptr<int32_t>(),
@@ -356,7 +356,7 @@ void moe_align_block_size(
 
       const size_t scan_size = next_pow2(num_experts);
       const size_t shared_mem_size = (num_experts + (num_experts + 1) + scan_size + WARP_SIZE) * sizeof(int32_t);
-     hipLaunchKernelGGL(( align_kernel), dim3(2), dim3(threads), shared_mem_size, stream, 
+     hipLaunchKernelGGL(( align_kernel), dim3(2), dim3(threads), shared_mem_size, stream,
           topk_ids.data_ptr<scalar_t>(),
           sorted_token_ids.data_ptr<int32_t>(),
           experts_ids.data_ptr<int32_t>(),
@@ -375,7 +375,7 @@ void moe_align_block_size(
       const int actual_blocks = ::min(num_blocks, max_blocks);
 
       auto sort_kernel = count_and_sort_expert_tokens_kernel<scalar_t>;
-     hipLaunchKernelGGL(( sort_kernel), dim3(actual_blocks), dim3(block_threads), 0, stream, 
+     hipLaunchKernelGGL(( sort_kernel), dim3(actual_blocks), dim3(block_threads), 0, stream,
           topk_ids.data_ptr<scalar_t>(),
           sorted_token_ids.data_ptr<int32_t>(),
           cumsum_buffer.data_ptr<int32_t>(),
