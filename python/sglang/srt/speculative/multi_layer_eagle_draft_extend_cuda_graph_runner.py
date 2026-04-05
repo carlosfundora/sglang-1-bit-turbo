@@ -500,6 +500,7 @@ class MultiLayerEagleDraftExtendCudaGraphRunner:
         self, forward_batch: ForwardBatch, bs: int, raw_bs: int, num_tokens: int
     ):
         buffers = self.buffers
+        padded_num_tokens = bs * self.num_tokens_per_bs
         # Common inputs
         buffers.input_ids[:num_tokens].copy_(forward_batch.input_ids)
         buffers.seq_lens[:raw_bs].copy_(forward_batch.seq_lens)
@@ -507,6 +508,8 @@ class MultiLayerEagleDraftExtendCudaGraphRunner:
             buffers.extend_seq_lens[:raw_bs].copy_(forward_batch.extend_seq_lens)
             buffers.extend_start_loc[:raw_bs].copy_(forward_batch.extend_start_loc)
         buffers.out_cache_loc[:num_tokens].copy_(forward_batch.out_cache_loc)
+        if padded_num_tokens != num_tokens:
+            buffers.positions[:padded_num_tokens].zero_()
         buffers.positions[:num_tokens].copy_(forward_batch.positions)
         if (
             forward_batch.spec_info.hidden_states.shape[1]
@@ -556,7 +559,9 @@ class MultiLayerEagleDraftExtendCudaGraphRunner:
         forward_batch.spec_info.accept_length = buffers.accept_length[:bs]
         forward_batch.spec_info.num_tokens_per_req = self.num_tokens_per_bs
         forward_batch.spec_info.num_tokens_for_logprob_per_req = 1
-        forward_batch.spec_info.positions = buffers.positions[:num_tokens]
+        forward_batch.spec_info.positions = buffers.positions[
+            : bs * self.num_tokens_per_bs
+        ]
         forward_batch.spec_info.extend_seq_lens_tensor = buffers.extend_seq_lens[:bs]
 
         self.eagle_worker.draft_extend_attn_backend_list[
