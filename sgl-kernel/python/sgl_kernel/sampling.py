@@ -11,6 +11,83 @@ except ImportError:
     _has_flashinfer = False
 
 
+# ── Lazy probe: do the C++ renorm ops exist on this backend? ───────────
+# Checked once on first call; avoids repeated exception overhead.
+_cpp_renorm_available: Optional[bool] = None
+
+
+def _check_cpp_renorm_ops() -> bool:
+    """Return True if the C++ top-k/top-p renorm ops are registered."""
+    global _cpp_renorm_available
+    if _cpp_renorm_available is not None:
+        return _cpp_renorm_available
+    try:
+        p = torch.ones(1, 4, dtype=torch.float32, device="cuda")
+        out = torch.empty_like(p)
+        torch.ops.sgl_kernel.top_k_renorm_probs.default(p, out, None, 2)
+        _cpp_renorm_available = True
+    except (RuntimeError, NotImplementedError, AttributeError):
+        _cpp_renorm_available = False
+    return _cpp_renorm_available
+
+
+# ── Pure-PyTorch fallbacks for top-k / top-p renormalization ───────────
+
+def _top_k_renorm_probs_pytorch(
+    probs: torch.Tensor, top_k: Union[torch.Tensor, int]
+) -> torch.Tensor:
+    """Pure PyTorch top-k probability renormalization.
+
+    Uses the kth-value pivot so that tied entries at the boundary are all
+    kept, matching the semantics of the C++ kernel.
+    """
+    probs = probs.float()
+    num_classes = probs.shape[-1]
+
+    if isinstance(top_k, int):
+        k = min(max(top_k, 1), num_classes)
+        # kth largest value per row (pivot)
+        kth_vals = torch.kthvalue(probs, num_classes - k + 1, dim=-1).values
+        pivot = kth_vals.unsqueeze(-1)  # (bs, 1)
+    else:
+        top_k = top_k.to(dtype=torch.long, device=probs.device)
+        k_clamped = top_k.clamp(min=1, max=num_classes)
+        # Per-row pivot
+        sorted_probs, _ = torch.sort(probs, dim=-1, descending=True)
+        # Gather the kth value for each row
+        gather_idx = (k_clamped - 1).unsqueeze(-1)  # (bs, 1)
+        pivot = sorted_probs.gather(-1, gather_idx)  # (bs, 1)
+
+    # Keep entries >= pivot, zero the rest, renormalize
+    result = torch.where(probs >= pivot, probs, torch.zeros_like(probs))
+    return result / result.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+
+
+def _top_p_renorm_probs_pytorch(
+    probs: torch.Tensor, top_p: Union[torch.Tensor, float]
+) -> torch.Tensor:
+    """Pure PyTorch top-p (nucleus) probability renormalization."""
+    probs = probs.float()
+    sorted_probs, sorted_indices = torch.sort(probs, dim=-1, descending=True)
+    cumsum = torch.cumsum(sorted_probs, dim=-1)
+
+    if isinstance(top_p, (int, float)):
+        cutoff = float(top_p)
+    else:
+        cutoff = top_p.float().unsqueeze(-1) if top_p.dim() == 1 else top_p.float()
+
+    # Mask entries past the nucleus: cumsum_before >= cutoff
+    nucleus_mask = (cumsum - sorted_probs) < cutoff
+    masked_sorted = torch.where(nucleus_mask, sorted_probs, torch.zeros_like(sorted_probs))
+
+    # Unsort back to original order
+    result = torch.zeros_like(probs)
+    result.scatter_(-1, sorted_indices, masked_sorted)
+    return result / result.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+
+
+# ── C++ internal wrappers (call torch.ops directly) ───────────────────
+
 def _top_k_renorm_probs_internal(
     probs: torch.Tensor,
     maybe_top_k_arr: Optional[torch.Tensor],
@@ -29,8 +106,9 @@ def top_k_renorm_probs(
     probs: torch.Tensor,
     top_k: Union[torch.Tensor, int],
 ) -> torch.Tensor:
-    r"""Adapt from https://github.com/flashinfer-ai/flashinfer/flashinfer/sampling.py
-    Fused GPU kernel for renormalizing probabilities by top-k thresholding.
+    r"""Fused GPU kernel for renormalizing probabilities by top-k thresholding.
+
+    Adapted from https://github.com/flashinfer-ai/flashinfer/flashinfer/sampling.py
 
     Parameters
     ----------
@@ -53,10 +131,11 @@ def top_k_renorm_probs(
     This combination of ``top_k_renorm_probs`` and ``sampling_from_probs`` should be equivalent to
     ``top_k_sampling_from_probs``.
     """
-    if probs.device.type == "musa" or not _has_flashinfer:
-        return _top_k_renorm_probs_internal(probs, *_to_tensor_scalar_tuple(top_k))
-    else:
+    if _has_flashinfer and probs.device.type != "musa":
         return _flashinfer_sampling.top_k_renorm_probs(probs, top_k)
+    if _check_cpp_renorm_ops():
+        return _top_k_renorm_probs_internal(probs, *_to_tensor_scalar_tuple(top_k))
+    return _top_k_renorm_probs_pytorch(probs, top_k)
 
 
 top_k_renorm_prob = top_k_renorm_probs
@@ -80,8 +159,9 @@ def top_p_renorm_probs(
     probs: torch.Tensor,
     top_p: Union[torch.Tensor, float],
 ) -> torch.Tensor:
-    r"""Adapt from https://github.com/flashinfer-ai/flashinfer/flashinfer/sampling.py
-    Fused GPU kernel for renormalizing probabilities by top-p thresholding.
+    r"""Fused GPU kernel for renormalizing probabilities by top-p thresholding.
+
+    Adapted from https://github.com/flashinfer-ai/flashinfer/flashinfer/sampling.py
 
     Parameters
     ----------
@@ -106,10 +186,11 @@ def top_p_renorm_probs(
     ``top_p_sampling_from_probs``.
 
     """
-    if probs.device.type == "musa" or not _has_flashinfer:
-        return _top_p_renorm_probs_internal(probs, *_to_tensor_scalar_tuple(top_p))
-    else:
+    if _has_flashinfer and probs.device.type != "musa":
         return _flashinfer_sampling.top_p_renorm_probs(probs, top_p)
+    if _check_cpp_renorm_ops():
+        return _top_p_renorm_probs_internal(probs, *_to_tensor_scalar_tuple(top_p))
+    return _top_p_renorm_probs_pytorch(probs, top_p)
 
 
 top_p_renorm_prob = top_p_renorm_probs
