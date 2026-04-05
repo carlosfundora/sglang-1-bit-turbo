@@ -46,7 +46,84 @@ SIMULATE_ACC_LEN = envs.SGLANG_SIMULATE_ACC_LEN.get()  # turn off if < 0
 SIMULATE_ACC_METHOD = envs.SGLANG_SIMULATE_ACC_METHOD.get()
 
 TREE_TRAVERSE_TIME_THRESHOLD = 1  # TODO: set this properly
-TREE_SPEC_KERNEL_AVAILABLE = _is_cuda  # This kernel is only available for CUDA now
+
+# ── Three-tier fallback for tree speculative sampling ──────────────────
+# Tier 1: C++ kernel (CUDA/HIP native op)
+_cpp_kernel_available = False
+try:
+    from sgl_kernel import (
+        tree_speculative_sampling_target_only as _cpp_tree_spec_sampling,
+    )
+
+    # The Python wrapper exists on all platforms but the underlying op may
+    # not be registered.  Do a lightweight probe to verify.
+    if _is_cuda:
+        _cpp_kernel_available = True
+    else:
+        # On HIP/other backends the op may or may not be compiled in.
+        # Try calling with zero-sized tensors; if the op is missing it
+        # raises RuntimeError.
+        try:
+            _dummy = torch.zeros(1, dtype=torch.int32, device="cuda")
+            _cpp_tree_spec_sampling(
+                predicts=_dummy,
+                accept_index=_dummy.unsqueeze(0),
+                accept_token_num=_dummy,
+                candidates=torch.zeros(1, 1, dtype=torch.int64, device="cuda"),
+                retrive_index=torch.zeros(1, 1, dtype=torch.int64, device="cuda"),
+                retrive_next_token=torch.full(
+                    (1, 1), -1, dtype=torch.int64, device="cuda"
+                ),
+                retrive_next_sibling=torch.full(
+                    (1, 1), -1, dtype=torch.int64, device="cuda"
+                ),
+                uniform_samples=torch.zeros(1, 1, dtype=torch.float32, device="cuda"),
+                uniform_samples_for_final_sampling=torch.zeros(
+                    1, dtype=torch.float32, device="cuda"
+                ),
+                target_probs=torch.zeros(1, 1, 2, dtype=torch.float32, device="cuda"),
+                draft_probs=torch.zeros(1, 1, 2, dtype=torch.float32, device="cuda"),
+            )
+            _cpp_kernel_available = True
+        except (RuntimeError, NotImplementedError):
+            pass
+        finally:
+            del _dummy
+except (ImportError, AttributeError):
+    pass
+
+# Tier 2: Triton kernel (device-agnostic GPU)
+_triton_kernel_available = False
+if not _cpp_kernel_available:
+    try:
+        import triton as _triton_check  # noqa: F401
+
+        from sglang.srt.speculative.speculative_sampling_triton import (
+            tree_speculative_sampling_target_only_triton as _triton_tree_spec_sampling,
+        )
+
+        _triton_kernel_available = True
+    except (ImportError, AttributeError):
+        pass
+
+# Tier 3: Pure PyTorch (always available)
+from sglang.srt.speculative.speculative_sampling_pytorch import (
+    tree_speculative_sampling_target_only_pytorch as _pytorch_tree_spec_sampling,
+)
+
+TREE_SPEC_KERNEL_AVAILABLE = (
+    _cpp_kernel_available or _triton_kernel_available or True
+)  # True: PyTorch fallback is always available
+
+
+def get_tree_spec_sampling_fn():
+    """Return the best available tree speculative sampling function."""
+    if _cpp_kernel_available:
+        return _cpp_tree_spec_sampling
+    elif _triton_kernel_available:
+        return _triton_tree_spec_sampling
+    else:
+        return _pytorch_tree_spec_sampling
 
 
 def spec_need_hidden_states(server_args: Optional[ServerArgs] = None) -> bool:

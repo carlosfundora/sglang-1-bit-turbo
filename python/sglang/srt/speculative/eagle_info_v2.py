@@ -27,7 +27,9 @@ from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.eagle_utils import verify_tree_greedy_func
 from sglang.srt.speculative.spec_utils import (
     SIMULATE_ACC_LEN,
+    TREE_SPEC_KERNEL_AVAILABLE,
     generate_simulated_accept_index,
+    get_tree_spec_sampling_fn,
 )
 from sglang.srt.utils.common import is_cuda, is_hip, is_npu, next_power_of_2
 
@@ -42,12 +44,8 @@ if TYPE_CHECKING:
     )
     from sglang.srt.speculative.eagle_info import EagleDraftInput, EagleVerifyInput
 
-if is_cuda():
-    from sgl_kernel import (
-        top_k_renorm_prob,
-        top_p_renorm_prob,
-        tree_speculative_sampling_target_only,
-    )
+if _is_cuda or _is_hip:
+    from sgl_kernel import top_k_renorm_prob, top_p_renorm_prob
 
 
 @triton.jit
@@ -310,7 +308,7 @@ class EagleVerifyInputV2Mixin:
         accept_length = torch.empty((bs,), dtype=torch.int32, device=device)
 
         # Sample tokens
-        if sampling_info.is_all_greedy or _is_npu or _is_hip:
+        if sampling_info.is_all_greedy or _is_npu:
             target_predict = torch.argmax(next_token_logits, dim=-1)
             target_predict = target_predict.reshape(bs, self.draft_token_num)
             predict, accept_index, accept_length = verify_tree_greedy_func(
@@ -355,7 +353,8 @@ class EagleVerifyInputV2Mixin:
                 (bs,), dtype=torch.float32, device=device
             )
 
-            tree_speculative_sampling_target_only(
+            tree_spec_fn = get_tree_spec_sampling_fn()
+            tree_spec_fn(
                 predicts=predict,  # mutable
                 accept_index=accept_index,  # mutable
                 accept_token_num=accept_length,  # mutable

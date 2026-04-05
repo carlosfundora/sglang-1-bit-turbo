@@ -40,15 +40,12 @@ from sglang.srt.speculative.spec_utils import (
     generate_simulated_accept_index,
     get_src_tgt_cache_loc,
     get_target_cache_loc,
+    get_tree_spec_sampling_fn,
 )
 from sglang.srt.utils import is_cuda, is_hip, next_power_of_2
 
-if is_cuda():
-    from sgl_kernel import (
-        top_k_renorm_prob,
-        top_p_renorm_prob,
-        tree_speculative_sampling_target_only,
-    )
+if is_cuda() or is_hip():
+    from sgl_kernel import top_k_renorm_prob, top_p_renorm_prob
 
 logger = logging.getLogger(__name__)
 
@@ -396,15 +393,9 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 logits=logits_output.next_token_logits, vocab_mask=vocab_mask
             )
 
-        # Sample tokens. Force greedy sampling on AMD
+        # Sample tokens
         is_all_greedy = sampling_info.is_all_greedy
-        if (not is_all_greedy) and (not TREE_SPEC_KERNEL_AVAILABLE):
-            logger.warning(
-                "Tree speculative sampling kernel unavailable (likely AMD/HIP build). "
-                "Falling back to greedy verification."
-            )
-
-        if is_all_greedy or not TREE_SPEC_KERNEL_AVAILABLE:
+        if is_all_greedy:
             target_predict = torch.argmax(logits_output.next_token_logits, dim=-1)
             target_predict = target_predict.reshape(bs, self.draft_token_num)
             predict, accept_index, accept_length = verify_tree_greedy_func(
@@ -455,7 +446,8 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
             coins_for_final_sampling = torch.rand(
                 (bs,), dtype=torch.float32, device=batch.device
             )
-            tree_speculative_sampling_target_only(
+            tree_spec_fn = get_tree_spec_sampling_fn()
+            tree_spec_fn(
                 predicts=predict,  # mutable
                 accept_index=accept_index,  # mutable
                 accept_token_num=accept_length,  # mutable

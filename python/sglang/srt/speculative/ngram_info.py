@@ -33,6 +33,7 @@ from sglang.srt.speculative.spec_utils import (
     assign_req_to_token_pool,
     get_src_tgt_cache_loc,
     get_target_cache_loc,
+    get_tree_spec_sampling_fn,
 )
 from sglang.srt.utils import is_cuda, is_hip, next_power_of_2
 
@@ -40,11 +41,10 @@ if is_cuda():
     from sgl_kernel import (
         top_k_renorm_prob,
         top_p_renorm_prob,
-        tree_speculative_sampling_target_only,
         verify_tree_greedy,
     )
 elif is_hip():
-    from sgl_kernel import verify_tree_greedy
+    from sgl_kernel import top_k_renorm_prob, top_p_renorm_prob, verify_tree_greedy
 
 
 @dataclass
@@ -357,7 +357,8 @@ class NgramVerifyInput(SpecInput):
         coins_for_final_sampling = torch.rand(
             (bs,), dtype=torch.float32, device=self.device
         )
-        tree_speculative_sampling_target_only(
+        tree_spec_fn = get_tree_spec_sampling_fn()
+        tree_spec_fn(
             predicts=self.predict,  # mutable
             accept_index=self.accepted_indices,  # mutable
             accept_token_num=self.accept_length,  # mutable
@@ -417,17 +418,12 @@ class NgramVerifyInput(SpecInput):
                 logits=logits_output.next_token_logits, vocab_mask=vocab_mask
             )
 
-        # Sample tokens. Force greedy sampling on AMD
+        # Sample tokens
         is_all_greedy = (
             sampling_info.is_all_greedy or envs.SGLANG_NGRAM_FORCE_GREEDY_VERIFY.get()
         )
-        if (not is_all_greedy) and (not TREE_SPEC_KERNEL_AVAILABLE):
-            logger.warning(
-                "Tree speculative sampling kernel unavailable (likely AMD/HIP build). "
-                "Falling back to greedy verification."
-            )
 
-        if is_all_greedy or not TREE_SPEC_KERNEL_AVAILABLE:
+        if is_all_greedy:
             self._greedy_verify(batch, logits_output)
         else:
             # NOTE: Compared with greedy_verify, the performance of _sampling_verify is relatively poor.
