@@ -144,7 +144,11 @@ struct ValueCount {
 };
 
 // ---------------------------------------------------------------------------
-// BoolDiffOp  (used by BlockAdjacentDifference)
+// BoolDiffOp  (used by BlockAdjacentDifference::SubtractLeft)
+// SubtractLeft calls op(current, left_neighbor).  For a monotonically
+// non-decreasing boolean CDF array (false…false, true…true), the only
+// transition is false→true.  `lhs != rhs` detects this rising edge,
+// equivalent to `lhs && !rhs` on monotonic input.  Matches flashinfer.
 // ---------------------------------------------------------------------------
 struct BoolDiffOp {
   __device__ __forceinline__ bool operator()(const bool& lhs, const bool& rhs) const {
@@ -181,6 +185,11 @@ struct SamplingTempStorage {
 // DeterministicInclusiveSum — Blelloch-style scan via warp shuffles + smem.
 // Ported from flashinfer. On HIP the _sync mask is ignored by hardware but
 // we keep the API for source compatibility.
+//
+// NOTE: This kernel is verified on gfx1030 (RDNA2, waveSize=32).  The
+// algorithm is wave-size agnostic (uses runtime `warpSize`), but shared-
+// memory sizing uses compile-time HIP_WARP_SIZE.  For CDNA targets (wave64)
+// the SamplingTempStorage union layout may need re-validation.
 // ---------------------------------------------------------------------------
 template <uint32_t VEC_SIZE, uint32_t BLOCK_THREADS, hipcub::BlockScanAlgorithm SCAN_ALGORITHM,
           hipcub::BlockReduceAlgorithm REDUCE_ALGORITHM>
