@@ -490,7 +490,12 @@ class EAGLEDraftExtendCudaGraphRunner:
         forward_batch.spec_info.extend_seq_lens_tensor = buffers.extend_seq_lens[:bs]
 
         if bs != raw_bs:
-            forward_batch.spec_info.positions = buffers.positions[:num_tokens]
+            # Use padded size so downstream .view(batch_size, -1) reshapes
+            # succeed. Actual positions are in [:num_tokens]; padding is zeros
+            # (set at line 439 above).
+            forward_batch.spec_info.positions = buffers.positions[
+                : bs * self.num_tokens_per_bs
+            ]
             forward_batch.spec_info.accept_length = buffers.accept_length[:bs]
 
         self.eagle_worker.draft_extend_attn_backend.init_forward_metadata_replay_cuda_graph(
