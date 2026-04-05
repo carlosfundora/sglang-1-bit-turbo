@@ -1,91 +1,162 @@
-<div align="center" id="sglangtop">
-<img src="https://raw.githubusercontent.com/sgl-project/sglang/main/assets/logo.png" alt="logo" width="400" margin="10px"></img>
+<div align="center">
+<img src="assets/sgl-1-bit-turbo-eagle.png" alt="SGLang 1-Bit Turbo" width="600"></img>
 
-[![PyPI](https://img.shields.io/pypi/v/sglang)](https://pypi.org/project/sglang)
-![PyPI - Downloads](https://static.pepy.tech/badge/sglang?period=month)
-[![license](https://img.shields.io/github/license/sgl-project/sglang.svg)](https://github.com/sgl-project/sglang/tree/main/LICENSE)
-[![issue resolution](https://img.shields.io/github/issues-closed-raw/sgl-project/sglang)](https://github.com/sgl-project/sglang/issues)
-[![open issues](https://img.shields.io/github/issues-raw/sgl-project/sglang)](https://github.com/sgl-project/sglang/issues)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/sgl-project/sglang)
 
-</div>
 
---------------------------------------------------------------------------------
 
-<p align="center">
-<a href="https://lmsys.org/blog/"><b>Blog</b></a> |
-<a href="https://docs.sglang.io/"><b>Documentation</b></a> |
-<a href="https://roadmap.sglang.io/"><b>Roadmap</b></a> |
-<a href="https://slack.sglang.io/"><b>Join Slack</b></a> |
-<a href="https://meet.sglang.io/"><b>Weekly Dev Meeting</b></a> |
-<a href="https://github.com/sgl-project/sgl-learning-materials?tab=readme-ov-file#slides"><b>Slides</b></a>
-</p>
+[![license](https://img.shields.io/github/license/sgl-project/sglang.svg)](https://github.com/carlosfundora/sglang-1-bit-turbo/blob/main/LICENSE)
 
-## News
-- [2026/02] 🔥 Unlocking 25x Inference Performance with SGLang on NVIDIA GB300 NVL72 ([blog](https://lmsys.org/blog/2026-02-20-gb300-inferencex/)).
-- [2026/01] 🔥 SGLang Diffusion accelerates video and image generation ([blog](https://lmsys.org/blog/2026-01-16-sglang-diffusion/)).
-- [2025/12] SGLang provides day-0 support for latest open models ([MiMo-V2-Flash](https://lmsys.org/blog/2025-12-16-mimo-v2-flash/), [Nemotron 3 Nano](https://lmsys.org/blog/2025-12-15-run-nvidia-nemotron-3-nano/), [Mistral Large 3](https://github.com/sgl-project/sglang/pull/14213), [LLaDA 2.0 Diffusion LLM](https://lmsys.org/blog/2025-12-19-diffusion-llm/), [MiniMax M2](https://lmsys.org/blog/2025-11-04-miminmax-m2/)).
-- [2025/10] 🔥 SGLang now runs natively on TPU with the SGLang-Jax backend ([blog](https://lmsys.org/blog/2025-10-29-sglang-jax/)).
-- [2025/09] Deploying DeepSeek on GB200 NVL72 with PD and Large Scale EP (Part II): 3.8x Prefill, 4.8x Decode Throughput ([blog](https://lmsys.org/blog/2025-09-25-gb200-part-2/)).
-- [2025/09] SGLang Day 0 Support for DeepSeek-V3.2 with Sparse Attention ([blog](https://lmsys.org/blog/2025-09-29-deepseek-V32/)).
-- [2025/08] SGLang x AMD SF Meetup on 8/22: Hands-on GPU workshop, tech talks by AMD/xAI/SGLang, and networking ([Roadmap](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_sglang_roadmap.pdf), [Large-scale EP](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_sglang_ep.pdf), [Highlights](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_highlights.pdf), [AITER/MoRI](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_aiter_mori.pdf), [Wave](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_wave.pdf)).
+---
 
-<details>
-<summary>More</summary>
+## A fork of [SGLang](https://github.com/sgl-project/sglang) optimized for TurboQuant and EAGLE3 speculative decoding on AMD ROCm gfx1030x GPUs, with support for PrismML's 1-bit quantized models.
 
-- [2025/11] SGLang Diffusion accelerates video and image generation ([blog](https://lmsys.org/blog/2025-11-07-sglang-diffusion/)).
-- [2025/10] PyTorch Conference 2025 SGLang Talk ([slide](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/sglang_pytorch_2025.pdf)).
-- [2025/10] SGLang x Nvidia SF Meetup on 10/2 ([recap](https://x.com/lmsysorg/status/1975339501934510231)).
-- [2025/08] SGLang provides day-0 support for OpenAI gpt-oss model ([instructions](https://github.com/sgl-project/sglang/issues/8833))
-- [2025/06] SGLang, the high-performance serving infrastructure powering trillions of tokens daily, has been awarded the third batch of the Open Source AI Grant by a16z ([a16z blog](https://a16z.com/advancing-open-source-ai-through-benchmarks-and-bold-experimentation/)).
-- [2025/05] Deploying DeepSeek with PD Disaggregation and Large-scale Expert Parallelism on 96 H100 GPUs ([blog](https://lmsys.org/blog/2025-05-05-large-scale-ep/)).
-- [2025/06] Deploying DeepSeek on GB200 NVL72 with PD and Large Scale EP (Part I): 2.7x Higher Decoding Throughput ([blog](https://lmsys.org/blog/2025-06-16-gb200-part-1/)).
-- [2025/03] Supercharge DeepSeek-R1 Inference on AMD Instinct MI300X ([AMD blog](https://rocm.blogs.amd.com/artificial-intelligence/DeepSeekR1-Part2/README.html))
-- [2025/03] SGLang Joins PyTorch Ecosystem: Efficient LLM Serving Engine ([PyTorch blog](https://pytorch.org/blog/sglang-joins-pytorch/))
-- [2025/02] Unlock DeepSeek-R1 Inference Performance on AMD Instinct™ MI300X GPU ([AMD blog](https://rocm.blogs.amd.com/artificial-intelligence/DeepSeekR1_Perf/README.html))
-- [2025/01] SGLang provides day one support for DeepSeek V3/R1 models on NVIDIA and AMD GPUs with DeepSeek-specific optimizations. ([instructions](https://github.com/sgl-project/sglang/tree/main/benchmark/deepseek_v3), [AMD blog](https://www.amd.com/en/developer/resources/technical-articles/amd-instinct-gpus-power-deepseek-v3-revolutionizing-ai-development-with-sglang.html), [10+ other companies](https://x.com/lmsysorg/status/1887262321636221412))
-- [2024/12] v0.4 Release: Zero-Overhead Batch Scheduler, Cache-Aware Load Balancer, Faster Structured Outputs ([blog](https://lmsys.org/blog/2024-12-04-sglang-v0-4/)).
-- [2024/10] The First SGLang Online Meetup ([slides](https://github.com/sgl-project/sgl-learning-materials?tab=readme-ov-file#the-first-sglang-online-meetup)).
-- [2024/09] v0.3 Release: 7x Faster DeepSeek MLA, 1.5x Faster torch.compile, Multi-Image/Video LLaVA-OneVision ([blog](https://lmsys.org/blog/2024-09-04-sglang-v0-3/)).
-- [2024/07] v0.2 Release: Faster Llama3 Serving with SGLang Runtime (vs. TensorRT-LLM, vLLM) ([blog](https://lmsys.org/blog/2024-07-25-sglang-llama3/)).
-- [2024/02] SGLang enables **3x faster JSON decoding** with compressed finite state machine ([blog](https://lmsys.org/blog/2024-02-05-compressed-fsm/)).
-- [2024/01] SGLang provides up to **5x faster inference** with RadixAttention ([blog](https://lmsys.org/blog/2024-01-17-sglang/)).
-- [2024/01] SGLang powers the serving of the official **LLaVA v1.6** release demo ([usage](https://github.com/haotian-liu/LLaVA?tab=readme-ov-file#demo)).
+SGLang 1-Bit Turbo EAGLE extends upstream SGLang with a stack of features designed to run aggressively quantized models at practical speeds on AMD RDNA2/RDNA3 hardware (RX 6000/7000 series):
 
-</details>
+### 🧊 TurboQuant KV Cache Compression
+Extreme KV cache quantization modes that dramatically reduce VRAM usage, enabling larger context and bigger models on memory-constrained GPUs.
 
-## About
-SGLang is a high-performance serving framework for large language models and multimodal models.
-It is designed to deliver low-latency and high-throughput inference across a wide range of setups, from a single GPU to large distributed clusters.
-Its core features include:
+| Mode | Bits per element | VRAM savings vs FP16 |
+|------|-----------------|---------------------|
+| `--kv-cache-dtype tq4` | 4-bit | ~75% |
+| `--kv-cache-dtype tq3` | 3-bit | ~81% |
+| `--kv-cache-dtype tq2` | 2-bit | ~87% |
 
-- **Fast Runtime**: Provides efficient serving with RadixAttention for prefix caching, a zero-overhead CPU scheduler, prefill-decode disaggregation, speculative decoding, continuous batching, paged attention, tensor/pipeline/expert/data parallelism, structured outputs, chunked prefill, quantization (FP4/FP8/INT4/AWQ/GPTQ), and multi-LoRA batching.
-- **Broad Model Support**: Supports a wide range of language models (Llama, Qwen, DeepSeek, Kimi, GLM, GPT, Gemma, Mistral, etc.), embedding models (e5-mistral, gte, mcdse), reward models (Skywork), and diffusion models (WAN, Qwen-Image), with easy extensibility for adding new models. Compatible with most Hugging Face models and OpenAI APIs.
-- **Extensive Hardware Support**: Runs on NVIDIA GPUs (GB200/B300/H100/A100/Spark/5090), AMD GPUs (MI355/MI300), Intel Xeon CPUs, Google TPUs, Ascend NPUs, and more.
-- **Active Community**: SGLang is open-source and supported by a vibrant community with widespread industry adoption, powering over 400,000 GPUs worldwide.
-- **RL & Post-Training Backbone**: SGLang is a proven rollout backend used for training many frontier models, with native RL integrations and adoption by well-known post-training frameworks such as [**AReaL**](https://github.com/inclusionAI/AReaL), [**Miles**](https://github.com/radixark/miles), [**slime**](https://github.com/THUDM/slime), [**Tunix**](https://github.com/google/tunix), [**verl**](https://github.com/volcengine/verl) and more.
+### 🦅 EAGLE3 Speculative Decoding on ROCm
+Full EAGLE3 speculative decoding support ported to AMD GPUs, including:
+- **HIP C++ probabilistic sampling kernel** — self-contained port of the CUDA `tree_speculative_sampling_target_only` kernel, compiled without flashinfer dependencies
+- **Triton kernel fallback** — device-agnostic `@triton.jit` implementation for systems where the HIP kernel can't compile
+- **Pure PyTorch fallback** — universal last-resort implementation using only tensor ops
+- **Three-tier automatic fallback**: HIP C++ → Triton → PyTorch, detected at import time
 
-## Getting Started
-- [Install SGLang](https://docs.sglang.io/get_started/install.html)
-- [Quick Start](https://docs.sglang.io/basic_usage/send_request.html)
-- [Backend Tutorial](https://docs.sglang.io/basic_usage/openai_api_completions.html)
-- [Frontend Tutorial](https://docs.sglang.io/references/frontend/frontend_tutorial.html)
-- [Contribution Guide](https://docs.sglang.io/developer_guide/contribution_guide.html)
+### 📦 PrismML 1-Bit GGUF Model Support
+Native serving of [Bonsai](https://huggingface.co/PrismML) 1-bit GGUF models through sglang's weight loading pipeline, bridging the GGUF quantization ecosystem with sglang's high-performance runtime.
 
-## Benchmark and Performance
-Learn more in the release blogs: [v0.2 blog](https://lmsys.org/blog/2024-07-25-sglang-llama3/), [v0.3 blog](https://lmsys.org/blog/2024-09-04-sglang-v0-3/), [v0.4 blog](https://lmsys.org/blog/2024-12-04-sglang-v0-4/), [Large-scale expert parallelism](https://lmsys.org/blog/2025-05-05-large-scale-ep/), [GB200 rack-scale parallelism](https://lmsys.org/blog/2025-09-25-gb200-part-2/), [GB300 long context](https://lmsys.org/blog/2026-02-19-gb300-longctx/).
+### 🔧 Pre-Built ROCm sgl_kernel
+Ships a pre-compiled `sgl_kernel` binary for ROCm gfx1030 (RDNA2), so you can skip the build step entirely. Includes all speculative decoding kernels:
+- `verify_tree_greedy`
+- `build_tree_kernel_efficient`
+- `tree_speculative_sampling_target_only` (HIP port)
+- All standard sglang ops (activation, MoE, rotary, allreduce, etc.)
 
-## Adoption and Sponsorship
-SGLang has been deployed at large scale, generating trillions of tokens in production each day. It is trusted and adopted by a wide range of leading enterprises and institutions, including xAI, AMD, NVIDIA, Intel, LinkedIn, Cursor, Oracle Cloud, Google Cloud, Microsoft Azure, AWS, Atlas Cloud, Voltage Park, Nebius, DataCrunch, Novita, InnoMatrix, MIT, UCLA, the University of Washington, Stanford, UC Berkeley, Tsinghua University, Jam & Tea Studios, Baseten, and other major technology organizations.
-As an open-source LLM inference engine, SGLang has become the de facto industry standard, with deployments running on over 400,000 GPUs worldwide.
-SGLang is currently hosted under the non-profit open-source organization [LMSYS](https://lmsys.org/about/).
+---
 
-<img src="https://raw.githubusercontent.com/sgl-project/sgl-learning-materials/refs/heads/main/slides/adoption.png" alt="logo" width="800" margin="10px"></img>
+## Quick Start (ROCm)
 
-## Contact Us
-For enterprises interested in adopting or deploying SGLang at scale, including technical consulting, sponsorship opportunities, or partnership inquiries, please contact us at [sglang@lmsys.org](mailto:sglang@lmsys.org).
+### Prerequisites
+- AMD GPU with ROCm support (tested on gfx1030 / RX 6900 XT)
+- ROCm 6.x with PyTorch nightly (`torch` with ROCm backend)
+- Python 3.12+
 
-Long-term active SGLang contributors are eligible for coding agent sponsorship, such as Cursor, Claude Code, or OpenAI Codex. Email [sglang@lmsys.org](mailto:sglang@lmsys.org) with your most important commits or pull requests.
+### Install
+```bash
+git clone https://github.com/carlosfundora/sglang-1-bit-turbo.git
+cd sglang-1-bit-turbo
 
-## Acknowledgment
-We learned the design and reused code from the following projects: [Guidance](https://github.com/guidance-ai/guidance), [vLLM](https://github.com/vllm-project/vllm), [LightLLM](https://github.com/ModelTC/lightllm), [FlashInfer](https://github.com/flashinfer-ai/flashinfer), [Outlines](https://github.com/outlines-dev/outlines), and [LMQL](https://github.com/eth-sri/lmql).
+# Install the runtime
+pip install -e "python[all]"
+
+# Install the pre-built kernel (ROCm gfx1030)
+pip install -e sgl-kernel
+```
+
+### Serve a PrismML 1-Bit Model with EAGLE3
+```bash
+python -m sglang.launch_server \
+  --model-path /path/to/Bonsai-1.7B.gguf \
+  --attention-backend triton \
+  --kv-cache-dtype tq4 \
+  --speculative-algorithm EAGLE3 \
+  --speculative-draft-model-path /path/to/Bonsai-1.7B-EAGLE3/weights \
+  --mem-fraction-static 0.28 \
+  --port 30400
+```
+
+### Environment Variables (ROCm)
+```bash
+export HSA_OVERRIDE_GFX_VERSION=10.3.0    # Required for gfx1030
+export PYTORCH_ROCM_ARCH=gfx1030
+export SGLANG_EAGLE_SKIP_TARGET_EMBED_SHARE=1  # Required for GGUF + EAGLE3
+```
+
+---
+
+## Building sgl_kernel from Source (ROCm)
+
+If you need to rebuild the kernel (e.g., for a different GPU target):
+
+```bash
+cd sgl-kernel
+export HSA_OVERRIDE_GFX_VERSION=10.3.0
+export PYTORCH_ROCM_ARCH=gfx1030
+export AMDGPU_TARGET=gfx1030
+python setup_rocm.py build_ext --inplace
+```
+
+Verify:
+```bash
+python -c "from sgl_kernel import common_ops; print('tree_speculative_sampling_target_only' in dir(common_ops))"
+```
+
+---
+
+## Architecture: Speculative Sampling Fallback Chain
+
+On CUDA, sglang uses a flashinfer-backed C++ kernel for probabilistic tree speculative sampling. On ROCm, flashinfer is unavailable. This fork implements a three-tier fallback so EAGLE speculative decoding works everywhere:
+
+```
+┌─────────────────────────────────────────────────┐
+│  HIP C++ Kernel (speculative_sampling.hip)      │ ← Fastest, gfx1030
+│  Self-contained port, no flashinfer dependency  │
+├─────────────────────────────────────────────────┤
+│  Triton Kernel (speculative_sampling_triton.py) │ ← Fast, any GPU
+│  @triton.jit, device-agnostic                   │
+├─────────────────────────────────────────────────┤
+│  PyTorch Fallback (speculative_sampling_pytorch)│ ← Universal
+│  Pure tensor ops, works on any backend          │
+└─────────────────────────────────────────────────┘
+```
+
+Detection is automatic — the best available backend is selected at import time.
+
+---
+
+## Fork Features
+
+| Feature | Details |
+|---------|---------|
+| **EAGLE3 speculative decoding on ROCm** | Full probabilistic tree sampling via three-tier fallback (HIP C++ → Triton → PyTorch) |
+| **Self-contained HIP C++ sampling kernel** | Port of `tree_speculative_sampling_target_only` with no flashinfer dependency |
+| **`top_k` / `top_p` renorm fallbacks** | PyTorch implementations with cached capability probe and kth-pivot tie-correct top-k |
+| **TurboQuant KV cache** | TQ4 (4-bit), TQ3 (3-bit), TQ2 (2-bit) — up to 87% VRAM savings vs FP16 |
+| **PrismML 1-bit GGUF model serving** | Tested with [Bonsai](https://huggingface.co/PrismML) 1-bit GGUF models (IQ1_S, IQ1_M) |
+| **Pre-built ROCm `sgl_kernel`** | Ships a compiled `.so` for gfx1030 (RDNA2) with all speculative decoding ops included |
+| **Consumer AMD GPU focus** | Optimized for RX 6000/7000 series (12–16 GB VRAM) |
+
+---
+
+## Tested Configurations
+
+| GPU | Model | Draft Model | KV Cache | Status |
+|-----|-------|-------------|----------|--------|
+| RX 6900 XT (12GB) | Bonsai-1.7B (1-bit GGUF) | Bonsai-1.7B-EAGLE3 (FP16) | TQ4 | ✅ Working |
+
+---
+
+## Upstream SGLang
+
+This fork is based on [SGLang](https://github.com/sgl-project/sglang), a high-performance serving framework for large language models by [LMSYS](https://lmsys.org/about/). For general SGLang documentation, features, and community:
+
+- [SGLang Documentation](https://docs.sglang.io/)
+- [SGLang GitHub](https://github.com/sgl-project/sglang)
+- [SGLang Slack](https://slack.sglang.io/)
+
+## Acknowledgments
+This fork builds on the work of:
+- [SGLang / LMSYS](https://github.com/sgl-project/sglang) — the upstream inference engine
+- [FlashInfer](https://github.com/flashinfer-ai/flashinfer) — sampling kernels adapted for the HIP port
+- [EAGLE](https://github.com/SafeAILab/EAGLE) — speculative decoding algorithm
+- [PrismML / Bonsai](https://huggingface.co/PrismML) — 1-bit GGUF model ecosystem
+- [vLLM](https://github.com/vllm-project/vllm) — reference for Triton-based rejection sampling patterns
+
+## License
+Apache 2.0 — same as upstream SGLang.

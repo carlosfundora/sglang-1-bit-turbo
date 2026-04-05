@@ -193,6 +193,7 @@ work_dirs/
 *.csv
 
 !logo.png
+!assets/sgl-1-bit-turbo-eagle.png
 
 # Prerequisites
 *.d
@@ -276,3 +277,12 @@ sgl-kernel/csrc/**/*_musa/
 *.glb
 *.ply
 *.npz
+
+# Hipify auto-generated files (build artifacts from PyTorch ROCm preprocessing)
+sgl-kernel/csrc/quantization/gguf/*_hip.cuh
+sgl-kernel/csrc/quantization/gguf/*_hip.h
+sgl-kernel/csrc/quantization/gguf/*.hip
+
+# Temporary config backups
+python/pyproject_*.toml.bak
+python/pyproject_active.toml
