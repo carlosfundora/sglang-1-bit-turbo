@@ -41,10 +41,17 @@ if is_cuda():
     from sgl_kernel import (
         top_k_renorm_prob,
         top_p_renorm_prob,
-        verify_tree_greedy,
+    )
+
+    from sglang.srt.speculative.eagle_utils import (
+        verify_tree_greedy_func as verify_tree_greedy,
     )
 elif is_hip():
-    from sgl_kernel import top_k_renorm_prob, top_p_renorm_prob, verify_tree_greedy
+    from sgl_kernel import top_k_renorm_prob, top_p_renorm_prob
+
+    from sglang.srt.speculative.eagle_utils import (
+        verify_tree_greedy_func as verify_tree_greedy,
+    )
 
 
 @dataclass

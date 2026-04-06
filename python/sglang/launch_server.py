@@ -5,6 +5,8 @@ import os
 import sys
 import warnings
 
+import torch  # must be imported before sgl_kernel to set up lib paths on ROCm
+
 from sglang.srt.server_args import prepare_server_args
 from sglang.srt.utils import kill_process_tree
 from sglang.srt.utils.common import suppress_noisy_warnings

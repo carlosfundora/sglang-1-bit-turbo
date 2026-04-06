@@ -3090,13 +3090,19 @@ class ServerArgs:
                 )
                 self.speculative_num_draft_tokens = self.speculative_num_steps + 1
 
+            # Default speculative_num_draft_tokens when not explicitly set
+            if self.speculative_num_draft_tokens is None:
+                self.speculative_num_draft_tokens = (
+                    self.speculative_num_steps * self.speculative_eagle_topk
+                )
+
             if (
                 self.speculative_eagle_topk > 1
                 and self.page_size > 1
-                and self.attention_backend not in ["flashinfer", "fa3"]
+                and self.attention_backend not in ["flashinfer", "fa3", "triton"]
             ):
                 raise ValueError(
-                    "speculative_eagle_topk > 1 with page_size > 1 is unstable and produces incorrect results for paged attention backends. This combination is only supported for the 'flashinfer' backend."
+                    "speculative_eagle_topk > 1 with page_size > 1 is unstable and produces incorrect results for paged attention backends. This combination is only supported for the 'flashinfer', 'fa3', or 'triton' backends."
                 )
 
         if self.speculative_algorithm == "NGRAM":
