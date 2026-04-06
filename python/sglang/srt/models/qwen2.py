@@ -365,6 +365,20 @@ class Qwen2Model(nn.Module):
                 forward_batch,
                 residual,
             )
+
+        # Capture the output of the final decoder layer when layers_to_capture
+        # includes end_layer (the sentinel index = num_layers).  This handles
+        # Qwen3/Bonsai-4B where eagle_aux_hidden_state_layer_ids=[1,18,35] and
+        # set_eagle3_layers_to_capture adds +1 → [2,19,36].  For a 36-layer
+        # model the loop runs range(0,36) so index 36 is never visited; without
+        # this block the last EAGLE3 aux hidden state is silently dropped,
+        # leaving only 2 of the expected 3 concatenated hidden states (5120
+        # instead of 7680) and breaking the fc projection in the draft model.
+        if self.end_layer in self.layers_to_capture:
+            aux_hidden_states.append(
+                hidden_states + residual if residual is not None else hidden_states
+            )
+
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(
                 {

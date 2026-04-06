@@ -233,10 +233,13 @@ class LlamaModel(nn.Module):
             positions = forward_batch.mrope_positions
 
         hidden_states = forward_batch.spec_info.hidden_states
-        if hidden_states.shape[-1] != embeds.shape[-1]:
-            # Some EAGLE3 checkpoints and compatibility drafts emit a 2x hidden-state
-            # concat while the canonical projection expects 3x. Align to the learned
-            # projection width so the draft can still execute.
+        # Always project through fc when it is a dimensionality reducer
+        # (fc.in_features > fc.out_features).  The original check
+        # `hidden_states.shape[-1] != embeds.shape[-1]` fails for Qwen3/Bonsai
+        # because a single aux layer gives 2560 features == embeds size, so the
+        # fc was silently skipped and the draft ran on raw target hidden states
+        # → 0% EAGLE3 acceptance.  Pad or truncate to fc.in_features as needed.
+        if self.fc.in_features != self.fc.out_features:
             expected_in = self.fc.in_features
             current_in = hidden_states.shape[-1]
             if current_in < expected_in:
