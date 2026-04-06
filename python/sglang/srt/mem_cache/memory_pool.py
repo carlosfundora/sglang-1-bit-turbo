@@ -2775,90 +2775,100 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
             f"{orig_k / comp_k:.2f}x compression"
         )
 
-    def _compress_heads_split(
+    def _compress_gpu(
         self, data: torch.Tensor, dim: int
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compress (T, head_num, dim) into packed indices + fp16 norms."""
-        import math
+        """GPU-vectorized TQ compress — no CPU round-trips, no Python head loop.
+
+        Processes all heads simultaneously as a single batched operation:
+          [T, H, dim] -> packed [T, H, packed_per_head] uint8 + norms [T, H, 1] fp16
+        """
+        T = data.shape[0]
+        H = self.head_num
+        n_levels = 2 ** self.tq_bit_width
+
+        x = data[:, :H, :dim].float()          # [T, H, dim]
+
+        # Normalize per-head vector
+        norms = x.norm(dim=2, keepdim=True).clamp(min=1e-8)   # [T, H, 1]
+        x_norm = x / norms                                       # [T, H, dim]
+
+        # Rotate: [T*H, dim] @ Pi^T  (Pi is orthogonal, Pi^T = Pi^{-1})
+        x_flat = x_norm.reshape(T * H, dim)
+        Y = torch.mm(x_flat, self.tq_Pi.T) * self.tq_scale     # [T*H, dim]
+
+        # Quantize via searchsorted (sorted boundaries on GPU)
+        Y_flat = Y.reshape(-1)
+        indices = torch.searchsorted(self.tq_boundaries.contiguous(), Y_flat.contiguous())
+        indices = indices.clamp(0, n_levels - 1).to(torch.int32).reshape(T, H, dim)
+
+        # Pack: 4-bit layout — lo nibble = even positions, hi nibble = odd positions
+        # Mirrors pack_4bit: byte = lo | (hi << 4)
+        if self.tq_bit_width == 4:
+            lo = indices[..., 0::2].to(torch.uint8)
+            hi = indices[..., 1::2].to(torch.uint8)
+            packed = lo | (hi << 4)                             # [T, H, dim//2]
+        elif self.tq_bit_width == 3:
+            # 3-bit: 8 indices per 3 bytes (indices stored as lo/mid/hi nibbles)
+            # Fall back to CPU for non-4-bit
+            return self._compress_cpu_vectorized(data, dim)
+        else:
+            # 2-bit: 4 per byte
+            idx = indices.to(torch.uint8)
+            packed = (idx[..., 0::4]
+                      | (idx[..., 1::4] << 2)
+                      | (idx[..., 2::4] << 4)
+                      | (idx[..., 3::4] << 6))                  # [T, H, dim//4]
+
+        norms_out = norms.to(torch.float16)                      # [T, H, 1]
+        return packed, norms_out
+
+    def _compress_cpu_vectorized(
+        self, data: torch.Tensor, dim: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """CPU vectorized compress for non-4-bit widths (fallback)."""
         from sglang.srt.layers.quantization.turboquant_engine import (
             pack_indices, pad_for_packing,
         )
-
         T = data.shape[0]
         n_levels = 2 ** self.tq_bit_width
-        packed_out = torch.zeros(
-            T,
-            self.head_num,
-            self.tq_packed_per_head,
-            dtype=torch.uint8,
-            device=data.device,
+        dev = data.device
+
+        cpu_data = data.detach().contiguous().to("cpu", dtype=torch.float32)
+        tq_pi = self.tq_Pi_cpu if _is_hip else self.tq_Pi.cpu()
+        tq_bnd = self.tq_boundaries_cpu if _is_hip else self.tq_boundaries.cpu()
+
+        x = cpu_data[:, :self.head_num, :dim]               # [T, H, dim]
+        norms = x.norm(dim=2, keepdim=True).clamp(min=1e-8)
+        x_norm = x / norms
+        x_flat = x_norm.reshape(T * self.head_num, dim)
+        Y = torch.mm(x_flat, tq_pi.T) * self.tq_scale
+        Y_flat = Y.reshape(-1)
+        idx = torch.searchsorted(tq_bnd, Y_flat)
+        idx = idx.clamp(0, n_levels - 1).to(torch.int32).reshape(T * self.head_num, dim)
+
+        padded = pad_for_packing(dim, self.tq_bit_width)
+        if padded > dim:
+            idx = torch.nn.functional.pad(idx, (0, padded - dim), value=0)
+
+        packed_rows = pack_indices(idx, self.tq_bit_width)    # [T*H, packed_per_head]
+        packed = packed_rows.reshape(T, self.head_num, -1)
+        norms_out = norms.to(torch.float16)
+
+        return (
+            packed.to(device=dev, non_blocking=False),
+            norms_out.to(device=dev, non_blocking=False),
         )
-        norms_out = torch.zeros(
-            T,
-            self.head_num,
-            1,
-            dtype=torch.float16,
-            device=data.device,
-        )
 
-        if _is_hip:
-            # The HIP path has been hitting indexSelectSmallIndex faults while
-            # compressing packed KV buffers. Materialize the entire tensor on CPU
-            # first so the rest of the compression work avoids device indexing.
-            detached = data.detach().contiguous()
-            cpu_data = detached.to(device="cpu", dtype=torch.float32, non_blocking=False)
-            if not cpu_data.is_contiguous():
-                cpu_data = cpu_data.contiguous()
-            cpu_packed = torch.zeros(
-                T,
-                self.head_num,
-                self.tq_packed_per_head,
-                dtype=torch.uint8,
-            )
-            cpu_norms = torch.zeros(T, self.head_num, 1, dtype=torch.float16)
-            tq_pi = self.tq_Pi_cpu
-            tq_boundaries = self.tq_boundaries_cpu
-            for h in range(self.head_num):
-                head_data = cpu_data[:, h, :dim]
-                norms = head_data.norm(dim=1, keepdim=True).clamp(min=1e-8)
-                head_norm = head_data / norms
+    def _compress_heads_split(
+        self, data: torch.Tensor, dim: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compress (T, head_num, dim) into packed indices + fp16 norms.
 
-                Y = head_norm @ tq_pi.T * self.tq_scale
-                indices = torch.searchsorted(tq_boundaries, Y.reshape(-1))
-                indices = indices.clamp(0, n_levels - 1).reshape(T, dim)
-
-                padded = pad_for_packing(dim, self.tq_bit_width)
-                if padded > dim:
-                    indices = torch.nn.functional.pad(
-                        indices, (0, padded - dim), value=0
-                    )
-                packed = pack_indices(indices, self.tq_bit_width)
-                cpu_packed[:, h, :] = packed
-                cpu_norms[:, h, 0] = norms.squeeze(1).half()
-
-            return (
-                cpu_packed.to(device=data.device, non_blocking=False),
-                cpu_norms.to(device=data.device, non_blocking=False),
-            )
-
-        for h in range(self.head_num):
-            head_data = data[:, h, :dim].float()  # (T, dim)
-            norms = head_data.norm(dim=1, keepdim=True).clamp(min=1e-8)
-            head_norm = head_data / norms
-
-            Y = head_norm @ self.tq_Pi.T * self.tq_scale
-            indices = torch.searchsorted(self.tq_boundaries, Y.reshape(-1))
-            indices = indices.clamp(0, n_levels - 1).reshape(T, dim)
-
-            padded = pad_for_packing(dim, self.tq_bit_width)
-            if padded > dim:
-                indices = torch.nn.functional.pad(indices, (0, padded - dim), value=0)
-            packed = pack_indices(indices, self.tq_bit_width)
-
-            packed_out[:, h, :] = packed
-            norms_out[:, h, 0] = norms.squeeze(1).half()
-
-        return packed_out, norms_out
+        On HIP/CUDA: uses GPU-vectorized path (no CPU round-trips).
+        Fallback: CPU vectorized (no Python head loop).
+        """
+        return self._compress_gpu(data, dim)
 
     def _compress_heads(self, data: torch.Tensor, dim: int) -> torch.Tensor:
         """Compress (T, head_num, dim) -> (T, head_num * tq_bytes_per_head) uint8."""
@@ -2960,48 +2970,66 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
         out: torch.Tensor,
         n_active: int,
     ):
-        """Decompress packed indices + norms into out[:n_active, head_num, dim]."""
-        import math
-        from sglang.srt.layers.quantization.turboquant_engine import (
-            unpack_indices, pad_for_packing,
-        )
+        """Decompress packed indices + norms into out[:n_active, head_num, dim].
 
+        GPU-vectorized path: processes all heads simultaneously, no CPU round-trips.
+        Replaces former per-head Python loop + D2H/H2D transfers that consumed
+        ~42% of decode CPU time (py-spy profile, 2026-05-XX).
+
+        Algorithm (for each token t, head h):
+          1. Unpack tq_bit_width-bit indices from packed uint8
+          2. Codebook lookup: y_hat = centroids[indices] / tq_scale
+          3. Rotate back: y_hat @ Pi   (Pi is orthogonal)
+          4. Scale by per-token norm
+        """
         if n_active <= 0:
             return
 
-        if _is_hip:
-            packed_cpu = packed[:n_active].detach().contiguous().to("cpu")
-            norms_cpu = norms[:n_active].detach().contiguous().to("cpu")
-            cpu_out = torch.empty(
-                (n_active, self.head_num, dim), dtype=out.dtype, device="cpu"
+        T = n_active
+        H = self.head_num
+
+        # --- Unpack bit-packed indices to [T, H, dim] int64 ---
+        p = packed[:T]   # [T, H, packed_per_head] uint8
+
+        if self.tq_bit_width == 4:
+            # layout: byte[i] = lo_nibble | (hi_nibble << 4)
+            # index[2i] = lo, index[2i+1] = hi
+            lo = (p & 0x0F).to(torch.int64)
+            hi = ((p >> 4) & 0x0F).to(torch.int64)
+            indices = torch.stack([lo, hi], dim=-1).reshape(T, H, dim)  # [T, H, dim]
+        elif self.tq_bit_width == 2:
+            # layout: byte[i] = b0 | (b1<<2) | (b2<<4) | (b3<<6)
+            b0 = (p & 0x03).to(torch.int64)
+            b1 = ((p >> 2) & 0x03).to(torch.int64)
+            b2 = ((p >> 4) & 0x03).to(torch.int64)
+            b3 = ((p >> 6) & 0x03).to(torch.int64)
+            indices = torch.stack([b0, b1, b2, b3], dim=-1).reshape(T, H, dim)
+        else:
+            # 3-bit or other: fall back to CPU helper (rare path)
+            from sglang.srt.layers.quantization.turboquant_engine import (
+                unpack_indices,
             )
+            centroids_dev = self.tq_centroids
+            p_dev = p.contiguous()
+            indices_list = []
+            for h in range(H):
+                idx_h = unpack_indices(p_dev[:, h, :].cpu(), dim, self.tq_bit_width)[:, :dim]
+                indices_list.append(idx_h)
+            indices = torch.stack(indices_list, dim=1).to(p.device)
 
-            for h in range(self.head_num):
-                padded = pad_for_packing(dim, self.tq_bit_width)
-                indices = unpack_indices(
-                    packed_cpu[:, h, :], padded, self.tq_bit_width
-                )[:, :dim]
-                head_norms = norms_cpu[:, h, 0].float()
+        # --- Codebook lookup: [T, H, dim] int64 -> [T, H, dim] float32 ---
+        # centroids is [n_levels] float32 on same device as packed
+        centroids_dev = self.tq_centroids
+        y_hat = centroids_dev[indices.reshape(-1)].reshape(T, H, dim) / self.tq_scale
 
-                y_hat = self.tq_centroids_cpu[indices.long()] / self.tq_scale
-                restored = (y_hat @ self.tq_Pi_cpu) * head_norms.unsqueeze(1)
-                cpu_out[:, h, :dim] = restored.to(cpu_out.dtype)
+        # --- Rotate back: [T*H, dim] @ Pi [dim, dim] ---
+        y_flat = y_hat.reshape(T * H, dim)
+        restored = torch.mm(y_flat, self.tq_Pi)     # [T*H, dim] float32
 
-            out[:n_active].copy_(cpu_out.to(device=out.device, dtype=out.dtype))
-            return
-
-        packed = packed[:n_active]
-        norms = norms[:n_active]
-
-        for h in range(self.head_num):
-            padded = pad_for_packing(dim, self.tq_bit_width)
-            indices = unpack_indices(packed[:, h, :], padded, self.tq_bit_width)[:, :dim]
-            head_norms = norms[:, h, 0].float()
-
-            Y_hat = self.tq_centroids[indices.long()] / self.tq_scale
-            L = (Y_hat @ self.tq_Pi) * head_norms.unsqueeze(1)
-
-            out[:n_active, h, :dim] = L.to(out.dtype)
+        # --- Scale by norms and write to output ---
+        norm_flat = norms[:T].reshape(T * H, 1).float()
+        restored = (restored * norm_flat).reshape(T, H, dim)
+        out[:T, :, :dim].copy_(restored.to(out.dtype))
 
     def _decompress_heads(self, compressed: torch.Tensor, dim: int,
                           out: torch.Tensor, n_active: int):
@@ -3128,6 +3156,8 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
                     v_norm_sorted = (
                         v_norm.contiguous() if self._use_split_tq_storage else None
                     )
+                    ck_sorted = cache_k.contiguous()
+                    cv_sorted = cache_v.contiguous()
                 else:
                     k_sorted = self._reorder_rows_hip_safe(k_comp, perm_cpu).contiguous()
                     v_sorted = self._reorder_rows_hip_safe(v_comp, perm_cpu).contiguous()
@@ -3141,6 +3171,8 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
                         if self._use_split_tq_storage
                         else None
                     )
+                    ck_sorted = self._reorder_rows_hip_safe(cache_k, perm_cpu).contiguous()
+                    cv_sorted = self._reorder_rows_hip_safe(cache_v, perm_cpu).contiguous()
                 row_start = int(sorted_loc[0].item())
                 row_stop = int(sorted_loc[-1].item()) + 1
                 is_dense_run = (
@@ -3169,6 +3201,9 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
                     if self._use_split_tq_storage:
                         self.k_norm_buffer[layer_idx][row_start:row_stop].copy_(k_norm_sorted)
                         self.v_norm_buffer[layer_idx][row_start:row_stop].copy_(v_norm_sorted)
+                    # Direct write decompressed FP16 — avoids full O(n_active) decompress on read
+                    self._k_deq[layer_idx][row_start:row_stop].copy_(ck_sorted)
+                    self._v_deq[layer_idx][row_start:row_stop].copy_(cv_sorted)
                 else:
                     self.k_buffer[layer_idx].index_copy_(0, sorted_loc, k_sorted)
                     self.v_buffer[layer_idx].index_copy_(0, sorted_loc, v_sorted)
@@ -3179,11 +3214,20 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
                         self.v_norm_buffer[layer_idx].index_copy_(
                             0, sorted_loc, v_norm_sorted
                         )
+                    # Direct write decompressed FP16
+                    self._k_deq[layer_idx].index_copy_(0, sorted_loc, ck_sorted)
+                    self._v_deq[layer_idx].index_copy_(0, sorted_loc, cv_sorted)
+                # Decompressed buffer is now up-to-date; no full re-decompress needed
+                self._deq_dirty_k[layer_idx] = False
+                self._deq_dirty_v[layer_idx] = False
         else:
             self.k_buffer[layer_idx][loc] = k_comp
             self.v_buffer[layer_idx][loc] = v_comp
-        self._deq_dirty_k[layer_idx] = True
-        self._deq_dirty_v[layer_idx] = True
+            # Direct write decompressed FP16 to avoid full O(n_active) decompress on read
+            self._k_deq[layer_idx][loc] = cache_k
+            self._v_deq[layer_idx][loc] = cache_v
+            self._deq_dirty_k[layer_idx] = False
+            self._deq_dirty_v[layer_idx] = False
 
         if loc.numel() > 0:
             max_loc = loc.max().item() + 1
@@ -3244,6 +3288,11 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
                     self.v_norm_buffer[layer_id][chunk_indices] = entry[3].to(
                         self.v_norm_buffer[0].device, non_blocking=True
                     )
+        # load_cpu_copy only writes the compressed buffers; mark decompressed buffers
+        # dirty so they will be regenerated on next get_key/value_buffer call.
+        for layer_id in range(self.layer_num):
+            self._deq_dirty_k[layer_id] = True
+            self._deq_dirty_v[layer_id] = True
         torch.cuda.synchronize()
 
     def move_kv_cache(self, tgt_loc: torch.Tensor, src_loc: torch.Tensor):
@@ -3271,4 +3320,11 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
                 0,
                 sorted_tgt,
                 self.v_norm_buffer[layer_idx].index_select(0, sorted_src),
+            )
+            # Also move decompressed buffers so get_key/value_buffer is correct after move
+            self._k_deq[layer_idx].index_copy_(
+                0, sorted_tgt, self._k_deq[layer_idx].index_select(0, sorted_src)
+            )
+            self._v_deq[layer_idx].index_copy_(
+                0, sorted_tgt, self._v_deq[layer_idx].index_select(0, sorted_src)
             )
