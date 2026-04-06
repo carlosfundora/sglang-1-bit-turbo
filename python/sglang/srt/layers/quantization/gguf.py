@@ -200,18 +200,8 @@ def _get_hip_prism_cpu_weight(
 
 
 def _get_hip_prism_output_dtype(x: torch.Tensor) -> torch.dtype:
-    if os.environ.get("SGLANG_PRISM_HIP_FORCE_INPUT_DTYPE", "").lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    ):
-        return x.dtype
-    # Prism Q1 models are far more sensitive to quantization error than the
-    # usual GGUF paths. Preserve fp32 through the HIP compatibility bridge
-    # instead of immediately collapsing back to fp16/bf16 after every matmul.
-    if x.dtype in (torch.float16, torch.bfloat16):
-        return torch.float32
+    # Must preserve the input dtype so downstream layers (e.g. EAGLE3 draft
+    # model with fp16 weights) receive tensors with a matching dtype.
     return x.dtype
 
 
@@ -236,9 +226,11 @@ def _dequantize_gguf_weight(
     rows = qweight.shape[0]
     cols = qweight.shape[1] // type_size * block_size
 
-    if (_is_cuda or _is_musa) and qweight_type not in PRISM_Q1_TYPES:
+    # GPU dequantize — all types including PRISM Q1 (cases 42/43 in .so)
+    if (_is_cuda or _is_musa or _is_hip) and qweight.is_cuda:
         return ggml_dequantize(qweight, qweight_type, rows, cols, dtype)
 
+    # CPU fallback for weights not yet on GPU (e.g. vocab export during load)
     return _dequantize_with_gguf_quants(
         qweight, qweight_type, dtype=dtype, rows=rows, cols=cols
     )
@@ -248,41 +240,35 @@ def fused_mul_mat_gguf(
     x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
 ) -> torch.Tensor:
     has_fast_gguf = _is_cuda or _is_musa or _is_hip
-    if _is_hip and qweight_type in PRISM_Q1_TYPES:
-        logger.warning_once(
-            "HIP PRISM Q1 uses a CPU matmul compatibility bridge in this fork."
-        )
-        weight_cpu = _get_hip_prism_cpu_weight(qweight, qweight_type)
-        out_dtype = _get_hip_prism_output_dtype(x)
-        x_cpu = x.to(device="cpu", dtype=torch.float32)
-        y_cpu = x_cpu @ weight_cpu.T
-        return y_cpu.to(device=x.device, dtype=out_dtype, non_blocking=False)
-    if qweight_type in IMATRIX_QUANT_TYPES:
-        mmvq_safe = 8 if qweight.shape[0] > 5120 else 16
-    else:
-        mmvq_safe = 2 if qweight.shape[0] > 5120 else 6
-    # HACK: when doing chunked prefill we don't generate output tokens
-    # so input to logits generator is empty which causes invalid parameter
     if x.shape[0] == 0:
         return torch.empty(x.shape[0], qweight.shape[0], dtype=x.dtype, device=x.device)
-    # there is no need to call any kernel for fp16/bf16
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
-    # enable MMVQ in contiguous batching with batch_size=1
-    if has_fast_gguf and x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
-        y = ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
-    # Use MMQ Kernel if it's available (standard + k-quants)
-    elif has_fast_gguf and qweight_type in MMQ_QUANT_TYPES:
-        y = ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
-    # If there is no available MMQ kernel, fallback to dequantize
-    elif qweight_type in DEQUANT_TYPES:
-        weight = _dequantize_gguf_weight(qweight, qweight_type, dtype=x.dtype)
-        y = x @ weight.T
+
+    # MMVQ safe batch thresholds — Q1 and imatrix use 8 (llama.cpp MMVQ_MAX_BATCH_SIZE)
+    if qweight_type in PRISM_Q1_TYPES or qweight_type in IMATRIX_QUANT_TYPES:
+        mmvq_safe = 8
     else:
-        raise NotImplementedError(
-            f"Unsupported GGUF quantization type: {gguf_type_name(qweight_type)}"
-        )
-    return y
+        mmvq_safe = 2 if qweight.shape[0] > 5120 else 6
+
+    # Tier 1: MMVQ kernel — batch ≤ mmvq_safe (decode hot path)
+    if has_fast_gguf and x.shape[0] <= mmvq_safe and (
+        qweight_type in MMVQ_QUANT_TYPES or qweight_type in PRISM_Q1_TYPES
+    ):
+        return ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
+
+    # Tier 2: MMQ kernel — standard + k-quants only
+    if has_fast_gguf and qweight_type in MMQ_QUANT_TYPES:
+        return ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
+
+    # Tier 3: GPU dequantize + matmul — Q1 batch>8 (EAGLE extends) and all dequant types
+    if qweight_type in DEQUANT_TYPES:
+        weight = _dequantize_gguf_weight(qweight, qweight_type, dtype=x.dtype)
+        return x @ weight.T
+
+    raise NotImplementedError(
+        f"Unsupported GGUF quantization type: {gguf_type_name(qweight_type)}"
+    )
 
 
 def fused_moe_gguf(

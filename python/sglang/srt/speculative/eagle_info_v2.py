@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -7,6 +8,8 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
+
+logger = logging.getLogger(__name__)
 
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.schedule_batch import ModelWorkerBatch, ScheduleBatch
@@ -307,6 +310,14 @@ class EagleVerifyInputV2Mixin:
         accept_length = torch.empty((bs,), dtype=torch.int32, device=device)
 
         # Sample tokens
+        if _is_hip:
+            logger.info(
+                "EAGLE verify_tree: is_all_greedy=%s _is_npu=%s temps=%s top_ks=%s",
+                sampling_info.is_all_greedy,
+                _is_npu,
+                sampling_info.temperatures[:4].cpu().tolist() if hasattr(sampling_info, 'temperatures') else 'N/A',
+                sampling_info.top_ks[:4].cpu().tolist() if hasattr(sampling_info, 'top_ks') else 'N/A',
+            )
         if sampling_info.is_all_greedy or _is_npu:
             target_predict = torch.argmax(next_token_logits, dim=-1)
             target_predict = target_predict.reshape(bs, self.draft_token_num)
@@ -353,6 +364,24 @@ class EagleVerifyInputV2Mixin:
             )
 
             tree_spec_fn = get_tree_spec_sampling_fn()
+
+            # Diagnostic: log the candidate-vs-target alignment
+            if _is_hip and bs == 1:
+                _cands = candidates[0].cpu().tolist()
+                _tp_at_root = [target_probs[0, 0, c].item() for c in _cands[:4]]
+                _tp_max = target_probs[0, 0].max().item()
+                _tp_argmax = target_probs[0, 0].argmax().item()
+                logger.info(
+                    "EAGLE verify diag: candidates[:4]=%s target_probs_for_cands=%s "
+                    "target_max=%.4f target_argmax=%d temp=%.2f fn=%s",
+                    _cands[:4],
+                    ["%.4f" % p for p in _tp_at_root],
+                    _tp_max,
+                    _tp_argmax,
+                    sampling_info.temperatures[0].item(),
+                    tree_spec_fn.__name__,
+                )
+
             tree_spec_fn(
                 predicts=predict,  # mutable
                 accept_index=accept_index,  # mutable
@@ -369,6 +398,13 @@ class EagleVerifyInputV2Mixin:
                 threshold_acc=get_global_server_args().speculative_accept_threshold_acc,
                 deterministic=True,
             )
+
+            if _is_hip and bs == 1:
+                logger.info(
+                    "EAGLE verify result: accept_length=%s accept_index=%s",
+                    accept_length.cpu().tolist(),
+                    accept_index[0].cpu().tolist(),
+                )
 
         if SIMULATE_ACC_LEN > 0:
             # Do simulation

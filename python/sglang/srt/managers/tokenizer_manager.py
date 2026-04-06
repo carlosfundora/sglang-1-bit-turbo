@@ -244,9 +244,10 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         if speculative_algorithm.is_eagle():
             # In the current eagle implementation, we store the draft tokens in the output token slots,
             # so we need to reserve the space for the draft tokens.
+            eagle_tokens = server_args.speculative_eagle_topk * server_args.speculative_num_steps
             self.num_reserved_tokens = max(
-                server_args.speculative_eagle_topk * server_args.speculative_num_steps,
-                server_args.speculative_num_draft_tokens,
+                eagle_tokens,
+                server_args.speculative_num_draft_tokens or eagle_tokens,
             )
         else:
             self.num_reserved_tokens = 0

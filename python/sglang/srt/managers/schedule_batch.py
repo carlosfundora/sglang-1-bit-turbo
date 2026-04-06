@@ -1876,7 +1876,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         server_args = get_global_server_args()
         len_per_topk = server_args.speculative_num_steps or 1
         spec_topk = server_args.speculative_eagle_topk or 1
-        spec_tokens = server_args.speculative_num_draft_tokens
+        spec_tokens = server_args.speculative_num_draft_tokens or (len_per_topk * spec_topk)
 
         if page_size > 1 and spec_topk > 1:
             # last partial page and ceil alignment

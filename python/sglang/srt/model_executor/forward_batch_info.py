@@ -538,7 +538,10 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         elif (
             ret.spec_info is not None
             and getattr(ret.spec_info, "positions", None) is not None
+            and (ret.forward_mode.is_decode() or ret.forward_mode.is_target_verify())
         ):
+            # Only use spec_info.positions for decode/verify — stale positions from
+            # a previous verify cycle must not leak into new extend requests.
             ret.positions = ret.spec_info.positions
 
         # Init position information
@@ -1172,12 +1175,15 @@ def compute_position_kernel(
 def compute_position_torch(
     extend_prefix_lens: torch.Tensor, extend_seq_lens: torch.Tensor
 ):
+    # Guard against zero/negative extend_len which causes torch.arange to fail
+    # with "upper bound and lower bound inconsistent with step sign"
+    clamped_seq_lens = torch.clamp(extend_seq_lens, min=1)
     positions = torch.cat(
         [
             torch.arange(
                 prefix_len, prefix_len + extend_len, device=extend_prefix_lens.device
             )
-            for prefix_len, extend_len in zip(extend_prefix_lens, extend_seq_lens)
+            for prefix_len, extend_len in zip(extend_prefix_lens, clamped_seq_lens)
         ],
         axis=0,
     )
