@@ -184,28 +184,46 @@ class EAGLEWorker(TpModelWorker):
                         "because SGLANG_EAGLE_SKIP_TARGET_EMBED_SHARE is enabled"
                     )
                 else:
-                    try:
+                    # BUG-FIX: Do not share embeddings from a GGUF-quantised target.
+                    # Q1_0_G128 dequantised weights have ~70x smaller magnitude than
+                    # the full-precision fp16 weights that EAGLE3 was trained with.
+                    # Feeding near-zero embeddings into the midlayer produces a nearly
+                    # uniform logit distribution → 0% spec-decode acceptance.
+                    # The draft model's own safetensors embed_tokens are the correct
+                    # full-precision weights; just leave them in place.
+                    _target_quant = getattr(
+                        self.target_worker.model_runner.server_args, "quantization", None
+                    )
+                    if _target_quant == "gguf":
                         logger.info(
-                            "EAGLE draft worker init: attempting target embedding share"
+                            "EAGLE draft worker init: skipping embed share — target "
+                            "uses GGUF quantisation (Q1_0 magnitudes are ~70x smaller "
+                            "than the fp16 embeddings EAGLE3 was trained with). "
+                            "Using draft-local full-precision embed_tokens instead."
                         )
-                        embed = self.target_worker.model_runner.model.get_embed()
-                        self.draft_model_runner.model.set_embed(embed)
-                        logger.info(
-                            "EAGLE draft worker init: target embedding share complete"
-                        )
-                    except torch.OutOfMemoryError:
-                        logger.warning(
-                            "Skipping target embedding share for EAGLE3 draft because "
-                            "the target embedding export exhausted GPU memory. "
-                            "Continuing with the draft-local embedding."
-                        )
-                        torch.cuda.empty_cache()
-                    except Exception as exc:
-                        logger.warning(
-                            "Skipping target embedding share for EAGLE3 draft and "
-                            "continuing with the draft-local embedding: %s",
-                            exc,
-                        )
+                    else:
+                        try:
+                            logger.info(
+                                "EAGLE draft worker init: attempting target embedding share"
+                            )
+                            embed = self.target_worker.model_runner.model.get_embed()
+                            self.draft_model_runner.model.set_embed(embed)
+                            logger.info(
+                                "EAGLE draft worker init: target embedding share complete"
+                            )
+                        except torch.OutOfMemoryError:
+                            logger.warning(
+                                "Skipping target embedding share for EAGLE3 draft because "
+                                "the target embedding export exhausted GPU memory. "
+                                "Continuing with the draft-local embedding."
+                            )
+                            torch.cuda.empty_cache()
+                        except Exception as exc:
+                            logger.warning(
+                                "Skipping target embedding share for EAGLE3 draft and "
+                                "continuing with the draft-local embedding: %s",
+                                exc,
+                            )
                 if embed is None:
                     logger.info("EAGLE draft worker init: using draft-local embedding")
 

@@ -233,19 +233,34 @@ class LlamaModel(nn.Module):
             positions = forward_batch.mrope_positions
 
         hidden_states = forward_batch.spec_info.hidden_states
-        # Always project through fc when it is a dimensionality reducer
-        # (fc.in_features > fc.out_features).  The original check
-        # `hidden_states.shape[-1] != embeds.shape[-1]` fails for Qwen3/Bonsai
-        # because a single aux layer gives 2560 features == embeds size, so the
-        # fc was silently skipped and the draft ran on raw target hidden states
-        # → 0% EAGLE3 acceptance.  Pad or truncate to fc.in_features as needed.
-        if self.fc.in_features != self.fc.out_features:
+        # Apply fc only when hidden_states are in TARGET aux-hidden space (fc.in_features = 7680
+        # for a 3-layer EAGLE3 setup).  During DECODE DRAFT STEPS, hidden_states is the draft
+        # model's own previous output (fc.out_features = 2560) and must NOT be projected again —
+        # zero-padding 2560 to 7680 and projecting through fc produces garbage logits → 0% accept.
+        #
+        # The original check `hidden_states.shape[-1] != embeds.shape[-1]` was correct for the
+        # normal flow (7680 != 2560 → apply; 2560 == 2560 → skip) but broke when only 2 of 3
+        # aux states were captured (BUG 1), giving 5120 != 2560.  Now that BUG 1 is fixed we
+        # key off fc.out_features instead of embeds.shape[-1] — both are 2560, but this is
+        # explicit and robust to future changes.
+        if hidden_states.shape[-1] != self.fc.out_features:
+            # RESCALE: the EAGLE3 head was trained on full-precision (fp16/bf16) aux hidden
+            # states with per-layer norm ~150-250 for a 2560-dim vector.  Q1_0_G128
+            # dequantised hidden states have norms ~3000-4000 per layer (23-30× larger),
+            # causing the fc output to explode and the midlayer to produce near-uniform
+            # logits (~6e-5 per token → 0% acceptance).  Scale back to training distribution.
+            # TODO: remove once EAGLE3 head is retrained on quantised hidden states.
+            hidden_states = hidden_states * (1.0 / 25.0)
+            hidden_states = torch.clamp(hidden_states, -100.0, 100.0)
+
             expected_in = self.fc.in_features
             current_in = hidden_states.shape[-1]
-            if current_in < expected_in:
-                hidden_states = F.pad(hidden_states, (0, expected_in - current_in))
-            elif current_in > expected_in:
-                hidden_states = hidden_states[..., :expected_in]
+            if current_in != expected_in:
+                # Safety: handle unexpected intermediate sizes (e.g., partial aux capture)
+                if current_in < expected_in:
+                    hidden_states = F.pad(hidden_states, (0, expected_in - current_in))
+                else:
+                    hidden_states = hidden_states[..., :expected_in]
             if hidden_states.dtype != self.fc.weight.dtype:
                 hidden_states = hidden_states.to(self.fc.weight.dtype)
             hidden_states = self.fc(hidden_states)

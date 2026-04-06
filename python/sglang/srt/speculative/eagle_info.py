@@ -64,6 +64,42 @@ def _build_kv_indptr_for_hip(
     return cum_kv_seq_len_cpu.to(device=device), total
 
 
+def _create_extend_after_decode_pytorch(
+    verified_id: torch.Tensor,   # [total_accepted] draft token ids (input)
+    seq_lens: torch.Tensor,      # [bs] sequence lengths for draft extend
+    accept_lens: torch.Tensor,   # [bs] number of accepted tokens per req
+    positions: torch.Tensor,     # [total_accepted] positions to fill (output)
+    new_verified_id: torch.Tensor,  # [bs] last accepted token id per req (output)
+) -> None:
+    """Pure-PyTorch replacement for the create_extend_after_decode_spec_info
+    Triton kernel.  On gfx1030, tl.sum() reductions in that kernel compute
+    wrong offsets, writing self.positions to garbage GPU addresses and leaving
+    it filled with uninitialized int64 values — which then explode in the
+    rotary embedding lookup.  This version is CPU-side and fully correct."""
+    accept_lens_cpu = accept_lens.detach().cpu().to(torch.int64)
+    seq_lens_cpu = seq_lens.detach().cpu().to(torch.int64)
+    verified_id_cpu = verified_id.detach().cpu()
+    bs = accept_lens_cpu.shape[0]
+
+    # prefix-sum of accept_lens → start offset in the flat positions buffer
+    cumsum = torch.zeros(bs + 1, dtype=torch.int64)
+    cumsum[1:] = torch.cumsum(accept_lens_cpu, dim=0)
+
+    positions_cpu = torch.empty(positions.shape[0], dtype=torch.int64)
+    new_verified_id_cpu = torch.empty(bs, dtype=torch.int32)
+
+    for pid in range(bs):
+        start = int(cumsum[pid].item())
+        end = int(cumsum[pid + 1].item())
+        seq_len = int(seq_lens_cpu[pid].item())
+        al = end - start
+        positions_cpu[start:end] = torch.arange(seq_len - al, seq_len, dtype=torch.int64)
+        new_verified_id_cpu[pid] = verified_id_cpu[end - 1]
+
+    positions.copy_(positions_cpu.to(device=positions.device))
+    new_verified_id.copy_(new_verified_id_cpu.to(device=new_verified_id.device))
+
+
 def _rocm_spec_debug_enabled() -> bool:
     return is_hip() and os.getenv("SGLANG_ROCM_DEBUG_KV", "0") == "1"
 
@@ -846,14 +882,27 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
         self.positions = torch.empty_like(batch.input_ids, dtype=torch.long)
         self.verified_id = torch.empty_like(self.accept_length, dtype=torch.int32)
 
-        create_extend_after_decode_spec_info[(len(batch.seq_lens),)](
-            batch.input_ids,
-            batch.seq_lens,
-            self.accept_length,
-            self.positions,
-            self.verified_id,
-            next_power_of_2(max(speculative_num_steps + 1, len(batch.seq_lens))),
-        )
+        if is_hip():
+            # Replace Triton kernel with pure-PyTorch on ROCm: tl.sum reductions
+            # inside create_extend_after_decode_spec_info produce garbage offsets on
+            # gfx1030, corrupting self.positions with uninitialized GPU memory values
+            # (e.g. -9223372034707292160) that later crash rotary embedding lookup.
+            _create_extend_after_decode_pytorch(
+                batch.input_ids,
+                batch.seq_lens,
+                self.accept_length,
+                self.positions,
+                self.verified_id,
+            )
+        else:
+            create_extend_after_decode_spec_info[(len(batch.seq_lens),)](
+                batch.input_ids,
+                batch.seq_lens,
+                self.accept_length,
+                self.positions,
+                self.verified_id,
+                next_power_of_2(max(speculative_num_steps + 1, len(batch.seq_lens))),
+            )
 
     def generate_attn_arg_prefill(
         self,
