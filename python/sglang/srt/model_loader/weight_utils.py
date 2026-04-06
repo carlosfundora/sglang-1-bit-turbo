@@ -947,6 +947,7 @@ def get_gguf_extra_tensor_names(
     gguf_file: str, gguf_to_hf_name_map: Dict[str, str]
 ) -> List[str]:
     import gguf
+
     from sglang.srt.utils.gguf_compat import ensure_prism_gguf_compat
 
     ensure_prism_gguf_compat()
@@ -966,6 +967,7 @@ def gguf_quant_weights_iterator(
     """
 
     import gguf
+
     from sglang.srt.utils.gguf_compat import (
         ensure_prism_gguf_compat,
         gguf_type_name,

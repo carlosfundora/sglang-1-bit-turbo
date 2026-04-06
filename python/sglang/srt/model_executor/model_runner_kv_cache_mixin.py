@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Tuple
 
@@ -74,7 +73,9 @@ _is_npu = is_npu()
 class ModelRunnerKVCacheMixin:
     def _kv_element_size(self):
         """Get element size, handling TQ string dtypes."""
-        if isinstance(self.kv_cache_dtype, str) and self.kv_cache_dtype.startswith("tq"):
+        if isinstance(self.kv_cache_dtype, str) and self.kv_cache_dtype.startswith(
+            "tq"
+        ):
             return 1  # TQ stores as uint8, actual size handled by pool
         if isinstance(self.kv_cache_dtype, str) and self.kv_cache_dtype == "fp4_e2m1":
             return 1
@@ -715,6 +716,7 @@ class ModelRunnerKVCacheMixin:
                     )
                 elif self.kv_cache_dtype in ("tq2", "tq3", "tq4"):
                     from sglang.srt.mem_cache.memory_pool import MHATokenToKVPoolTQ
+
                     tq_bits = int(self.kv_cache_dtype[2])
                     logger.info(f"Using TurboQuant {tq_bits}-bit KV cache for MHA/GQA")
                     self.token_to_kv_pool = MHATokenToKVPoolTQ(

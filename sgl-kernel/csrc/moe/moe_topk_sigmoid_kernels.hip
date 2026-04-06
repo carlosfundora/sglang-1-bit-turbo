@@ -414,7 +414,7 @@ void topkGatingSigmoidLauncherHelper(
   const int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
 
   dim3 block_dim(WARP_SIZE, WARPS_PER_TB);
- hipLaunchKernelGGL(( topkGatingSigmoid<T, VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG>), dim3(num_blocks), dim3(block_dim), 0, stream, 
+ hipLaunchKernelGGL(( topkGatingSigmoid<T, VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG>), dim3(num_blocks), dim3(block_dim), 0, stream,
       input, finished, output, num_rows, indices, k, start_expert, end_expert, renormalize, correction_bias);
 }
 
@@ -480,7 +480,7 @@ void topkGatingSigmoidKernelLauncher(
       static constexpr int TPB = 256;
      hipLaunchKernelGGL(( moeSigmoid<T, TPB>)
           , dim3(num_tokens), dim3(TPB), 0, stream, gating_output, nullptr, sigmoid_workspace, num_experts, correction_bias);
-     hipLaunchKernelGGL(( moeTopK<TPB>), dim3(num_tokens), dim3(TPB), 0, stream, 
+     hipLaunchKernelGGL(( moeTopK<TPB>), dim3(num_tokens), dim3(TPB), 0, stream,
           sigmoid_workspace,
           nullptr,
           topk_weights,

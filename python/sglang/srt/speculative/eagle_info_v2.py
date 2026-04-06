@@ -27,7 +27,6 @@ from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.eagle_utils import verify_tree_greedy_func
 from sglang.srt.speculative.spec_utils import (
     SIMULATE_ACC_LEN,
-    TREE_SPEC_KERNEL_AVAILABLE,
     generate_simulated_accept_index,
     get_tree_spec_sampling_fn,
 )

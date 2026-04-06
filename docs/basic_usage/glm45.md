@@ -9,7 +9,7 @@ python3 -m sglang.launch_server --model zai-org/GLM-4.6-FP8 --tp 8
 ### EAGLE Speculative Decoding
 
 **Description**: SGLang has supported GLM-4.5 / GLM-4.6 models
-with [EAGLE speculative decoding](https://docs.sglang.io/advanced_features/speculative_decoding.html#EAGLE-Decoding).
+with [EAGLE speculative decoding](../advanced_features/speculative_decoding.md#EAGLE-Decoding).
 
 **Usage**:
 Add arguments `--speculative-algorithm`, `--speculative-num-steps`, `--speculative-eagle-topk` and

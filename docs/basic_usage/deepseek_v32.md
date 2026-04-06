@@ -75,7 +75,7 @@ python3 -m sglang.launch_server --model deepseek-ai/DeepSeek-V3.2-Exp --tp 8 --n
 
 
 ## Multi-token Prediction
-SGLang implements Multi-Token Prediction (MTP) for DeepSeek V3.2 based on [EAGLE speculative decoding](https://docs.sglang.io/advanced_features/speculative_decoding.html#EAGLE-Decoding). With this optimization, the decoding speed can be improved significantly on small batch sizes. Please look at [this PR](https://github.com/sgl-project/sglang/pull/11652) for more information.
+SGLang implements Multi-Token Prediction (MTP) for DeepSeek V3.2 based on [EAGLE speculative decoding](../advanced_features/speculative_decoding.md#EAGLE-Decoding). With this optimization, the decoding speed can be improved significantly on small batch sizes. Please look at [this PR](https://github.com/sgl-project/sglang/pull/11652) for more information.
 
 Example usage with DP Attention:
 ```bash
@@ -96,7 +96,7 @@ To enable the experimental overlap scheduler for EAGLE speculative decoding, set
 
 
 ## Function Calling and Reasoning Parser
-The usage of function calling and reasoning parser is the same as DeepSeek V3.1. Please refer to [Reasoning Parser](https://docs.sglang.io/advanced_features/separate_reasoning.html) and [Tool Parser](https://docs.sglang.io/advanced_features/tool_parser.html) documents.
+The usage of function calling and reasoning parser is the same as DeepSeek V3.1. Please refer to [Reasoning Parser](../advanced_features/separate_reasoning.ipynb) and [Tool Parser](../advanced_features/tool_parser.ipynb) documents.
 
 To launch `DeepSeek-V3.2-Exp` with function calling and reasoning parser:
 > Note: It is recommended to specify the chat-template, ensuring that you are within the sglang's root directory.

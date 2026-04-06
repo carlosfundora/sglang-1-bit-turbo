@@ -18,11 +18,11 @@
 #define SPECULATIVE_SAMPLING_HIP_CUH_
 
 #include <hip/hip_runtime.h>
-#include <hipcub/hipcub.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <hipcub/hipcub.hpp>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
@@ -56,37 +56,37 @@ __host__ __device__ __forceinline__ constexpr T ceil_div(T a, T b) {
 // Dispatch macros
 // ---------------------------------------------------------------------------
 #define DISPATCH_ALIGNED_VEC_SIZE(aligned_vec_size, ALIGNED_VEC_SIZE, ...) \
-  switch (aligned_vec_size) {                                             \
-    case 16: {                                                            \
-      constexpr size_t ALIGNED_VEC_SIZE = 16;                             \
-      __VA_ARGS__                                                         \
-      break;                                                              \
-    }                                                                     \
-    case 8: {                                                             \
-      constexpr size_t ALIGNED_VEC_SIZE = 8;                              \
-      __VA_ARGS__                                                         \
-      break;                                                              \
-    }                                                                     \
-    case 4: {                                                             \
-      constexpr size_t ALIGNED_VEC_SIZE = 4;                              \
-      __VA_ARGS__                                                         \
-      break;                                                              \
-    }                                                                     \
-    case 2: {                                                             \
-      constexpr size_t ALIGNED_VEC_SIZE = 2;                              \
-      __VA_ARGS__                                                         \
-      break;                                                              \
-    }                                                                     \
-    case 1: {                                                             \
-      constexpr size_t ALIGNED_VEC_SIZE = 1;                              \
-      __VA_ARGS__                                                         \
-      break;                                                              \
-    }                                                                     \
-    default: {                                                            \
-      std::ostringstream err_msg;                                         \
-      err_msg << "Unsupported aligned_vec_size: " << aligned_vec_size;    \
-      throw std::runtime_error(err_msg.str());                            \
-    }                                                                     \
+  switch (aligned_vec_size) {                                              \
+    case 16: {                                                             \
+      constexpr size_t ALIGNED_VEC_SIZE = 16;                              \
+      __VA_ARGS__                                                          \
+      break;                                                               \
+    }                                                                      \
+    case 8: {                                                              \
+      constexpr size_t ALIGNED_VEC_SIZE = 8;                               \
+      __VA_ARGS__                                                          \
+      break;                                                               \
+    }                                                                      \
+    case 4: {                                                              \
+      constexpr size_t ALIGNED_VEC_SIZE = 4;                               \
+      __VA_ARGS__                                                          \
+      break;                                                               \
+    }                                                                      \
+    case 2: {                                                              \
+      constexpr size_t ALIGNED_VEC_SIZE = 2;                               \
+      __VA_ARGS__                                                          \
+      break;                                                               \
+    }                                                                      \
+    case 1: {                                                              \
+      constexpr size_t ALIGNED_VEC_SIZE = 1;                               \
+      __VA_ARGS__                                                          \
+      break;                                                               \
+    }                                                                      \
+    default: {                                                             \
+      std::ostringstream err_msg;                                          \
+      err_msg << "Unsupported aligned_vec_size: " << aligned_vec_size;     \
+      throw std::runtime_error(err_msg.str());                             \
+    }                                                                      \
   }
 
 #define DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, ...) \
@@ -106,22 +106,29 @@ template <typename T, uint32_t N>
 struct vec_t {
   T data_[N];
 
-  __device__ __forceinline__ T& operator[](uint32_t i) { return data_[i]; }
-  __device__ __forceinline__ const T& operator[](uint32_t i) const { return data_[i]; }
+  __device__ __forceinline__ T& operator[](uint32_t i) {
+    return data_[i];
+  }
+  __device__ __forceinline__ const T& operator[](uint32_t i) const {
+    return data_[i];
+  }
 
   __device__ __forceinline__ void fill(T val) {
 #pragma unroll
-    for (uint32_t i = 0; i < N; ++i) data_[i] = val;
+    for (uint32_t i = 0; i < N; ++i)
+      data_[i] = val;
   }
 
   __device__ __forceinline__ void load(const T* ptr) {
 #pragma unroll
-    for (uint32_t i = 0; i < N; ++i) data_[i] = ptr[i];
+    for (uint32_t i = 0; i < N; ++i)
+      data_[i] = ptr[i];
   }
 
   __device__ __forceinline__ void store(T* ptr) const {
 #pragma unroll
-    for (uint32_t i = 0; i < N; ++i) ptr[i] = data_[i];
+    for (uint32_t i = 0; i < N; ++i)
+      ptr[i] = data_[i];
   }
 };
 
@@ -161,8 +168,10 @@ struct BoolDiffOp {
 // Max 32 warps (1024 threads / 32-wide warps). For wave64 targets only 16
 // warps exist, but the 32-element array is harmless padding.
 // ---------------------------------------------------------------------------
-template <uint32_t BLOCK_THREADS, hipcub::BlockScanAlgorithm SCAN_ALGORITHM,
-          hipcub::BlockReduceAlgorithm REDUCE_ALGORITHM>
+template <
+    uint32_t BLOCK_THREADS,
+    hipcub::BlockScanAlgorithm SCAN_ALGORITHM,
+    hipcub::BlockReduceAlgorithm REDUCE_ALGORITHM>
 struct SamplingTempStorage {
   union {
     float deterministic_scan[BLOCK_THREADS / HIP_WARP_SIZE];
@@ -191,10 +200,14 @@ struct SamplingTempStorage {
 // memory sizing uses compile-time HIP_WARP_SIZE.  For CDNA targets (wave64)
 // the SamplingTempStorage union layout may need re-validation.
 // ---------------------------------------------------------------------------
-template <uint32_t VEC_SIZE, uint32_t BLOCK_THREADS, hipcub::BlockScanAlgorithm SCAN_ALGORITHM,
-          hipcub::BlockReduceAlgorithm REDUCE_ALGORITHM>
+template <
+    uint32_t VEC_SIZE,
+    uint32_t BLOCK_THREADS,
+    hipcub::BlockScanAlgorithm SCAN_ALGORITHM,
+    hipcub::BlockReduceAlgorithm REDUCE_ALGORITHM>
 __device__ __forceinline__ void DeterministicInclusiveSum(
-    const float* in_data, float* out_data,
+    const float* in_data,
+    float* out_data,
     SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM>* temp_storage) {
   const uint32_t ws = warpSize;  // runtime: 32 on RDNA2, 64 on CDNA
   const uint32_t half_ws = ws >> 1;
@@ -244,8 +257,7 @@ __device__ __forceinline__ void DeterministicInclusiveSum(
   // First warp scans the per-warp totals
   if (threadIdx.x < ws) {
     const uint32_t num_warps = BLOCK_THREADS / ws;
-    float warp_exclusive_prefix_sum =
-        (threadIdx.x < num_warps) ? smem_prefix_sum[threadIdx.x] : 0;
+    float warp_exclusive_prefix_sum = (threadIdx.x < num_warps) ? smem_prefix_sum[threadIdx.x] : 0;
 
     for (uint32_t offset = 1; offset < ws; offset *= 2) {
       float tmp = __shfl_up(warp_exclusive_prefix_sum, offset);
@@ -276,18 +288,26 @@ __device__ __forceinline__ void DeterministicInclusiveSum(
   // Combine: warp-prefix + thread-exclusive-prefix + per-element running sum
 #pragma unroll
   for (uint32_t i = 0; i < VEC_SIZE; ++i) {
-    out_data[i] =
-        smem_prefix_sum[threadIdx.x / ws] + thread_exclusive_prefix_sum + thread_data[i];
+    out_data[i] = smem_prefix_sum[threadIdx.x / ws] + thread_exclusive_prefix_sum + thread_data[i];
   }
 }
 
 // ---------------------------------------------------------------------------
 // DeviceSamplingFromProb — inverse-CDF sampling from a probability vector.
 // ---------------------------------------------------------------------------
-template <uint32_t VEC_SIZE, uint32_t BLOCK_THREADS, hipcub::BlockScanAlgorithm SCAN_ALGORITHM,
-          hipcub::BlockReduceAlgorithm REDUCE_ALGORITHM, bool DETERMINISTIC, typename Predicate>
+template <
+    uint32_t VEC_SIZE,
+    uint32_t BLOCK_THREADS,
+    hipcub::BlockScanAlgorithm SCAN_ALGORITHM,
+    hipcub::BlockReduceAlgorithm REDUCE_ALGORITHM,
+    bool DETERMINISTIC,
+    typename Predicate>
 __device__ __forceinline__ void DeviceSamplingFromProb(
-    uint32_t i, uint32_t d, Predicate pred, float u, vec_t<float, VEC_SIZE> prob_vec,
+    uint32_t i,
+    uint32_t d,
+    Predicate pred,
+    float u,
+    vec_t<float, VEC_SIZE> prob_vec,
     float& aggregate,
     SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM>* temp_storage) {
   const uint32_t tx = threadIdx.x;
@@ -302,9 +322,8 @@ __device__ __forceinline__ void DeviceSamplingFromProb(
     valid[j] = pred(prob_vec[j]) && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d;
   }
 
-  float aggregate_local =
-      hipcub::BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage->block_prim.reduce)
-          .template Sum<VEC_SIZE>(prob_greater_than_threshold);
+  float aggregate_local = hipcub::BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage->block_prim.reduce)
+                              .template Sum<VEC_SIZE>(prob_greater_than_threshold);
   if (tx == 0) {
     temp_storage->block_aggregate.value = aggregate_local;
   }
@@ -335,8 +354,7 @@ __device__ __forceinline__ void DeviceSamplingFromProb(
 #pragma unroll
     for (uint32_t j = 0; j < VEC_SIZE; ++j) {
       if (greater_than_u_diff[j]) {
-        atomicMin(&(temp_storage->sampled_id),
-                  static_cast<int32_t>((i * BLOCK_THREADS + tx) * VEC_SIZE + j));
+        atomicMin(&(temp_storage->sampled_id), static_cast<int32_t>((i * BLOCK_THREADS + tx) * VEC_SIZE + j));
       }
     }
     __syncthreads();
@@ -348,22 +366,39 @@ __device__ __forceinline__ void DeviceSamplingFromProb(
 // ---------------------------------------------------------------------------
 // TreeSpeculativeSamplingTargetOnly — the __global__ kernel
 // ---------------------------------------------------------------------------
-template <uint32_t BLOCK_THREADS, hipcub::BlockScanAlgorithm SCAN_ALGORITHM,
-          hipcub::BlockReduceAlgorithm REDUCE_ALGORITHM, uint32_t VEC_SIZE, bool DETERMINISTIC,
-          typename DType, typename IdType, typename IdType2>
+template <
+    uint32_t BLOCK_THREADS,
+    hipcub::BlockScanAlgorithm SCAN_ALGORITHM,
+    hipcub::BlockReduceAlgorithm REDUCE_ALGORITHM,
+    uint32_t VEC_SIZE,
+    bool DETERMINISTIC,
+    typename DType,
+    typename IdType,
+    typename IdType2>
 __global__ void TreeSpeculativeSamplingTargetOnly(
-    IdType* predicts, IdType* accept_index, IdType* accept_token_num, IdType2* candidates,
-    IdType2* retrive_index, IdType2* retrive_next_token, IdType2* retrive_next_sibling,
-    DType* uniform_samples, DType* uniform_samples_for_final_sampling, DType* target_probs,
-    DType* draft_probs, uint32_t batch_size, uint32_t num_speculative_tokens,
-    uint32_t num_draft_tokens, uint32_t d, DType threshold_single, DType threshold_acc) {
+    IdType* predicts,
+    IdType* accept_index,
+    IdType* accept_token_num,
+    IdType2* candidates,
+    IdType2* retrive_index,
+    IdType2* retrive_next_token,
+    IdType2* retrive_next_sibling,
+    DType* uniform_samples,
+    DType* uniform_samples_for_final_sampling,
+    DType* target_probs,
+    DType* draft_probs,
+    uint32_t batch_size,
+    uint32_t num_speculative_tokens,
+    uint32_t num_draft_tokens,
+    uint32_t d,
+    DType threshold_single,
+    DType threshold_acc) {
   const uint32_t bx = blockIdx.x, tx = threadIdx.x;
 
-  extern __shared__ __align__(
-      alignof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM>))
+  extern __shared__ __align__(alignof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM>))
       uint8_t smem_sampling[];
-  auto& temp_storage = reinterpret_cast<
-      SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM>&>(smem_sampling);
+  auto& temp_storage =
+      reinterpret_cast<SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM>&>(smem_sampling);
 
   DType prob_acc = 0.0;
   uint32_t cur_prob_offset = bx * num_draft_tokens * d;
@@ -419,9 +454,8 @@ __global__ void TreeSpeculativeSamplingTargetOnly(
     for (uint32_t j = 0; j < VEC_SIZE; ++j) {
       relu_q_minus_p[j] = max(q_vec[j] - p_vec[j], DType(0));
     }
-    sum_relu_q_minus_p +=
-        hipcub::BlockReduce<DType, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
-            .template Sum<VEC_SIZE>(relu_q_minus_p);
+    sum_relu_q_minus_p += hipcub::BlockReduce<DType, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+                              .template Sum<VEC_SIZE>(relu_q_minus_p);
     __syncthreads();
   }
   if (tx == 0) {
@@ -450,8 +484,7 @@ __global__ void TreeSpeculativeSamplingTargetOnly(
     }
 
     DeviceSamplingFromProb<VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
-        i, d, [&](DType x) { return x > 0; }, u, relu_q_minus_p_vec, aggregate_relu_q_minus_p,
-        &temp_storage);
+        i, d, [&](DType x) { return x > 0; }, u, relu_q_minus_p_vec, aggregate_relu_q_minus_p, &temp_storage);
     if (aggregate_relu_q_minus_p > u) {
       break;
     }
@@ -465,39 +498,72 @@ __global__ void TreeSpeculativeSamplingTargetOnly(
 // ---------------------------------------------------------------------------
 template <typename DType, typename IdType, typename IdType2>
 hipError_t TreeSpeculativeSamplingTargetOnly(
-    IdType* predicts, IdType* output_token_ids, IdType* output_accepted_token_num,
-    IdType2* candidates, IdType2* retrive_index, IdType2* retrive_next_token,
-    IdType2* retrive_next_sibling, DType* uniform_samples,
-    DType* uniform_samples_for_final_sampling, DType* target_probs, DType* draft_probs,
-    uint32_t batch_size, uint32_t num_speculative_tokens, uint32_t num_draft_tokens, uint32_t d,
-    DType threshold_single = 1, DType threshold_acc = 1, bool deterministic = true,
+    IdType* predicts,
+    IdType* output_token_ids,
+    IdType* output_accepted_token_num,
+    IdType2* candidates,
+    IdType2* retrive_index,
+    IdType2* retrive_next_token,
+    IdType2* retrive_next_sibling,
+    DType* uniform_samples,
+    DType* uniform_samples_for_final_sampling,
+    DType* target_probs,
+    DType* draft_probs,
+    uint32_t batch_size,
+    uint32_t num_speculative_tokens,
+    uint32_t num_draft_tokens,
+    uint32_t d,
+    DType threshold_single = 1,
+    DType threshold_acc = 1,
+    bool deterministic = true,
     hipStream_t stream = 0) {
   constexpr uint32_t BLOCK_THREADS = 1024;
   const uint32_t vec_size = std::gcd<uint32_t>(16 / sizeof(DType), d);
-  const uint32_t smem_size =
-      sizeof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
+  const uint32_t smem_size = sizeof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
   dim3 nblks(batch_size);
   dim3 nthrs(BLOCK_THREADS);
   float capped_threshold_acc = fmaxf(threshold_acc, 1e-9f);
 
-  DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
-    DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
-      auto kernel_fn = TreeSpeculativeSamplingTargetOnly<
-          BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, VEC_SIZE, DETERMINISTIC, DType, IdType, IdType2>;
+  DISPATCH_ALIGNED_VEC_SIZE(
+      vec_size, VEC_SIZE, {DISPATCH_DETERMINISTIC(deterministic, DETERMINISTIC, {
+        auto kernel_fn = TreeSpeculativeSamplingTargetOnly<
+            BLOCK_THREADS,
+            SCAN_ALGO,
+            REDUCE_ALGO,
+            VEC_SIZE,
+            DETERMINISTIC,
+            DType,
+            IdType,
+            IdType2>;
 
-      hipError_t err = hipFuncSetAttribute(
-          reinterpret_cast<const void*>(kernel_fn),
-          hipFuncAttributeMaxDynamicSharedMemorySize, smem_size);
-      if (err != hipSuccess) return err;
+        hipError_t err = hipFuncSetAttribute(
+            reinterpret_cast<const void*>(kernel_fn), hipFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+        if (err != hipSuccess) return err;
 
-      hipLaunchKernelGGL(
-          kernel_fn, nblks, nthrs, smem_size, stream,
-          predicts, output_token_ids, output_accepted_token_num, candidates, retrive_index,
-          retrive_next_token, retrive_next_sibling, uniform_samples,
-          uniform_samples_for_final_sampling, target_probs, draft_probs, batch_size,
-          num_speculative_tokens, num_draft_tokens, d, threshold_single, capped_threshold_acc);
-    })
-  });
+        hipLaunchKernelGGL(
+            kernel_fn,
+            nblks,
+            nthrs,
+            smem_size,
+            stream,
+            predicts,
+            output_token_ids,
+            output_accepted_token_num,
+            candidates,
+            retrive_index,
+            retrive_next_token,
+            retrive_next_sibling,
+            uniform_samples,
+            uniform_samples_for_final_sampling,
+            target_probs,
+            draft_probs,
+            batch_size,
+            num_speculative_tokens,
+            num_draft_tokens,
+            d,
+            threshold_single,
+            capped_threshold_acc);
+      })});
   return hipSuccess;
 }
 

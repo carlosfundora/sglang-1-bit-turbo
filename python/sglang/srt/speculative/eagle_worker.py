@@ -142,7 +142,9 @@ class EAGLEWorker(TpModelWorker):
         with (
             ctx
         ), speculative_moe_backend_context(), speculative_moe_a2a_backend_context():
-            logger.info("EAGLE draft worker init: entering TpModelWorker super().__init__")
+            logger.info(
+                "EAGLE draft worker init: entering TpModelWorker super().__init__"
+            )
             super().__init__(
                 server_args=server_args,
                 gpu_id=gpu_id,
@@ -158,7 +160,9 @@ class EAGLEWorker(TpModelWorker):
                 token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
                 memory_pool_config=target_worker.model_runner.memory_pool_config,
             )
-            logger.info("EAGLE draft worker init: TpModelWorker super().__init__ complete")
+            logger.info(
+                "EAGLE draft worker init: TpModelWorker super().__init__ complete"
+            )
 
         if self.speculative_algorithm.is_eagle3():
             # most cases EAGLE3 models don't share lm_head
@@ -243,7 +247,9 @@ class EAGLEWorker(TpModelWorker):
             self.eagle_use_aux_hidden_state = eagle_config.get(
                 "use_aux_hidden_state", True
             )
-        logger.info("EAGLE draft worker init: initializing attention backend and cuda graphs")
+        logger.info(
+            "EAGLE draft worker init: initializing attention backend and cuda graphs"
+        )
         with self.draft_tp_context(
             self.draft_model_runner.tp_group
         ), speculative_moe_backend_context(), speculative_moe_a2a_backend_context():
@@ -437,9 +443,11 @@ class EAGLEWorker(TpModelWorker):
             logger.info(
                 "EAGLE target extend done: next_token_shape=%s hidden_states_shape=%s",
                 tuple(next_token_ids.shape),
-                None
-                if logits_output.hidden_states is None
-                else tuple(logits_output.hidden_states.shape),
+                (
+                    None
+                    if logits_output.hidden_states is None
+                    else tuple(logits_output.hidden_states.shape)
+                ),
             )
         return (
             logits_output,
@@ -995,7 +1003,9 @@ class EAGLEWorker(TpModelWorker):
                 tuple(next_token_ids.shape),
                 None if seq_lens_cpu is None else seq_lens_cpu.tolist(),
             )
-            positions_cpu = forward_batch.positions.detach().to(device="cpu", dtype=torch.int64)
+            positions_cpu = forward_batch.positions.detach().to(
+                device="cpu", dtype=torch.int64
+            )
             logger.info(
                 "EAGLE draft extend metadata: extend_prefix_lens_cpu=%s extend_seq_lens_cpu=%s positions_shape=%s positions_head=%s positions_tail=%s positions_min=%s positions_max=%s",
                 forward_batch.extend_prefix_lens_cpu,
@@ -1012,9 +1022,11 @@ class EAGLEWorker(TpModelWorker):
             logger.info(
                 "EAGLE draft extend forward done: logits_shape=%s hidden_states_shape=%s",
                 tuple(logits_output.next_token_logits.shape),
-                None
-                if logits_output.hidden_states is None
-                else tuple(logits_output.hidden_states.shape),
+                (
+                    None
+                    if logits_output.hidden_states is None
+                    else tuple(logits_output.hidden_states.shape)
+                ),
             )
         maybe_detect_nan(logits_output.next_token_logits, "draft_extend_for_prefill")
         assert isinstance(forward_batch.spec_info, EagleDraftInput)

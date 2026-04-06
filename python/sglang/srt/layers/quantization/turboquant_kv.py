@@ -14,17 +14,16 @@ Integration: Wraps around MLATokenToKVPool, intercepting set/get operations.
 from __future__ import annotations
 
 import math
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import torch
-import torch.nn as nn
 
 from sglang.srt.layers.quantization.turboquant_engine import (
     generate_rotation_matrix,
     get_codebook,
     pack_indices,
-    unpack_indices,
     pad_for_packing,
+    unpack_indices,
 )
 
 
@@ -62,7 +61,7 @@ class TurboQuantKVCompressor:
         self.use_qjl = use_qjl
         self.device = device
 
-        self.n_levels = 2 ** bit_width
+        self.n_levels = 2**bit_width
         self.n_groups = math.ceil(kv_lora_rank / self.group_size)
 
         centroids, boundaries = get_codebook(bit_width)
@@ -80,7 +79,9 @@ class TurboQuantKVCompressor:
         else:
             self.S = None
 
-    def _get_rotation(self, g_start: int, dim_override: Optional[int] = None) -> torch.Tensor:
+    def _get_rotation(
+        self, g_start: int, dim_override: Optional[int] = None
+    ) -> torch.Tensor:
         key = self.seed + g_start
         dim = dim_override
         if dim is None:
@@ -194,11 +195,15 @@ class TurboQuantKVCompressor:
             latent_mse[:, g_start:g_end] = L_hat_g * norms
 
         full_indices = torch.cat(all_indices, dim=1)
-        norms_out = torch.stack(all_norms, dim=1) if len(all_norms) > 1 else all_norms[0]
+        norms_out = (
+            torch.stack(all_norms, dim=1) if len(all_norms) > 1 else all_norms[0]
+        )
 
         padded = pad_for_packing(self.kv_lora_rank, self.bit_width)
         if padded > self.kv_lora_rank:
-            full_indices = torch.nn.functional.pad(full_indices, (0, padded - self.kv_lora_rank), value=0)
+            full_indices = torch.nn.functional.pad(
+                full_indices, (0, padded - self.kv_lora_rank), value=0
+            )
         packed = pack_indices(full_indices, self.bit_width)
 
         result = {
@@ -313,7 +318,12 @@ class TurboQuantKVCompressor:
         kmse_bytes = self.kv_lora_rank * 2 if self.use_qjl else 0
 
         compressed_bytes = (
-            latent_bits // 8 + rope_bytes + norm_bytes + qjl_bytes + rnorm_bytes + kmse_bytes
+            latent_bits // 8
+            + rope_bytes
+            + norm_bytes
+            + qjl_bytes
+            + rnorm_bytes
+            + kmse_bytes
         )
         original_bytes = (self.kv_lora_rank + self.qk_rope_head_dim) * 2
 

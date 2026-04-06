@@ -34,12 +34,10 @@ from sglang.srt.layers.quantization.turboquant_engine import (
     generate_rotation_matrix,
     get_codebook,
     pack_4bit,
-    turboquant_matmul_pytorch,
     unpack_4bit,
 )
 from sglang.srt.layers.quantization.turboquant_triton import (
     has_triton,
-    triton_fused_dual_pass_matmul,
     triton_fused_matmul,
 )
 
@@ -148,7 +146,7 @@ class TurboquantLinearMethod(LinearMethodBase):
         N = output_size_per_partition
         group_size = self.quant_config.group_size
         bit_width = self.quant_config.bit_width
-        n_levels = 2 ** bit_width
+        n_levels = 2**bit_width
         n_groups = math.ceil(K / group_size)
         packed_dim = math.ceil(K / 2)
 
@@ -174,7 +172,7 @@ class TurboquantLinearMethod(LinearMethodBase):
 
         # Pass 2 (residual) buffers
         if self.quant_config.has_residual:
-            r_levels = 2 ** self.quant_config.residual_bit_width
+            r_levels = 2**self.quant_config.residual_bit_width
             layer.register_buffer(
                 "tq_pass2_indices_packed",
                 torch.zeros(N, packed_dim, dtype=torch.uint8),

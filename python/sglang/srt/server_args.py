@@ -129,6 +129,7 @@ def _is_hip_aiter_available() -> bool:
 
     return importlib.util.find_spec("aiter") is not None
 
+
 SPECULATIVE_DRAFT_MODEL_QUANTIZATION_CHOICES = [*QUANTIZATION_CHOICES, "unquant"]
 
 ATTENTION_BACKEND_CHOICES = [
@@ -3891,14 +3892,23 @@ class ServerArgs:
             "--kv-cache-dtype",
             type=str,
             default=ServerArgs.kv_cache_dtype,
-            choices=["auto", "fp8_e5m2", "fp8_e4m3", "bf16", "bfloat16", "fp4_e2m1",
-                     "tq4", "tq3", "tq2"],
+            choices=[
+                "auto",
+                "fp8_e5m2",
+                "fp8_e4m3",
+                "bf16",
+                "bfloat16",
+                "fp4_e2m1",
+                "tq4",
+                "tq3",
+                "tq2",
+            ],
             help='Data type for kv cache storage. "auto" will use model data type. '
-                 '"fp8_e5m2"/"fp8_e4m3" for FP8 KV. "fp4_e2m1" for MXFP4 KV. '
-                 '"tq4"/"tq3"/"tq2" for TurboQuant 4/3/2-bit KV (data-oblivious, no calibration). '
-                 'TurboQuant advanced options via env vars: '
-                 'SGLANG_KV_CACHE_TURBOQUANT_ROPE=0 (disable RoPE quant for MLA), '
-                 'SGLANG_KV_CACHE_TURBOQUANT_QJL=1 (enable QJL unbiased inner product).',
+            '"fp8_e5m2"/"fp8_e4m3" for FP8 KV. "fp4_e2m1" for MXFP4 KV. '
+            '"tq4"/"tq3"/"tq2" for TurboQuant 4/3/2-bit KV (data-oblivious, no calibration). '
+            "TurboQuant advanced options via env vars: "
+            "SGLANG_KV_CACHE_TURBOQUANT_ROPE=0 (disable RoPE quant for MLA), "
+            "SGLANG_KV_CACHE_TURBOQUANT_QJL=1 (enable QJL unbiased inner product).",
         )
         parser.add_argument(
             "--enable-fp32-lm-head",

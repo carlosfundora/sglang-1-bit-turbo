@@ -34,8 +34,25 @@ def has_triton() -> bool:
 if _HAS_TRITON:
 
     @triton.jit
-    def _codebook_lookup(idx_val, cb0, cb1, cb2, cb3, cb4, cb5, cb6, cb7,
-                         cb8, cb9, cb10, cb11, cb12, cb13, cb14, cb15):
+    def _codebook_lookup(
+        idx_val,
+        cb0,
+        cb1,
+        cb2,
+        cb3,
+        cb4,
+        cb5,
+        cb6,
+        cb7,
+        cb8,
+        cb9,
+        cb10,
+        cb11,
+        cb12,
+        cb13,
+        cb14,
+        cb15,
+    ):
         """Manual 16-entry codebook lookup to avoid gather on AMD."""
         val = tl.where(idx_val == 0, cb0, cb1)
         val = tl.where(idx_val == 2, cb2, val)
@@ -113,15 +130,30 @@ if _HAS_TRITON:
             is_high = (rk % 2) == 1
             byte_off = rn[:, None] * PACKED_K + byte_col[None, :]
             w_mask = mask_n[:, None] & mask_k[None, :]
-            packed = tl.load(indices_ptr + byte_off, mask=w_mask, other=0).to(
-                tl.uint8
-            )
+            packed = tl.load(indices_ptr + byte_off, mask=w_mask, other=0).to(tl.uint8)
             lo = packed & 0x0F
             hi = (packed >> 4) & 0x0F
             idx = tl.where(is_high[None, :], hi, lo).to(tl.int32)
 
-            w_quant = _codebook_lookup(idx, cb0, cb1, cb2, cb3, cb4, cb5, cb6, cb7,
-                                       cb8, cb9, cb10, cb11, cb12, cb13, cb14, cb15)
+            w_quant = _codebook_lookup(
+                idx,
+                cb0,
+                cb1,
+                cb2,
+                cb3,
+                cb4,
+                cb5,
+                cb6,
+                cb7,
+                cb8,
+                cb9,
+                cb10,
+                cb11,
+                cb12,
+                cb13,
+                cb14,
+                cb15,
+            )
 
             acc += tl.dot(inp_tile, tl.trans(w_quant))
 
@@ -140,14 +172,22 @@ if _HAS_TRITON:
     def _load_codebook_16(cb_ptr):
         """Load all 16 codebook entries into registers."""
         return (
-            tl.load(cb_ptr + 0).to(tl.float32), tl.load(cb_ptr + 1).to(tl.float32),
-            tl.load(cb_ptr + 2).to(tl.float32), tl.load(cb_ptr + 3).to(tl.float32),
-            tl.load(cb_ptr + 4).to(tl.float32), tl.load(cb_ptr + 5).to(tl.float32),
-            tl.load(cb_ptr + 6).to(tl.float32), tl.load(cb_ptr + 7).to(tl.float32),
-            tl.load(cb_ptr + 8).to(tl.float32), tl.load(cb_ptr + 9).to(tl.float32),
-            tl.load(cb_ptr + 10).to(tl.float32), tl.load(cb_ptr + 11).to(tl.float32),
-            tl.load(cb_ptr + 12).to(tl.float32), tl.load(cb_ptr + 13).to(tl.float32),
-            tl.load(cb_ptr + 14).to(tl.float32), tl.load(cb_ptr + 15).to(tl.float32),
+            tl.load(cb_ptr + 0).to(tl.float32),
+            tl.load(cb_ptr + 1).to(tl.float32),
+            tl.load(cb_ptr + 2).to(tl.float32),
+            tl.load(cb_ptr + 3).to(tl.float32),
+            tl.load(cb_ptr + 4).to(tl.float32),
+            tl.load(cb_ptr + 5).to(tl.float32),
+            tl.load(cb_ptr + 6).to(tl.float32),
+            tl.load(cb_ptr + 7).to(tl.float32),
+            tl.load(cb_ptr + 8).to(tl.float32),
+            tl.load(cb_ptr + 9).to(tl.float32),
+            tl.load(cb_ptr + 10).to(tl.float32),
+            tl.load(cb_ptr + 11).to(tl.float32),
+            tl.load(cb_ptr + 12).to(tl.float32),
+            tl.load(cb_ptr + 13).to(tl.float32),
+            tl.load(cb_ptr + 14).to(tl.float32),
+            tl.load(cb_ptr + 15).to(tl.float32),
         )
 
     @triton.jit
@@ -179,10 +219,12 @@ if _HAS_TRITON:
         mask_n = rn < N
 
         # Preload both codebooks into registers
-        a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15 = \
+        a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15 = (
             _load_codebook_16(cb1_ptr)
-        b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15 = \
+        )
+        b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15 = (
             _load_codebook_16(cb2_ptr)
+        )
 
         acc1 = tl.zeros((BLOCK_B, BLOCK_N), dtype=tl.float32)
         acc2 = tl.zeros((BLOCK_B, BLOCK_N), dtype=tl.float32)
@@ -207,8 +249,9 @@ if _HAS_TRITON:
             lo1 = packed1 & 0x0F
             hi1 = (packed1 >> 4) & 0x0F
             i1 = tl.where(is_high[None, :], hi1, lo1).to(tl.int32)
-            w1 = _codebook_lookup(i1, a0, a1, a2, a3, a4, a5, a6, a7,
-                                  a8, a9, a10, a11, a12, a13, a14, a15)
+            w1 = _codebook_lookup(
+                i1, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15
+            )
             acc1 += tl.dot(inp_tile, tl.trans(w1))
 
             # Pass 2
@@ -217,8 +260,9 @@ if _HAS_TRITON:
             lo2 = packed2 & 0x0F
             hi2 = (packed2 >> 4) & 0x0F
             i2 = tl.where(is_high[None, :], hi2, lo2).to(tl.int32)
-            w2 = _codebook_lookup(i2, b0, b1, b2, b3, b4, b5, b6, b7,
-                                  b8, b9, b10, b11, b12, b13, b14, b15)
+            w2 = _codebook_lookup(
+                i2, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15
+            )
             acc2 += tl.dot(inp_tile, tl.trans(w2))
 
         n1 = tl.load(norms1_ptr + rn, mask=mask_n, other=1.0)

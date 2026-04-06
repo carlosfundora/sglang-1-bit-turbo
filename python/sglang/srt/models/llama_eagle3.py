@@ -41,7 +41,6 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTe
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.llama import LlamaDecoderLayer, LlamaForCausalLM, LlamaMLP
 
-
 logger = logging.getLogger(__name__)
 _is_hip = is_hip()
 
@@ -118,7 +117,10 @@ class LlamaModel(nn.Module):
         self.config = config
         if not hasattr(self.config, "parallel_drafting"):
             self.config.parallel_drafting = False
-        if not hasattr(self.config, "mask_token_id") or self.config.mask_token_id is None:
+        if (
+            not hasattr(self.config, "mask_token_id")
+            or self.config.mask_token_id is None
+        ):
             self.config.mask_token_id = (
                 self.config.pad_token_id if self.config.pad_token_id is not None else 0
             )
@@ -231,7 +233,9 @@ class LlamaModel(nn.Module):
             cpu_embeds[row_idx].copy_(token_row[0])
 
         cpu_embeds = cpu_embeds.reshape(*cpu_ids.shape, weight.shape[1])
-        return cpu_embeds.to(device=input_ids.device, dtype=weight.dtype, non_blocking=False)
+        return cpu_embeds.to(
+            device=input_ids.device, dtype=weight.dtype, non_blocking=False
+        )
 
     def forward(
         self,
@@ -252,9 +256,13 @@ class LlamaModel(nn.Module):
                 embeds = torch.cat(
                     [
                         embeds[:-1],
-                        self._lookup_embed_tokens_hip_safe(input_ids[-1].unsqueeze(0))
-                        if _is_hip
-                        else self.embed_tokens(input_ids[-1].unsqueeze(0)),
+                        (
+                            self._lookup_embed_tokens_hip_safe(
+                                input_ids[-1].unsqueeze(0)
+                            )
+                            if _is_hip
+                            else self.embed_tokens(input_ids[-1].unsqueeze(0))
+                        ),
                     ]
                 )
             if embeds is None:

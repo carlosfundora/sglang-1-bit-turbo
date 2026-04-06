@@ -24,6 +24,7 @@ except AttributeError:
 
 # ── Pure-PyTorch fallbacks for top-k / top-p renormalization ───────────
 
+
 def _top_k_renorm_probs_pytorch(
     probs: torch.Tensor, top_k: Union[torch.Tensor, int]
 ) -> torch.Tensor:
@@ -76,6 +77,7 @@ def _top_p_renorm_probs_pytorch(
 
 
 # ── C++ internal wrappers (call torch.ops directly) ───────────────────
+
 
 def _top_k_renorm_probs_internal(
     probs: torch.Tensor,
