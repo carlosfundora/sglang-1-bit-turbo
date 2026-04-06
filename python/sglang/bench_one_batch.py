@@ -319,7 +319,7 @@ def prepare_inputs_for_correctness_test(bench_args, tokenizer, custom_prompts):
         if custom_prompts
         else [
             "The capital of France is",
-            "The capital of the United Kindom is",
+            "The capital of the United Kingdom is",
             "Today is a sunny day and I like",
         ]
     )
