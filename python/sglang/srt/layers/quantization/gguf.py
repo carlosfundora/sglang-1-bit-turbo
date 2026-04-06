@@ -66,10 +66,7 @@ class GGUFConfig(QuantizationConfig):
     def __init__(self, modules_to_not_convert: list[str] | None = None) -> None:
         super().__init__()
         if _is_hip:
-            warnings.warn(
-                "HIP GGUF quantization support in this fork uses a compatibility "
-                "fallback path for unsupported kernels."
-            )
+            pass  # HIP GGUF runs via GPU kernels in sgl-kernel/python .so
         self.modules_to_not_convert = modules_to_not_convert or []
 
     def __repr__(self) -> str:
@@ -398,36 +395,12 @@ def apply_gguf_embedding(
         return torch.embedding(qweight, x)
     elif qweight_type in DEQUANT_TYPES:
         x_flat = x.flatten()
-        if _is_hip:
-            logger.warning_once(
-                "HIP GGUF embedding uses a CPU gather compatibility fallback in this fork."
-            )
-            out_dtype = dtype
-            if out_dtype is None:
-                if qweight_type in PRISM_Q1_TYPES:
-                    out_dtype = (
-                        torch.float16
-                        if os.environ.get(
-                            "SGLANG_PRISM_HIP_FORCE_INPUT_DTYPE", ""
-                        ).lower()
-                        in ("1", "true", "yes", "on")
-                        else torch.float32
-                    )
-                else:
-                    out_dtype = torch.float16
-            quant = torch.index_select(
-                _get_hip_quant_cpu_qweight(qweight),
-                dim=0,
-                index=x_flat.detach().to(device="cpu", dtype=torch.long),
-            )
-            dequant = _dequantize_gguf_weight(
-                quant, qweight_type, dtype=out_dtype
-            ).to(device=x.device, dtype=out_dtype, non_blocking=False)
-        else:
-            quant = torch.index_select(qweight, dim=0, index=x_flat)
-            dequant = _dequantize_gguf_weight(
-                quant, qweight_type, dtype=dtype or torch.float16
-            )
+        # index_select on GPU + GPU dequant works on ROCm; the CPU path was a
+        # workaround for an old sgl_kernel that lacked HIP dequant support.
+        quant = torch.index_select(qweight, dim=0, index=x_flat)
+        dequant = _dequantize_gguf_weight(
+            quant, qweight_type, dtype=dtype or torch.float16
+        )
         return dequant.view(*x.shape, hidden_size)
     else:
         raise NotImplementedError(

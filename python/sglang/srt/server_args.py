@@ -975,6 +975,21 @@ class ServerArgs:
             self.speculative_draft_model_quantization = (
                 self.quantization if draft_uses_gguf else None
             )
+
+        # Auto-detect draft load_format: if the main model is GGUF but the draft
+        # model path is a directory (safetensors checkpoint), default draft load
+        # format to "auto" so the GGUF loader is not incorrectly applied to it.
+        if (
+            self.speculative_draft_load_format is None
+            and self.speculative_draft_model_path is not None
+            and self.load_format == "gguf"
+            and not check_gguf_file(self.speculative_draft_model_path)
+        ):
+            import logging as _logging
+            _logging.getLogger(__name__).info(
+                "Draft model path is not a GGUF file; overriding speculative_draft_load_format to 'auto'."
+            )
+            self.speculative_draft_load_format = "auto"
         elif self.speculative_draft_model_quantization == "unquant":
             self.speculative_draft_model_quantization = None
 

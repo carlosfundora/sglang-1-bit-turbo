@@ -1553,6 +1553,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.seq_lens = seq_lens_tensor
         self.seq_lens_cpu = seq_lens_cpu
         self.extend_num_tokens = extend_num_tokens
+        logger.debug(
+            "prepare_for_extend: bs=%d prefix_lens=%s extend_lens=%s seq_lens=%s",
+            len(reqs), prefix_lens, extend_lens, seq_lens,
+        )
 
         # Allocate memory
         out_cache_loc, req_pool_indices_tensor, req_pool_indices = alloc_for_extend(

@@ -72,6 +72,9 @@ from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
 
 _is_hip = is_hip()
 _is_npu = is_npu()
+# Set HIP_DIAG_ENABLE=1 to enable verbose GPU-sync diagnostic logging (dev only).
+# Off by default — .tolist() calls force GPU stream sync on every forward pass.
+_hip_diag = _is_hip and os.environ.get("HIP_DIAG_ENABLE", "0") == "1"
 
 if is_cuda():
     from sgl_kernel import segment_packbits  # noqa: F401
@@ -420,9 +423,19 @@ class EAGLEWorker(TpModelWorker):
         """
         # Forward with the target model and get hidden states.
         # We need the full hidden states to prefill the KV cache of the draft model.
+        if _hip_diag:
+            logger.info(
+                "EAGLE target extend entry: batch_size=%s seq_lens_sum=%s "
+                "extend_lens=%s prefix_lens=%s forward_mode=%s",
+                batch.batch_size(),
+                batch.seq_lens_sum,
+                batch.extend_lens,
+                batch.prefix_lens,
+                batch.forward_mode,
+            )
         model_worker_batch = batch.get_model_worker_batch()
         model_worker_batch.capture_hidden_mode = CaptureHiddenMode.FULL
-        if _is_hip:
+        if _hip_diag:
             logger.info(
                 "EAGLE target extend start: batch_size=%s seq_lens_sum=%s",
                 batch.batch_size(),
@@ -433,7 +446,7 @@ class EAGLEWorker(TpModelWorker):
             batch_result.logits_output,
             batch_result.next_token_ids,
         )
-        if _is_hip:
+        if _hip_diag:
             logger.info(
                 "EAGLE target extend done: next_token_shape=%s hidden_states_shape=%s",
                 tuple(next_token_ids.shape),
@@ -598,10 +611,22 @@ class EAGLEWorker(TpModelWorker):
 
     def draft(self, batch: ScheduleBatch):
         # Parse args
+        if _hip_diag:
+            logger.info(
+                "EAGLE draft ENTRY: req_pool_indices=%s dtype=%s device=%s",
+                batch.req_pool_indices.tolist() if batch.req_pool_indices is not None and batch.req_pool_indices.numel() > 0 else batch.req_pool_indices,
+                batch.req_pool_indices.dtype if batch.req_pool_indices is not None else None,
+                batch.req_pool_indices.device if batch.req_pool_indices is not None else None,
+            )
         if batch.forward_mode.is_idle():
             self._draft_preprocess_idle(batch)
         else:
             self._draft_preprocess_decode(batch)
+        if _hip_diag:
+            logger.info(
+                "EAGLE draft POST-PREPROCESS: req_pool_indices=%s",
+                batch.req_pool_indices.tolist() if batch.req_pool_indices is not None and batch.req_pool_indices.numel() > 0 else batch.req_pool_indices,
+            )
 
         spec_info = batch.spec_info
         assert isinstance(spec_info, EagleDraftInput)
@@ -764,8 +789,20 @@ class EAGLEWorker(TpModelWorker):
         pass
 
     def verify(self, batch: ScheduleBatch, spec_info: EagleVerifyInput):
+        if _hip_diag:
+            logger.info(
+                "EAGLE verify ENTRY: req_pool_indices=%s seq_lens=%s",
+                batch.req_pool_indices.tolist() if batch.req_pool_indices is not None and batch.req_pool_indices.numel() > 0 else batch.req_pool_indices,
+                batch.seq_lens.tolist() if batch.seq_lens is not None and batch.seq_lens.numel() > 0 else None,
+            )
         seq_lens_pre_verify = batch.seq_lens.clone()
         spec_info.prepare_for_verify(batch, self.page_size)
+        if _hip_diag:
+            logger.info(
+                "EAGLE verify POST-PREPARE: req_pool_indices=%s seq_lens=%s",
+                batch.req_pool_indices.tolist() if batch.req_pool_indices is not None and batch.req_pool_indices.numel() > 0 else batch.req_pool_indices,
+                batch.seq_lens.tolist() if batch.seq_lens is not None and batch.seq_lens.numel() > 0 else None,
+            )
         spec_info.num_tokens_per_req = self.speculative_num_steps + 1
         batch.return_hidden_states = False
         batch.forward_mode = (
@@ -987,7 +1024,7 @@ class EAGLEWorker(TpModelWorker):
                 dim=0,
             ).to(forward_batch.input_ids.device, non_blocking=False)
             forward_batch.positions = recomputed_positions
-        if _is_hip:
+        if _hip_diag:
             logger.info(
                 "EAGLE draft extend start: forward_mode=%s hidden_states_shape=%s next_token_shape=%s seq_lens_cpu=%s",
                 forward_batch.forward_mode,
@@ -1007,7 +1044,7 @@ class EAGLEWorker(TpModelWorker):
                 None if positions_cpu.numel() == 0 else int(positions_cpu.max().item()),
             )
         logits_output = self.draft_model_runner.forward(forward_batch).logits_output
-        if _is_hip:
+        if _hip_diag:
             torch.cuda.synchronize()
             logger.info(
                 "EAGLE draft extend forward done: logits_shape=%s hidden_states_shape=%s",
@@ -1029,6 +1066,12 @@ class EAGLEWorker(TpModelWorker):
         req_pool_indices_backup = batch.req_pool_indices
         accept_length_backup = batch.spec_info.accept_length
         return_logprob_backup = batch.return_logprob
+        # extend_lens/prefix_lens are modified by prepare_extend_after_decode;
+        # restore them so stale draft-extend values don't leak into the next
+        # TARGET_VERIFY or EXTEND batch.
+        extend_lens_backup = list(batch.extend_lens) if batch.extend_lens is not None else None
+        extend_num_tokens_backup = batch.extend_num_tokens
+        prefix_lens_backup = list(batch.prefix_lens) if batch.prefix_lens is not None else None
 
         input_is_idle = batch.forward_mode.is_idle()
 
@@ -1112,37 +1155,27 @@ class EAGLEWorker(TpModelWorker):
         batch.req_pool_indices = req_pool_indices_backup
         batch.spec_info.accept_length = accept_length_backup
         batch.return_logprob = return_logprob_backup
+        # Restore extend_lens/prefix_lens to prevent stale draft-extend values from
+        # leaking into the next EXTEND or TARGET_VERIFY batch build.
+        if extend_lens_backup is not None:
+            batch.extend_lens = extend_lens_backup
+            batch.extend_num_tokens = extend_num_tokens_backup
+        if prefix_lens_backup is not None:
+            batch.prefix_lens = prefix_lens_backup
 
     def capture_for_decode(
         self, logits_output: LogitsProcessorOutput, draft_input: EagleDraftInput
     ):
         logits = logits_output.next_token_logits
-        if _is_hip:
-            logger.info(
-                "EAGLE capture_for_decode start: logits_shape=%s logits_dtype=%s",
-                tuple(logits.shape),
-                logits.dtype,
-            )
-        if _is_hip:
-            cpu_logits = logits.detach().to(device="cpu", dtype=torch.float32)
-            cpu_probs = torch.softmax(cpu_logits, dim=-1)
-            cpu_topk_p, cpu_topk_index = torch.topk(cpu_probs, self.topk, dim=-1)
-            draft_input.topk_p = cpu_topk_p.to(device=logits.device, dtype=logits.dtype)
-            draft_input.topk_index = cpu_topk_index.to(
-                device=logits.device, dtype=torch.int32
-            )
-        else:
-            probs = torch.softmax(logits, dim=-1)
-            draft_input.topk_p, draft_input.topk_index = fast_topk(
-                probs, self.topk, dim=-1
-            )
+        # Always run softmax+topk on GPU. The _is_hip CPU path was a workaround
+        # for a broken sgl_kernel wheel; fast_topk falls back to torch.topk which
+        # runs fine on ROCm. Copying 151K logits to CPU every decode step was the
+        # primary throughput bottleneck (~2s/token on gfx1031).
+        probs = torch.softmax(logits, dim=-1)
+        draft_input.topk_p, draft_input.topk_index = fast_topk(
+            probs, self.topk, dim=-1
+        )
         draft_input.hidden_states = logits_output.hidden_states
-        if _is_hip:
-            logger.info(
-                "EAGLE capture_for_decode done: topk_p_shape=%s topk_index_shape=%s",
-                tuple(draft_input.topk_p.shape),
-                tuple(draft_input.topk_index.shape),
-            )
 
     def update_weights_from_tensor(self, recv_req: UpdateWeightsFromTensorReqInput):
         monkey_patch_torch_reductions()

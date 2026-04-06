@@ -821,6 +821,20 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
         batch.input_ids = self.verified_id
         batch.extend_lens = [x + 1 for x in batch.spec_info.accept_length_cpu]
         batch.extend_num_tokens = sum(batch.extend_lens)
+        # Fix: set prefix_lens for the DRAFT_EXTEND batch.  Without this,
+        # get_model_worker_batch() passes the stale prefill prefix_lens (e.g. [0])
+        # as extend_prefix_lens, giving the draft model positions starting at 0
+        # instead of the current sequence position → garbage draft tokens (8% acceptance).
+        _sld_cpu = batch.spec_info.seq_lens_for_draft_extend_cpu
+        if hasattr(_sld_cpu, "tolist"):
+            _sld_list = _sld_cpu.tolist()
+        else:
+            _sld_list = list(_sld_cpu)
+        batch.prefix_lens = [int(s) - int(e) for s, e in zip(_sld_list, batch.extend_lens)]
+        logger.debug(
+            "prepare_extend_after_decode: sld_list=%s extend_lens=%s -> prefix_lens=%s",
+            _sld_list, batch.extend_lens, batch.prefix_lens,
+        )
         batch.seq_lens = batch.spec_info.seq_lens_for_draft_extend
         batch.seq_lens_cpu = batch.spec_info.seq_lens_for_draft_extend_cpu
         batch.req_pool_indices = batch.spec_info.req_pool_indices_for_draft_extend

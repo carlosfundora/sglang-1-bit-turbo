@@ -137,8 +137,6 @@ class LlamaModel(nn.Module):
             config.hidden_size,
             prefix=add_prefix("embed_tokens", prefix),
         )
-        self._embed_tokens_cpu = None
-
         if hasattr(config, "target_hidden_size"):
             self.hidden_size_in = config.target_hidden_size
         else:
@@ -198,40 +196,11 @@ class LlamaModel(nn.Module):
             )
             input_ids = torch.cat([last_token_ids, mask_token_ids], dim=1)
 
-        embeds = (
-            self._lookup_embed_tokens_hip_safe(input_ids)
-            if _is_hip
-            else self.embed_tokens(input_ids)
-        )
+        # torch.nn.Embedding works fine on ROCm; CPU row-by-row loop was a
+        # workaround for a stale env and caused catastrophic throughput (~0.5 t/s).
+        embeds = self.embed_tokens(input_ids)
         projected_hidden_states = self.fc(all_hidden_states.to(self.fc.weight.dtype))
         return embeds, projected_hidden_states
-
-    def _lookup_embed_tokens_hip_safe(self, input_ids: torch.Tensor) -> torch.Tensor:
-        weight = self.embed_tokens.weight.detach()
-        cpu_ids = input_ids.detach().to(device="cpu", dtype=torch.long)
-
-        if self._embed_tokens_cpu is None:
-            logger.info(
-                "LlamaEagle3 HIP-safe draft embedding lookup enabled; using row-wise CPU copies"
-            )
-            self._embed_tokens_cpu = True
-
-        flat_ids = cpu_ids.reshape(-1)
-        cpu_embeds = torch.empty(
-            (flat_ids.numel(), weight.shape[1]),
-            dtype=weight.dtype,
-            device="cpu",
-        )
-        for row_idx, token_id in enumerate(flat_ids.tolist()):
-            token_row = weight.narrow(0, int(token_id), 1).to(
-                device="cpu",
-                dtype=weight.dtype,
-                non_blocking=False,
-            )
-            cpu_embeds[row_idx].copy_(token_row[0])
-
-        cpu_embeds = cpu_embeds.reshape(*cpu_ids.shape, weight.shape[1])
-        return cpu_embeds.to(device=input_ids.device, dtype=weight.dtype, non_blocking=False)
 
     def forward(
         self,
@@ -252,17 +221,11 @@ class LlamaModel(nn.Module):
                 embeds = torch.cat(
                     [
                         embeds[:-1],
-                        self._lookup_embed_tokens_hip_safe(input_ids[-1].unsqueeze(0))
-                        if _is_hip
-                        else self.embed_tokens(input_ids[-1].unsqueeze(0)),
+                        self.embed_tokens(input_ids[-1].unsqueeze(0)),
                     ]
                 )
             if embeds is None:
-                embeds = (
-                    self._lookup_embed_tokens_hip_safe(input_ids)
-                    if _is_hip
-                    else self.embed_tokens(input_ids)
-                )
+                embeds = self.embed_tokens(input_ids)
         else:
             embeds = input_embeds
 

@@ -36,18 +36,9 @@ def _should_use_pytorch_tree_ops() -> bool:
     # Auto-detect: only needed on HIP (ROCm)
     if not _is_hip:
         return False
-    try:
-        if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
-            return False
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        arch = getattr(props, "gcnArchName", "")
-        if arch.startswith("gfx103"):
-            logger.info(
-                "Detected %s — using PyTorch fallback for EAGLE tree ops", arch
-            )
-            return True
-    except Exception:
-        pass
+    # gfx103x auto-fallback removed: build_tree_kernel_efficient compiles and
+    # runs correctly on gfx1030/1031/1032 with the HIP .so in sgl-kernel/python.
+    # Keep the env-var override so devs can still force PyTorch if needed.
     return False
 
 
