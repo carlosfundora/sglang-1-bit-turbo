@@ -548,6 +548,27 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         if ret.forward_mode.is_decode() or ret.forward_mode.is_target_verify():
             if ret.positions is None:
                 ret.positions = clamp_position(batch.seq_lens)
+            # TARGET_VERIFY routes through forward_extend (is_extend() returns True)
+            # but the branch above skips extend_prefix_lens/extend_seq_lens setup.
+            # Synthesize them so torch_native attention backend works correctly.
+            if ret.forward_mode.is_target_verify() and ret.extend_prefix_lens is None:
+                bs = len(batch.seq_lens)
+                spec = batch.spec_info
+                draft_num = getattr(spec, "draft_token_num", 0)
+                if draft_num > 0:
+                    # seq_lens is the original pre-draft length. For torch_native
+                    # extend attention, prefix = original seq_lens, extend = draft_num,
+                    # and total KV length = seq_lens + draft_num.
+                    # Create tensors directly on GPU to avoid async H2D race.
+                    ret.extend_prefix_lens = batch.seq_lens.to(torch.int32)
+                    ret.extend_seq_lens = torch.full(
+                        (bs,), draft_num, dtype=torch.int32, device=device
+                    )
+                    ret.extend_prefix_lens_cpu = ret.extend_prefix_lens.tolist()
+                    ret.extend_seq_lens_cpu = [draft_num] * bs
+                    ret.extend_num_tokens = bs * draft_num
+                    # Update seq_lens to full KV length for attention
+                    ret.seq_lens = ret.seq_lens + draft_num
         else:
             assert isinstance(batch.extend_seq_lens, list)
             assert isinstance(batch.extend_prefix_lens, list)

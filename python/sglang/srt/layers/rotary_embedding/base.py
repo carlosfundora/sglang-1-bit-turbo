@@ -190,7 +190,18 @@ class RotaryEmbedding(MultiPlatformOp):
 
     def _index_cos_sin_cache(self, positions: torch.Tensor) -> torch.Tensor:
         positions = positions.flatten()
-        if positions.numel() > 0:
+
+        # During CUDA/HIP graph capture, CPU sync is illegal.  Use the GPU
+        # index_select path unconditionally and skip the dynamic cache resize
+        # (the cache was already sized during the eager warm-up pass).
+        capturing = False
+        if _is_hip or torch.cuda.is_available():
+            try:
+                capturing = torch.cuda.is_current_stream_capturing()
+            except Exception:
+                pass
+
+        if not capturing and positions.numel() > 0:
             cpu_pos = positions.detach().to(device="cpu", dtype=torch.long)
             pos_min = int(cpu_pos.min().item())
             pos_max = int(cpu_pos.max().item())
@@ -210,7 +221,8 @@ class RotaryEmbedding(MultiPlatformOp):
                 positions = positions.clamp(min=0, max=hard_limit - 1)
                 pos_max = hard_limit - 1
             self._ensure_cos_sin_cache_length(pos_max)
-        if not _is_hip:
+
+        if not _is_hip or capturing:
             return self.cos_sin_cache.index_select(0, positions)
 
         cpu_positions = positions.detach().to(device="cpu", dtype=torch.long)

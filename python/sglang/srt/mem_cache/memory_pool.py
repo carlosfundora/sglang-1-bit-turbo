@@ -173,7 +173,8 @@ class ReqToTokenPool:
             if r.req_pool_idx is None:
                 r.req_pool_idx = select_index[offset]
                 offset += 1
-        return [r.req_pool_idx for r in reqs]
+        result = [r.req_pool_idx for r in reqs]
+        return result
 
     def free(self, req: Req):
         assert req.req_pool_idx is not None, "request must have req_pool_idx"

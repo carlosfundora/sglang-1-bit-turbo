@@ -123,7 +123,7 @@ class NgramVerifyInput(SpecInput):
             end_offset,
             batch.out_cache_loc,
             batch.req_to_token_pool.req_to_token.shape[1],
-            triton.next_power_of_2(bs),
+            next_power_of_2(bs),
         )
 
     def generate_attn_arg_prefill(
@@ -281,7 +281,7 @@ class NgramVerifyInput(SpecInput):
             batch.seq_lens + self.accept_length + 1,
             batch.out_cache_loc,
             batch.req_to_token_pool.req_to_token.shape[1],
-            triton.next_power_of_2(bs),
+            next_power_of_2(bs),
         )
 
     def _greedy_verify(
