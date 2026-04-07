@@ -21,6 +21,9 @@ class SpeculativeAlgorithm(Enum):
     STANDALONE = auto()
     NGRAM = auto()
     P_CASCADE = auto()
+    MEDUSA = auto()
+    SAGUARO = auto()  # wrapper, not standalone — wraps any other algorithm
+    CHIMERA = auto()  # CHIMERA-SD: fused P-EAGLE + Hydra + DyTC + n-gram + SSD
     NONE = auto()
 
     @classmethod
@@ -61,8 +64,25 @@ class SpeculativeAlgorithm(Enum):
     def is_p_cascade(self) -> bool:
         return self == SpeculativeAlgorithm.P_CASCADE
 
+    def is_medusa(self) -> bool:
+        return self == SpeculativeAlgorithm.MEDUSA
+
+    def is_chimera(self) -> bool:
+        return self == SpeculativeAlgorithm.CHIMERA
+
     def supports_spec_v2(self) -> bool:
         return self.is_eagle() or self.is_standalone()
+
+    def needs_draft_model(self) -> bool:
+        """Whether the algorithm requires --speculative-draft-model-path."""
+        return self in {
+            SpeculativeAlgorithm.EAGLE,
+            SpeculativeAlgorithm.EAGLE3,
+            SpeculativeAlgorithm.P_EAGLE,
+            SpeculativeAlgorithm.STANDALONE,
+            SpeculativeAlgorithm.P_CASCADE,
+            SpeculativeAlgorithm.CHIMERA,
+        }
 
     def create_worker(
         self, server_args: ServerArgs
@@ -128,6 +148,26 @@ class SpeculativeAlgorithm(Enum):
 
             return NGRAMWorker
 
+        elif self.is_medusa():
+            if enable_overlap:
+                raise ValueError(
+                    "MEDUSA does not support overlap scheduling yet. "
+                    "Use --disable-overlap-schedule."
+                )
+            from sglang.srt.speculative.medusa_worker import MedusaWorker
+
+            return MedusaWorker
+
+        elif self.is_chimera():
+            if enable_overlap:
+                raise ValueError(
+                    "CHIMERA does not support overlap scheduling yet. "
+                    "Use --disable-overlap-schedule."
+                )
+            from sglang.srt.speculative.chimera_worker import ChimeraWorker
+
+            return ChimeraWorker
+
         raise ValueError("Unreachable code path in create_worker.")
 
 
@@ -137,6 +177,7 @@ class SpecInputType(IntEnum):
     EAGLE_DRAFT = auto()
     EAGLE_VERIFY = auto()
     NGRAM_VERIFY = auto()
+    MEDUSA_VERIFY = auto()  # reuses NGRAM tree infrastructure
 
 
 class SpecInput(ABC):

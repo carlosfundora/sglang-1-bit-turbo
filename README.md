@@ -150,6 +150,85 @@ This fork is based on [SGLang](https://github.com/sgl-project/sglang), a high-pe
 - [SGLang GitHub](https://github.com/sgl-project/sglang)
 - [SGLang Slack](https://slack.sglang.io/)
 
+---
+
+## Speculative Decoding Suite — CLI Reference
+
+### Supported Algorithms
+
+| Algorithm | Flag | Description | Needs Draft Model |
+|-----------|------|-------------|-------------------|
+| `EAGLE3` | `--speculative-algorithm EAGLE3` | 3-layer feature extraction + 1-layer decoder | ✅ |
+| `P_EAGLE` | `--speculative-algorithm P_EAGLE` | Parallel EAGLE3 via mask_hidden | ✅ |
+| `NGRAM` | `--speculative-algorithm NGRAM` | Statistical trie-based, zero extra compute | ❌ |
+| `P_CASCADE` | `--speculative-algorithm P_CASCADE` | Adaptive DyTC router: L1=EAGLE, L2=reduced, L3=ngram | ✅ |
+| `MEDUSA` | `--speculative-algorithm MEDUSA` | 2-6 parallel MLP draft heads | ❌ (needs `--medusa-model-path`) |
+| `CHIMERA` | `--speculative-algorithm CHIMERA` | Fused P-EAGLE + Hydra + DyTC + SSD (experimental) | ✅ |
+
+### Common Flags
+
+```
+--speculative-draft-model-path PATH    Path to EAGLE3/P_EAGLE draft model weights
+--speculative-eagle-topk K             Top-k candidates per draft step (default: auto)
+--speculative-num-steps N              Max draft steps per round (default: auto)
+--speculative-num-draft-tokens N       Max total draft tokens (default: auto)
+--disable-overlap-schedule             Required for P_CASCADE, MEDUSA, CHIMERA
+```
+
+### Algorithm-Specific Flags
+
+```
+# NGRAM
+--speculative-ngram-max-trie-depth 4
+--speculative-ngram-match-type BFS     # or PROB
+
+# MEDUSA
+--medusa-model-path PATH               Path to trained Medusa head weights
+--medusa-num-heads 5                   Number of parallel draft heads
+--medusa-topk 1                        Top-k per head
+
+# SAGUARO (wraps any algorithm)
+--ssd-enable                           Enable LRU draft caching
+
+# CHIMERA (experimental)
+--chimera-num-steps 6
+--chimera-ssd-enable
+--chimera-level 1|2|3                  Force cascade level (omit for dynamic)
+```
+
+### Quick-Start Examples
+
+```bash
+# EAGLE3 with TurboQuant KV cache
+python -m sglang.launch_server \
+  --model-path Bonsai-4B.gguf \
+  --speculative-algorithm EAGLE3 \
+  --speculative-draft-model-path Bonsai-4B-EAGLE3/ \
+  --speculative-eagle-topk 10 --speculative-num-steps 6 \
+  --kv-cache-dtype tq4 --tp 1 --port 30000 --trust-remote-code
+
+# P_CASCADE (adaptive routing, best throughput)
+python -m sglang.launch_server \
+  --model-path Bonsai-4B.gguf \
+  --speculative-algorithm P_CASCADE \
+  --speculative-draft-model-path Bonsai-4B-EAGLE3/ \
+  --kv-cache-dtype tq4 --tp 1 --port 30000 --trust-remote-code
+
+# NGRAM (zero-compute baseline)
+python -m sglang.launch_server \
+  --model-path Bonsai-4B.gguf \
+  --speculative-algorithm NGRAM \
+  --tp 1 --port 30000 --trust-remote-code
+```
+
+### Environment Variables (AMD ROCm)
+
+```bash
+export HSA_OVERRIDE_GFX_VERSION=10.3.0
+export PYTORCH_ROCM_ARCH=gfx1030
+export SGLANG_EAGLE_SKIP_TARGET_EMBED_SHARE=1
+```
+
 ## Acknowledgments
 This fork builds on the work of:
 - [SGLang / LMSYS](https://github.com/sgl-project/sglang) — the upstream inference engine

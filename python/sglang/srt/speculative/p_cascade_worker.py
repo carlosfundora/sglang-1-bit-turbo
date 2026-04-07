@@ -72,16 +72,15 @@ class PCascadeRouter:
     ) -> CascadeDecision:
         self.total_decisions += 1
 
-        # --- L3 is disabled for now (requires draft state recovery) ---
         # L3: high repetition → n-gram will do well
-        # if repetition_score > self.l3_repetition_threshold:
-        #     self.level_counts[3] += 1
-        #     return CascadeDecision(3, "high repetition")
+        if repetition_score > self.l3_repetition_threshold:
+            self.level_counts[3] += 1
+            return CascadeDecision(3, "high repetition")
 
         # L3: acceptance is very poor → neural draft is wasting compute
-        # if self.ema_accept < self.l3_accept_threshold:
-        #     self.level_counts[3] += 1
-        #     return CascadeDecision(3, "very low acceptance")
+        if self.ema_accept < self.l3_accept_threshold:
+            self.level_counts[3] += 1
+            return CascadeDecision(3, "very low acceptance")
 
         # L2: acceptance is moderate or context is very long
         if (
@@ -184,7 +183,16 @@ class PCascadeWorker:
         self._log_interval = 50
         self._forward_count = 0
 
-        logger.info("PCascadeWorker initialised (L1=EAGLE, L2=reduced, L3=ngram)")
+        # ---- Draft state snapshots for L3 recovery ----
+        self._saved_eagle_kv_pos: Optional[int] = None
+
+        # ---- Optional Saguaro wrapper flag ----
+        self._ssd_enabled = getattr(server_args, "ssd_enable", False)
+
+        logger.info(
+            "PCascadeWorker initialised (L1=EAGLE, L2=reduced, L3=ngram, ssd=%s)",
+            self._ssd_enabled,
+        )
 
     def _detect_eagle_variant(self, server_args: ServerArgs) -> str:
         """Detect whether to use EAGLE3 or P_EAGLE for the internal worker."""
@@ -298,8 +306,10 @@ class PCascadeWorker:
         self.current_level = decision.level
 
         if decision.level == 3:
-            # L3: pure n-gram verification (skip neural draft)
+            # L3: pure n-gram verification — snapshot/restore EAGLE KV state
+            self._save_draft_state()
             result = self._forward_ngram(batch)
+            self._restore_draft_state()
         else:
             # L1 or L2: delegate to EAGLE worker
             # For L2, we could reduce effective steps, but for now both
@@ -474,6 +484,40 @@ class PCascadeWorker:
                 num_accepted_tokens=0,
                 can_run_cuda_graph=batch_result.can_run_cuda_graph,
             )
+
+    # ---- Draft state snapshot/restore for L3 recovery ----
+
+    def _save_draft_state(self):
+        """Snapshot EAGLE KV cache position before an n-gram-only round.
+
+        After L3 (n-gram) runs, the EAGLE decoder's KV state hasn't been
+        updated (n-gram bypasses the neural draft entirely).  When the router
+        switches BACK to L1/L2, we need the EAGLE KV to be at the correct
+        position.  Save the position here, restore after L3.
+        """
+        try:
+            ew = self.eagle_worker
+            if hasattr(ew, "model_runner") and hasattr(ew.model_runner, "kv_cache"):
+                kv = ew.model_runner.kv_cache
+                if hasattr(kv, "cur_length"):
+                    self._saved_eagle_kv_pos = kv.cur_length
+        except Exception:
+            self._saved_eagle_kv_pos = None
+
+    def _restore_draft_state(self):
+        """Restore EAGLE KV cache position after an n-gram-only round."""
+        if self._saved_eagle_kv_pos is None:
+            return
+        try:
+            ew = self.eagle_worker
+            if hasattr(ew, "model_runner") and hasattr(ew.model_runner, "kv_cache"):
+                kv = ew.model_runner.kv_cache
+                if hasattr(kv, "cur_length"):
+                    kv.cur_length = self._saved_eagle_kv_pos
+        except Exception:
+            pass
+        finally:
+            self._saved_eagle_kv_pos = None
 
     # ---- Helpers ----
 

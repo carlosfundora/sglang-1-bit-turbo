@@ -520,6 +520,19 @@ class ServerArgs:
     speculative_ngram_capacity: int = 10 * 1000 * 1000
     enable_multi_layer_eagle: bool = False
 
+    # Speculative decoding — Medusa heads
+    medusa_model_path: Optional[str] = None
+    medusa_num_heads: int = 5
+    medusa_topk: int = 1
+
+    # Speculative decoding — SAGUARO (SSD) async wrapper
+    ssd_enable: bool = False
+
+    # Speculative decoding — CHIMERA-SD (stub)
+    chimera_num_steps: int = 6
+    chimera_ssd_enable: bool = False
+    chimera_level: Optional[int] = None  # None = dynamic routing
+
     # Expert parallelism
     ep_size: int = 1
     moe_a2a_backend: Literal[
@@ -3164,6 +3177,51 @@ class ServerArgs:
                     "Currently ngram speculative decoding does not support dp attention."
                 )
 
+        if self.speculative_algorithm == "MEDUSA":
+            if self.medusa_model_path is None:
+                raise ValueError(
+                    "MEDUSA algorithm requires --medusa-model-path pointing to "
+                    "trained Medusa head weights."
+                )
+            self.disable_overlap_schedule = True
+            self.enable_mixed_chunk = False
+            if self.max_running_requests is None:
+                self.max_running_requests = 48
+            if self.speculative_num_draft_tokens is None:
+                self.speculative_num_draft_tokens = self.medusa_num_heads
+            if self.speculative_num_steps is None:
+                self.speculative_num_steps = self.medusa_num_heads
+            if self.speculative_eagle_topk is None:
+                self.speculative_eagle_topk = self.medusa_topk
+            logger.info(
+                "MEDUSA: %d heads, top-k=%d, model=%s",
+                self.medusa_num_heads,
+                self.medusa_topk,
+                self.medusa_model_path,
+            )
+
+        if self.speculative_algorithm == "CHIMERA":
+            self._validate_eagle3_draft_model(require_parallel_drafting=False)
+            self.disable_overlap_schedule = True
+            self.enable_mixed_chunk = False
+            if self.max_running_requests is None:
+                self.max_running_requests = 48
+            if self.speculative_num_steps is None:
+                self.speculative_num_steps = self.chimera_num_steps
+            logger.info(
+                "CHIMERA-SD: steps=%d, ssd=%s, level=%s",
+                self.chimera_num_steps,
+                self.chimera_ssd_enable,
+                self.chimera_level or "dynamic",
+            )
+
+        # SAGUARO wraps any algorithm — validate inner algorithm is set
+        if self.ssd_enable and self.speculative_algorithm is None:
+            raise ValueError(
+                "--ssd-enable requires a --speculative-algorithm to wrap "
+                "(e.g., EAGLE3, P_CASCADE, MEDUSA)."
+            )
+
     def _validate_eagle3_draft_model(self, require_parallel_drafting: bool = False):
         if self.speculative_draft_model_path is None:
             raise ValueError(
@@ -4954,6 +5012,52 @@ class ServerArgs:
             "--enable-multi-layer-eagle",
             action="store_true",
             help="Enable multi-layer Eagle speculative decoding.",
+        )
+
+        # Medusa speculative decoding
+        parser.add_argument(
+            "--medusa-model-path",
+            type=str,
+            default=None,
+            help="Path to trained Medusa head weights (safetensors or .pt).",
+        )
+        parser.add_argument(
+            "--medusa-num-heads",
+            type=int,
+            default=ServerArgs.medusa_num_heads,
+            help="Number of Medusa parallel draft heads (default: 5).",
+        )
+        parser.add_argument(
+            "--medusa-topk",
+            type=int,
+            default=ServerArgs.medusa_topk,
+            help="Top-k candidates per Medusa head (default: 1).",
+        )
+
+        # SAGUARO (SSD) async wrapper
+        parser.add_argument(
+            "--ssd-enable",
+            action="store_true",
+            help="Enable SAGUARO speculative-speculative async caching around any draft algorithm.",
+        )
+
+        # CHIMERA-SD (experimental)
+        parser.add_argument(
+            "--chimera-num-steps",
+            type=int,
+            default=ServerArgs.chimera_num_steps,
+            help="Max draft steps for CHIMERA-SD (default: 6).",
+        )
+        parser.add_argument(
+            "--chimera-ssd-enable",
+            action="store_true",
+            help="Enable Saguaro async layer inside CHIMERA-SD.",
+        )
+        parser.add_argument(
+            "--chimera-level",
+            type=int,
+            default=None,
+            help="Force CHIMERA cascade level (1-3). None = dynamic routing.",
         )
 
         # Expert parallelism
