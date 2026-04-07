@@ -64,7 +64,7 @@ pre-commit run --all-files
 
 ## Documentation Build, Deployment, and CI
 
-The SGLang documentation pipeline is based on **Sphinx** and supports rendering Jupyter notebooks (`.ipynb`) into HTML/Markdown for web display. Detailed logits can be found in the [Makefile](./Makefile).
+The SGLang documentation pipeline is based on **Sphinx** and supports rendering Jupyter notebooks (`.ipynb`) into HTML/Markdown for web display. Detailed logic can be found in the [Makefile](./Makefile).
 
 ### Notebook Execution (`make compile`)
 
