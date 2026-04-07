@@ -1,7 +1,7 @@
 # TurboQuant + EAGLE3/P-EAGLE Speculative Decoding Guide
 
 **Target hardware**: AMD RDNA3 (gfx1030/gfx1031, e.g. RX 6700 XT 12 GB)
-**Target models**: PrismML Bonsai family (Qwen3-based, Q1_0_G128 quantised via GGUF)
+**Target models**: PrismML Bonsai family (Qwen3-based, PrismML custom-quantised (GGML type 41) via GGUF)
 
 ## Quick Start
 
@@ -60,7 +60,7 @@ python3 -m sglang.launch_server \
 
 | Flag | Why |
 |------|-----|
-| `--load-format gguf` | Load Q1_0_G128 quantised target model |
+| `--load-format gguf` | Load PrismML custom-quantised (GGML type 41) target model |
 | `--quantization turboquant` | Enable TurboQuant KV cache compression (tq4) |
 | `--attention-backend triton` | Use Triton attention (FlashAttention ROCm kernels crash on gfx1030) |
 | `--disable-cuda-graph` | CUDA graphs are not compatible with ROCm gfx1030 |
@@ -71,10 +71,10 @@ python3 -m sglang.launch_server \
 
 | Target Model | Draft Model | Algorithm | Aux Layers | Status |
 |-------------|-------------|-----------|------------|--------|
-| Bonsai-1.7B (Q1_0_G128) | Bonsai-1.7B-EAGLE3 | EAGLE3 | [1, 14, 27] | ✅ Working |
-| Bonsai-1.7B (Q1_0_G128) | Bonsai-1.7B-P-EAGLE-local-smoke/step_500 | P_EAGLE | [1, 14, 27] | ✅ Ready |
-| Bonsai-4B (Q1_0_G128) | Bonsai-4B-EAGLE3 | EAGLE3 | [1, 18, 35] | ⚠️ Needs retrained head |
-| Bonsai-8B (Q1_0_G128) | — | — | — | 🔜 Planned |
+| Bonsai-1.7B (PrismML type-41) | Bonsai-1.7B-EAGLE3 | EAGLE3 | [1, 14, 27] | ✅ Working |
+| Bonsai-1.7B (PrismML type-41) | Bonsai-1.7B-P-EAGLE-local-smoke/step_500 | P_EAGLE | [1, 14, 27] | ✅ Ready |
+| Bonsai-4B (PrismML type-41) | Bonsai-4B-EAGLE3 | EAGLE3 | [1, 18, 35] | ⚠️ Needs retrained head |
+| Bonsai-8B (PrismML type-41) | — | — | — | 🔜 Planned |
 
 ## Key Bug Fixes in This Fork
 
@@ -100,10 +100,10 @@ projecting through fc produced garbage → 0% acceptance.
 is applied only when hidden states are in target aux space (7680-dim) and skipped when
 they're already in draft space (2560-dim).
 
-### 3. Q1_0_G128 Hidden State Scale Mismatch (llama_eagle3.py)
+### 3. PrismML type-41 Hidden State Scale Mismatch (llama_eagle3.py)
 
 **Problem**: EAGLE3 heads are trained on full-precision (fp16/bf16) auxiliary hidden
-states with per-layer norm ~150–250. Q1_0_G128 dequantised hidden states have norms
+states with per-layer norm ~150–250. PrismML type-41 dequantised hidden states have norms
 ~3000–4000 per layer (23–30× larger). The fc layer receives out-of-distribution
 inputs → output explodes → midlayer produces near-uniform logits → 0% acceptance.
 
@@ -113,7 +113,7 @@ quantised hidden states.
 
 ### 4. GGUF Embed Sharing Skip (eagle_worker.py)
 
-**Problem**: Q1_0_G128 dequantised `embed_tokens` have ~70× smaller norm than the fp16
+**Problem**: PrismML type-41 dequantised `embed_tokens` have ~70× smaller norm than the fp16
 embeddings the EAGLE3 head was trained with. Sharing GGUF target embeddings into the
 draft model caused near-zero input to the midlayer.
 

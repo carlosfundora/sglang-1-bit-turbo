@@ -237,12 +237,6 @@ class LlamaModel(nn.Module):
         # for a 3-layer EAGLE3 setup).  During DECODE DRAFT STEPS, hidden_states is the draft
         # model's own previous output (fc.out_features = 2560) and must NOT be projected again —
         # zero-padding 2560 to 7680 and projecting through fc produces garbage logits → 0% accept.
-        #
-        # The original check `hidden_states.shape[-1] != embeds.shape[-1]` was correct for the
-        # normal flow (7680 != 2560 → apply; 2560 == 2560 → skip) but broke when only 2 of 3
-        # aux states were captured (BUG 1), giving 5120 != 2560.  Now that BUG 1 is fixed we
-        # key off fc.out_features instead of embeds.shape[-1] — both are 2560, but this is
-        # explicit and robust to future changes.
         if hidden_states.shape[-1] != self.fc.out_features:
             # RESCALE: the EAGLE3 head was trained on full-precision (fp16/bf16) aux hidden
             # states with per-layer norm ~150-250 for a 2560-dim vector.  Q1_0_G128
@@ -250,8 +244,13 @@ class LlamaModel(nn.Module):
             # causing the fc output to explode and the midlayer to produce near-uniform
             # logits (~6e-5 per token → 0% acceptance).  Scale back to training distribution.
             # TODO: remove once EAGLE3 head is retrained on quantised hidden states.
+            import sys
+            _hs_norm = hidden_states.float().norm(dim=-1).mean().item()
+            print(f"[E3-SCALE] PRE-SCALE hs.shape={list(hidden_states.shape)} hs.norm={_hs_norm:.1f} fc.in={self.fc.in_features} fc.out={self.fc.out_features}", file=sys.stderr, flush=True)
             hidden_states = hidden_states * (1.0 / 25.0)
             hidden_states = torch.clamp(hidden_states, -100.0, 100.0)
+            _hs_norm2 = hidden_states.float().norm(dim=-1).mean().item()
+            print(f"[E3-SCALE] POST-SCALE hs.norm={_hs_norm2:.1f}", file=sys.stderr, flush=True)
 
             expected_in = self.fc.in_features
             current_in = hidden_states.shape[-1]
@@ -264,6 +263,10 @@ class LlamaModel(nn.Module):
             if hidden_states.dtype != self.fc.weight.dtype:
                 hidden_states = hidden_states.to(self.fc.weight.dtype)
             hidden_states = self.fc(hidden_states)
+            import sys
+            _fc_norm = hidden_states.float().norm(dim=-1).mean().item()
+            _emb_norm = embeds.float().norm(dim=-1).mean().item()
+            print(f"[E3-SCALE] POST-FC fc_out.norm={_fc_norm:.1f} embeds.norm={_emb_norm:.1f}", file=sys.stderr, flush=True)
 
         # idle batch
         if hidden_states.shape[0] == 0:

@@ -882,6 +882,16 @@ class EAGLEWorker(TpModelWorker):
             vocab_mask,
         )
 
+        # Diagnostic: show acceptance for first few verify steps
+        import sys
+        _accept_cpu = res.accept_length_per_req_cpu
+        if not hasattr(self, '_diag_ct'):
+            self._diag_ct = 0
+        if self._diag_ct < 5:
+            _draft_tok = spec_info.draft_token[:20].tolist() if spec_info.draft_token is not None else None
+            print(f"[E3-VERIFY] accept_per_req={_accept_cpu} draft_tokens={_draft_tok}", file=sys.stderr, flush=True)
+            self._diag_ct += 1
+
         # Post process based on verified outputs.
         # Pick indices that we care (accepted)
         logits_output.next_token_logits = logits_output.next_token_logits[

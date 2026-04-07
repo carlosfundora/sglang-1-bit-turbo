@@ -722,7 +722,7 @@ class Scheduler(
             req_to_token_pool=self.req_to_token_pool,
             token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
             page_size=self.page_size,
-            is_eagle=self.spec_algorithm.is_eagle(),
+            is_eagle=self.spec_algorithm.is_eagle() or self.spec_algorithm.is_p_cascade(),
             tp_cache_group=(
                 self.attn_tp_cpu_group
                 if self.server_args.enable_dp_attention

@@ -20,6 +20,7 @@ class SpeculativeAlgorithm(Enum):
     P_EAGLE = auto()
     STANDALONE = auto()
     NGRAM = auto()
+    P_CASCADE = auto()
     NONE = auto()
 
     @classmethod
@@ -57,6 +58,9 @@ class SpeculativeAlgorithm(Enum):
     def is_ngram(self) -> bool:
         return self == SpeculativeAlgorithm.NGRAM
 
+    def is_p_cascade(self) -> bool:
+        return self == SpeculativeAlgorithm.P_CASCADE
+
     def supports_spec_v2(self) -> bool:
         return self.is_eagle() or self.is_standalone()
 
@@ -68,7 +72,18 @@ class SpeculativeAlgorithm(Enum):
         ), "Cannot create worker for NONE speculative algorithm."
 
         enable_overlap = not server_args.disable_overlap_schedule
-        if self.is_eagle() and server_args.enable_multi_layer_eagle:
+
+        if self.is_p_cascade():
+            if enable_overlap:
+                raise ValueError(
+                    "P_CASCADE does not support overlap scheduling yet. "
+                    "Use --disable-overlap-schedule."
+                )
+            from sglang.srt.speculative.p_cascade_worker import PCascadeWorker
+
+            return PCascadeWorker
+
+        elif self.is_eagle() and server_args.enable_multi_layer_eagle:
             # FIXME: migrate to EagleWorker
             if enable_overlap:
                 from sglang.srt.speculative.multi_layer_eagle_worker_v2 import (

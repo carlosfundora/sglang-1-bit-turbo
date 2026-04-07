@@ -3002,11 +3002,14 @@ class ServerArgs:
         if self.speculative_algorithm == "NEXTN":
             self.speculative_algorithm = "EAGLE"
 
-        if self.speculative_algorithm in ("EAGLE", "EAGLE3", "P_EAGLE", "STANDALONE"):
+        if self.speculative_algorithm in ("EAGLE", "EAGLE3", "P_EAGLE", "STANDALONE", "P_CASCADE"):
             if self.speculative_algorithm in ("EAGLE3", "P_EAGLE"):
                 self._validate_eagle3_draft_model(
                     require_parallel_drafting=self.speculative_algorithm == "P_EAGLE"
                 )
+            elif self.speculative_algorithm == "P_CASCADE":
+                # P_CASCADE uses EAGLE3/P_EAGLE internally — validate the draft model
+                self._validate_eagle3_draft_model(require_parallel_drafting=False)
 
             if self.speculative_algorithm == "STANDALONE" and self.enable_dp_attention:
                 # TODO: support dp attention for standalone speculative decoding
@@ -4804,7 +4807,7 @@ class ServerArgs:
         parser.add_argument(
             "--speculative-algorithm",
             type=str,
-            choices=["EAGLE", "EAGLE3", "P_EAGLE", "NEXTN", "STANDALONE", "NGRAM"],
+            choices=["EAGLE", "EAGLE3", "P_EAGLE", "NEXTN", "STANDALONE", "NGRAM", "P_CASCADE"],
             help="Speculative algorithm.",
         )
         parser.add_argument(
