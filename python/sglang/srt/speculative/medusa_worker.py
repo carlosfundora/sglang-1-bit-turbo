@@ -18,7 +18,7 @@ import torch
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.managers.utils import GenerationBatchResult
-from sglang.srt.model_executor.forward_batch_info import ForwardMode
+from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardMode
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
@@ -195,8 +195,9 @@ class MedusaWorker:
     def forward_batch_generation(
         self, batch: ScheduleBatch
     ) -> GenerationBatchResult:
-        # On extend, delegate to target
+        # On extend, delegate to target (with hidden capture enabled)
         if batch.forward_mode.is_extend() or batch.is_extend_in_batch:
+            self._enable_hidden_capture(batch)
             result = self.target_worker.forward_batch_generation(
                 batch.get_model_worker_batch()
             )
@@ -216,7 +217,8 @@ class MedusaWorker:
             except Exception as e:
                 logger.warning("Medusa draft failed (%s), falling back to target-only", e)
 
-        # Fallback: target-only decode
+        # Fallback: target-only decode (with hidden capture enabled)
+        self._enable_hidden_capture(batch)
         result = self.target_worker.forward_batch_generation(
             batch.get_model_worker_batch()
         )
@@ -341,6 +343,16 @@ class MedusaWorker:
 
     # ---- Hidden state capture ----
 
+    def _enable_hidden_capture(self, batch: ScheduleBatch):
+        """Ensure the target forward will capture last hidden states for Medusa."""
+        if batch.spec_info is not None:
+            batch.spec_info.capture_hidden_mode = CaptureHiddenMode.LAST
+        else:
+            # Create a minimal spec_info carrier for the capture mode
+            from types import SimpleNamespace
+
+            batch.spec_info = SimpleNamespace(capture_hidden_mode=CaptureHiddenMode.LAST)
+
     def _try_capture_hidden(self):
         """Try to read last hidden states from the target model runner."""
         try:
@@ -358,6 +370,7 @@ class MedusaWorker:
 
     def _fallback_target_only(self, batch: ScheduleBatch) -> GenerationBatchResult:
         batch.forward_mode = ForwardMode.DECODE
+        self._enable_hidden_capture(batch)
         result = self.target_worker.forward_batch_generation(
             batch.get_model_worker_batch()
         )
