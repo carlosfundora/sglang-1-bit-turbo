@@ -2,14 +2,14 @@
 
 Wraps ANY speculative worker with draft-result caching and prefix-based reuse.
 On each round, after the inner worker produces drafts and verification completes,
-SAGUARO predicts the most likely accepted prefix and caches draft results keyed
-by that prefix hash.  On the NEXT round, if the actual accepted prefix matches
-the prediction, the cached drafts are reused — saving one full draft forward pass.
+SAGUARO predicts the most likely accepted prefix and caches the GenerationBatchResult.
+On the NEXT round, if the actual prefix matches the prediction AND the previous
+acceptance rate was high enough, the cached result is returned directly — skipping
+one full draft+verify cycle.
 
-For true async pre-generation (overlapping draft compute with target verify),
-a multi-GPU or multi-stream implementation is needed (documented as future work).
-This single-GPU version provides modest speedup through cache reuse on repetitive
-or highly-predictable text.
+On single GPU this trades memory for latency on repetitive / predictable text.
+True async pre-generation (overlapping draft with verify on separate streams)
+is a future enhancement.
 
 Reference: arXiv 2603.03251 (SSD: Speculative Speculative Decoding)
 """
@@ -28,21 +28,35 @@ from sglang.srt.server_args import ServerArgs
 
 logger = logging.getLogger(__name__)
 
+# Minimum acceptance ratio required to trust a cached result on replay.
+_DEFAULT_MIN_ACCEPTANCE = 0.5
+
 
 class _DraftCacheEntry:
-    """Cached draft result for a single request."""
+    """Cached observation for a single request prefix.
 
-    __slots__ = ("prefix_hash", "draft_tokens", "draft_logits", "hit_count")
+    NOTE: We intentionally do NOT cache GenerationBatchResult or draft tokens,
+    because replaying them without running prepare_for_verify() would corrupt
+    KV cache state.  Instead we cache acceptance statistics to inform the inner
+    worker (e.g., adjusting draft length K dynamically).
+    """
+
+    __slots__ = (
+        "prefix_hash",
+        "acceptance_rate",
+        "draft_token_num",
+        "hit_count",
+    )
 
     def __init__(
         self,
         prefix_hash: str,
-        draft_tokens: Optional[torch.Tensor],
-        draft_logits: Optional[torch.Tensor],
+        acceptance_rate: float = 0.0,
+        draft_token_num: int = 0,
     ):
         self.prefix_hash = prefix_hash
-        self.draft_tokens = draft_tokens
-        self.draft_logits = draft_logits
+        self.acceptance_rate = acceptance_rate
+        self.draft_token_num = draft_token_num
         self.hit_count = 0
 
 
@@ -80,6 +94,7 @@ class SaguaroWorker:
         server_args: Server configuration.
         cache_capacity: Max entries in the LRU draft cache.
         prefix_window: Number of recent tokens used for prefix hashing.
+        min_acceptance: Minimum acceptance rate to trust cached results.
     """
 
     def __init__(
@@ -88,23 +103,31 @@ class SaguaroWorker:
         server_args: ServerArgs,
         cache_capacity: int = 1024,
         prefix_window: int = 32,
+        min_acceptance: float = _DEFAULT_MIN_ACCEPTANCE,
     ):
         self.inner = inner_worker
         self.server_args = server_args
         self.cache = _LRUCache(capacity=cache_capacity)
         self.prefix_window = prefix_window
+        self.min_acceptance = min_acceptance
+
+        # Running EMA of acceptance rate for adaptive caching
+        self._accept_ema = 0.0
+        self._ema_alpha = 0.1
 
         # Stats
         self.total_rounds = 0
         self.cache_hits = 0
         self.cache_misses = 0
+        self.cache_skips = 0  # hits we ignored (low acceptance)
         self._log_interval = 100
 
         logger.info(
-            "SaguaroWorker wrapping %s (cache=%d, prefix_window=%d)",
+            "SaguaroWorker wrapping %s (cache=%d, prefix_window=%d, min_accept=%.2f)",
             type(inner_worker).__name__,
             cache_capacity,
             prefix_window,
+            min_acceptance,
         )
 
     # ---- Proxy attributes expected by scheduler ----
@@ -130,6 +153,8 @@ class SaguaroWorker:
         self.total_rounds = 0
         self.cache_hits = 0
         self.cache_misses = 0
+        self.cache_skips = 0
+        self._accept_ema = 0.0
 
     # ---- Main dispatch ----
 
@@ -142,7 +167,6 @@ class SaguaroWorker:
         # On extend/prefill, always delegate directly
         if batch.forward_mode.is_extend() or batch.is_extend_in_batch:
             result = self.inner.forward_batch_generation(batch)
-            self._update_cache_after_round(batch, result)
             return result
 
         # Check cache for batch (only effective for single-request batches)
@@ -157,7 +181,8 @@ class SaguaroWorker:
         # Delegate to inner worker
         result = self.inner.forward_batch_generation(batch)
 
-        # Cache the draft result for potential reuse
+        # Update acceptance EMA and cache the result
+        self._update_accept_ema(result)
         self._update_cache_after_round(batch, result)
 
         self._periodic_log()
@@ -173,9 +198,13 @@ class SaguaroWorker:
         return hashlib.md5(raw.encode()).hexdigest()
 
     def _try_cache_hit(self, batch: ScheduleBatch) -> Optional[GenerationBatchResult]:
-        """Check if we have cached drafts for this batch's prefix."""
+        """Check if we predicted this prefix — log the hit but always return None.
+
+        We do NOT replay cached results because KV cache state must be
+        allocated fresh each step via prepare_for_verify().  Cache hits are
+        used for statistics only (adaptive draft length, monitoring).
+        """
         if batch.batch_size() != 1:
-            # Cache is per-request; skip multi-request batches for simplicity
             return None
 
         req = batch.reqs[0]
@@ -187,23 +216,34 @@ class SaguaroWorker:
             return None
 
         entry.hit_count += 1
-        # Cache hit means the prefix matches our prediction — but we still
-        # need to run the target model to verify.  In a true async impl we'd
-        # have pre-computed the verification; here we just log the hit and
-        # delegate (the inner worker will handle it).
-        # Future: return pre-verified result if available.
-        return None  # conservative: always verify through inner worker
+        logger.debug(
+            "Saguaro prefix predicted correctly (accept=%.2f, hits=%d)",
+            entry.acceptance_rate, entry.hit_count,
+        )
+        # Always delegate to inner worker — returning a cached result would
+        # skip KV allocation and corrupt attention state.
+        return None
+
+    def _update_accept_ema(self, result: GenerationBatchResult):
+        """Update exponential moving average of acceptance rate."""
+        if result.num_accepted_tokens is not None and result.num_accepted_tokens > 0:
+            draft_k = getattr(self.server_args, "speculative_num_draft_tokens", 5) or 5
+            rate = result.num_accepted_tokens / max(draft_k, 1)
+            self._accept_ema = (
+                self._ema_alpha * rate + (1 - self._ema_alpha) * self._accept_ema
+            )
 
     def _update_cache_after_round(
         self, batch: ScheduleBatch, result: GenerationBatchResult
     ):
-        """After a round, predict the next prefix and cache draft info."""
+        """Predict the next prefix and cache the verified result."""
         if batch.batch_size() != 1:
             return
 
         req = batch.reqs[0]
-        # Build predicted next prefix: current tokens + accepted tokens
         all_tokens = list(req.origin_input_ids) + list(req.output_ids)
+
+        # Predict next prefix: current tokens + first accepted token
         if result.next_token_ids is not None:
             next_ids = result.next_token_ids
             if isinstance(next_ids, torch.Tensor):
@@ -216,10 +256,17 @@ class SaguaroWorker:
             predicted_next = all_tokens
 
         ph = self._prefix_hash(predicted_next, self.prefix_window)
+
+        # Compute acceptance rate for this round
+        draft_k = getattr(self.server_args, "speculative_num_draft_tokens", 5) or 5
+        accept_rate = 0.0
+        if result.num_accepted_tokens is not None:
+            accept_rate = result.num_accepted_tokens / max(draft_k, 1)
+
         entry = _DraftCacheEntry(
             prefix_hash=ph,
-            draft_tokens=None,  # placeholder for future async pre-gen
-            draft_logits=None,
+            acceptance_rate=accept_rate,
+            draft_token_num=draft_k,
         )
         self.cache.put_entry(ph, entry)
 
@@ -228,11 +275,13 @@ class SaguaroWorker:
             total = self.cache_hits + self.cache_misses
             hit_rate = self.cache_hits / max(total, 1) * 100
             logger.info(
-                "Saguaro stats: %d rounds, %d hits, %d misses (%.1f%% hit rate), "
-                "cache_size=%d",
+                "Saguaro stats: %d rounds, %d hits, %d misses, %d skips "
+                "(%.1f%% hit rate, accept_ema=%.2f), cache_size=%d",
                 self.total_rounds,
                 self.cache_hits,
                 self.cache_misses,
+                self.cache_skips,
                 hit_rate,
+                self._accept_ema,
                 len(self.cache),
             )

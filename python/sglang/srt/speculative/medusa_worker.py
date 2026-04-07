@@ -201,7 +201,7 @@ class MedusaWorker:
             result = self.target_worker.forward_batch_generation(
                 batch.get_model_worker_batch()
             )
-            self._try_capture_hidden()
+            self._capture_hidden_from_result(result)
             return result
 
         bs = batch.batch_size()
@@ -222,7 +222,7 @@ class MedusaWorker:
         result = self.target_worker.forward_batch_generation(
             batch.get_model_worker_batch()
         )
-        self._try_capture_hidden()
+        self._capture_hidden_from_result(result)
         return result
 
     # ---- Medusa draft + verify ----
@@ -327,7 +327,7 @@ class MedusaWorker:
             batch.spec_algorithm = original_algo
 
             # Capture hidden states for next round
-            self._try_capture_hidden()
+            self._capture_hidden_from_result(batch_result)
 
             return GenerationBatchResult(
                 logits_output=logits_output,
@@ -353,15 +353,16 @@ class MedusaWorker:
 
             batch.spec_info = SimpleNamespace(capture_hidden_mode=CaptureHiddenMode.LAST)
 
-    def _try_capture_hidden(self):
-        """Try to read last hidden states from the target model runner."""
+    def _capture_hidden_from_result(self, result: GenerationBatchResult):
+        """Extract hidden states from logits_output (same path as EAGLE)."""
         try:
-            mr = self.target_worker.model_runner
-            h = getattr(mr, "last_hidden_states", None)
-            if h is not None and isinstance(h, torch.Tensor) and h.numel() > 0:
-                self._cached_hidden = h.detach()
-                self._hidden_available = True
-                return
+            lo = result.logits_output
+            if lo is not None:
+                h = getattr(lo, "hidden_states", None)
+                if h is not None and isinstance(h, torch.Tensor) and h.numel() > 0:
+                    self._cached_hidden = h.detach()
+                    self._hidden_available = True
+                    return
         except Exception:
             pass
         self._hidden_available = False
@@ -374,5 +375,5 @@ class MedusaWorker:
         result = self.target_worker.forward_batch_generation(
             batch.get_model_worker_batch()
         )
-        self._try_capture_hidden()
+        self._capture_hidden_from_result(result)
         return result

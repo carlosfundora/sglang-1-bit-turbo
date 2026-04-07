@@ -24,6 +24,8 @@ class SpeculativeAlgorithm(Enum):
     MEDUSA = auto()
     SAGUARO = auto()  # wrapper, not standalone — wraps any other algorithm
     CHIMERA = auto()  # CHIMERA-SD: fused P-EAGLE + Hydra + DyTC + n-gram + SSD
+    SELF_SPEC = auto()  # Self-Speculative Decoding via early-exit / hidden reuse
+    PHANTOM_SD = auto()  # NGRAM with CPU-threaded tree pre-building
     NONE = auto()
 
     @classmethod
@@ -69,6 +71,12 @@ class SpeculativeAlgorithm(Enum):
 
     def is_chimera(self) -> bool:
         return self == SpeculativeAlgorithm.CHIMERA
+
+    def is_self_spec(self) -> bool:
+        return self == SpeculativeAlgorithm.SELF_SPEC
+
+    def is_phantom_sd(self) -> bool:
+        return self == SpeculativeAlgorithm.PHANTOM_SD
 
     def supports_spec_v2(self) -> bool:
         return self.is_eagle() or self.is_standalone()
@@ -168,6 +176,26 @@ class SpeculativeAlgorithm(Enum):
 
             return ChimeraWorker
 
+        elif self.is_self_spec():
+            if enable_overlap:
+                raise ValueError(
+                    "SELF_SPEC does not support overlap scheduling yet. "
+                    "Use --disable-overlap-schedule."
+                )
+            from sglang.srt.speculative.ssd_worker import SSDWorker
+
+            return SSDWorker
+
+        elif self.is_phantom_sd():
+            if enable_overlap:
+                raise ValueError(
+                    "PHANTOM_SD does not support overlap scheduling yet. "
+                    "Use --disable-overlap-schedule."
+                )
+            from sglang.srt.speculative.phantom_tree_worker import PhantomTreeWorker
+
+            return PhantomTreeWorker
+
         raise ValueError("Unreachable code path in create_worker.")
 
 
@@ -193,6 +221,7 @@ class SpecInput(ABC):
         return self.spec_input_type in {
             SpecInputType.EAGLE_VERIFY,
             SpecInputType.NGRAM_VERIFY,
+            SpecInputType.MEDUSA_VERIFY,
         }
 
     @abstractmethod
