@@ -3222,6 +3222,8 @@ class ServerArgs:
                 "(e.g., EAGLE3, P_CASCADE, MEDUSA)."
             )
 
+
+
     def _validate_eagle3_draft_model(self, require_parallel_drafting: bool = False):
         if self.speculative_draft_model_path is None:
             raise ValueError(
