@@ -14,3 +14,12 @@ from sglang.srt.hardware_backend.rocm.gfx1031_defaults import (
     get_gfx1031_server_defaults,
     apply_gfx1031_env,
 )
+
+# Optional TransformerEngine integration (lazy import — don't fail if TE absent)
+try:
+    from sglang.srt.hardware_backend.rocm.te_integration import (
+        has_transformer_engine,
+    )
+except ImportError:
+    def has_transformer_engine():
+        return False
