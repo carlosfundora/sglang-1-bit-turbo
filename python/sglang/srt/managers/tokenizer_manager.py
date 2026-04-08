@@ -123,6 +123,12 @@ _REQUEST_STATE_WAIT_TIMEOUT = envs.SGLANG_REQUEST_STATE_WAIT_TIMEOUT.get()
 
 logger = logging.getLogger(__name__)
 
+_INCREMENTAL_STREAMING_META_INFO_KEYS = (
+    "output_token_logprobs",
+    "output_top_logprobs",
+    "output_token_ids_logprobs",
+)
+
 
 @dataclasses.dataclass
 class ReqState:
@@ -166,6 +172,31 @@ class ReqState:
     output_top_logprobs: List[Any] = dataclasses.field(default_factory=list)
     input_token_ids_logprobs: List[Any] = dataclasses.field(default_factory=list)
     output_token_ids_logprobs: List[Any] = dataclasses.field(default_factory=list)
+
+
+def _slice_streaming_output_meta_info(
+    meta_info: Dict[Any, Any],
+    last_output_offset: int,
+) -> None:
+    """Align output-side metadata with the current incremental streaming chunk."""
+    for key in meta_info.keys() & set(_INCREMENTAL_STREAMING_META_INFO_KEYS):
+        meta_info[key] = meta_info[key][last_output_offset:]
+
+
+def _merge_incremental_stream_meta_info(
+    out_list: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Preserve delta-style output metadata when queued chunks are coalesced."""
+    meta_info_list = [chunk["meta_info"] for chunk in out_list]
+    meta_info = dict(meta_info_list[-1])
+    for key in _INCREMENTAL_STREAMING_META_INFO_KEYS:
+        if any(key in chunk_meta_info for chunk_meta_info in meta_info_list):
+            meta_info[key] = [
+                item
+                for chunk_meta_info in meta_info_list
+                for item in chunk_meta_info.get(key, [])
+            ]
+    return meta_info
 
 
 class InputFormat(Enum):
@@ -1165,9 +1196,8 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                         obj.rid,
                         len(out_list),
                     )
-                # Coalesce all deltas into a single chunk. Both text and
-                # output_ids are incremental, so we concatenate them; all
-                # other fields (meta_info, etc.) are taken from the last chunk.
+                # Coalesce all deltas into a single chunk. Text, output_ids,
+                # and output-side incremental metadata all need to be merged.
                 out = dict(out_list[-1])
                 if "output_ids" in out:
                     out["output_ids"] = [
@@ -1175,6 +1205,8 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     ]
                 if "text" in out:
                     out["text"] = "".join(chunk["text"] for chunk in out_list)
+                if "meta_info" in out:
+                    out["meta_info"] = _merge_incremental_stream_meta_info(out_list)
             else:
                 out = out_list[-1]
 
@@ -1604,8 +1636,10 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 # Not all request types have `stream` (e.g., EmbeddingReqInput). Default to non-streaming.
                 is_stream = getattr(state.obj, "stream", False)
                 if self.server_args.incremental_streaming_output and is_stream:
+                    output_offset = state.last_output_offset
                     state.output_ids.extend(recv_obj.output_ids[i])
-                    output_token_ids = state.output_ids[state.last_output_offset :]
+                    output_token_ids = state.output_ids[output_offset:]
+                    _slice_streaming_output_meta_info(meta_info, output_offset)
                     state.last_output_offset = len(state.output_ids)
                     output_text = state.text[state.last_text_offset :]
                     state.last_text_offset = len(state.text)
@@ -1623,8 +1657,10 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             elif isinstance(recv_obj, BatchTokenIDOutput):
                 is_stream = getattr(state.obj, "stream", False)
                 if self.server_args.incremental_streaming_output and is_stream:
+                    output_offset = state.last_output_offset
                     state.output_ids.extend(recv_obj.output_ids[i])
-                    output_token_ids = state.output_ids[state.last_output_offset :]
+                    output_token_ids = state.output_ids[output_offset:]
+                    _slice_streaming_output_meta_info(meta_info, output_offset)
                     state.last_output_offset = len(state.output_ids)
                 else:
                     state.output_ids.extend(recv_obj.output_ids[i])
