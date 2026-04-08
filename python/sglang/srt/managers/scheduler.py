@@ -1255,19 +1255,6 @@ class Scheduler(
             "max_req_input_len": self.max_req_input_len,
         }
 
-        if self.server_args.remote_instance_weight_loader_use_transfer_engine():
-            (
-                remote_instance_transfer_engine_session_id,
-                remote_instance_transfer_engine_weights_info_dict,
-            ) = self.get_remote_instance_transfer_engine_info()
-            result_dict.update(
-                {
-                    "tp_rank": self.tp_rank,
-                    "remote_instance_transfer_engine_session_id": remote_instance_transfer_engine_session_id,
-                    "remote_instance_transfer_engine_weights_info_dict": remote_instance_transfer_engine_weights_info_dict,
-                }
-            )
-
         return result_dict
 
     def run_event_loop(self) -> None:
@@ -3246,6 +3233,16 @@ class Scheduler(
     def pause_generation(self, recv_req: PauseGenerationReqInput):
         self._engine_paused = True
 
+        if recv_req.mode == "in_place":
+            # In-place pause: just set the flag and return immediately.
+            # All scheduler state (running_batch, last_batch, chunked_req,
+            # result_queue) is left untouched. On resume, the normal event
+            # loop (get_next_batch_to_run) handles last_batch merge,
+            # chunked_req cleanup, and overlap result processing through
+            # the standard code paths. This avoids duplicating batch
+            # manipulation logic and the accounting bugs that come with it.
+            return
+
         if self.enable_overlap and self.last_batch:
             # Process the results of the last batch
             tmp_batch, tmp_result = self.result_queue.popleft()
@@ -3253,13 +3250,17 @@ class Scheduler(
 
         if self.last_batch and self.last_batch.forward_mode.is_extend():
             chunked_req_to_exclude = set()
-            if recv_req.mode == "in_place":
-                if self.chunked_req is not None:
-                    chunked_req_to_exclude.add(self.chunked_req)
             self.last_batch.filter_batch(
                 chunked_req_to_exclude=list(chunked_req_to_exclude)
             )
-            if not self.last_batch.is_empty():
+            # Skip merge for disagg prefill: completed prefill requests are
+            # already in disagg_prefill_inflight_queue. Merging them into
+            # running_batch leaks them, since the prefill event loop never
+            # calls update_running_batch to clean them up.
+            if (
+                not self.last_batch.is_empty()
+                and self.disaggregation_mode != DisaggregationMode.PREFILL
+            ):
                 if self.running_batch.is_empty():
                     self.running_batch = self.last_batch
                 else:
@@ -3268,7 +3269,7 @@ class Scheduler(
         self.last_batch = None
         self.cur_batch = None
 
-        if recv_req.mode == "retract":
+        if recv_req.mode == "retract" and not self.running_batch.is_empty():
             self.running_batch.filter_batch(v1_spec_info_filtered=True)
             if len(self.running_batch.reqs) != 0:
                 retracted_reqs = self.running_batch.retract_all(self.server_args)
@@ -3383,9 +3384,6 @@ class Scheduler(
         self, schedule_batch: ScheduleBatch, batch_result: GenerationBatchResult
     ):
         pass
-
-    def get_remote_instance_transfer_engine_info(self):
-        return self.tp_worker.get_remote_instance_transfer_engine_info()
 
 
 class IdleSleeper:
@@ -3555,9 +3553,10 @@ def run_scheduler_process(
         set_gpu_proc_affinity(
             server_args.pp_size, server_args.tp_size, server_args.nnodes, gpu_id
         )
-    numa_node = get_numa_node_if_available(server_args, gpu_id)
-    if numa_node is not None and not envs.SGLANG_NUMA_BIND_V2.get():
-        numa_bind_to_node(numa_node)
+    if not envs.SGLANG_NUMA_BIND_V2.get():
+        numa_node = get_numa_node_if_available(server_args, gpu_id)
+        if numa_node is not None:
+            numa_bind_to_node(numa_node)
 
     # Set up tracing
     if server_args.enable_trace:

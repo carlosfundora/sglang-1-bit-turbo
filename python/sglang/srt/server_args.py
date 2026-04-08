@@ -380,6 +380,7 @@ class ServerArgs:
     pp_max_micro_batch_size: Optional[int] = None
     pp_async_batch_depth: int = 0
     stream_interval: int = 1
+    stream_response_default_include_usage: bool = False
     incremental_streaming_output: bool = False
     enable_streaming_session: bool = False
     random_seed: Optional[int] = None
@@ -512,8 +513,6 @@ class ServerArgs:
     speculative_draft_model_quantization: Optional[str] = None
 
     # Speculative decoding (ngram)
-    speculative_ngram_min_match_window_size: int = 1
-    speculative_ngram_max_match_window_size: int = 12
     speculative_ngram_min_bfs_breadth: int = 1
     speculative_ngram_max_bfs_breadth: int = 10
     speculative_ngram_match_type: Literal["BFS", "PROB"] = "BFS"
@@ -748,6 +747,7 @@ class ServerArgs:
         "transfer_engine", "nccl", "modelexpress"
     ] = "nccl"
     remote_instance_weight_loader_start_seed_via_transfer_engine: bool = False
+    engine_info_bootstrap_port: int = 6789
     modelexpress_config: Optional[str] = None
 
     # For PD-Multiplexing
@@ -3164,8 +3164,10 @@ class ServerArgs:
             self.enable_mixed_chunk = False
             self.speculative_eagle_topk = self.speculative_ngram_max_bfs_breadth
             if self.speculative_num_draft_tokens is None:
-                self.speculative_num_draft_tokens = (
-                    self.speculative_ngram_max_match_window_size
+                self.speculative_num_draft_tokens = 12
+                logger.warning(
+                    "speculative_num_draft_tokens is set to 12 by default for ngram speculative decoding. "
+                    "You can override this by explicitly setting --speculative-num-draft-tokens."
                 )
             logger.warning(
                 "The overlap scheduler and mixed chunked prefill are disabled because of "
@@ -4286,6 +4288,12 @@ class ServerArgs:
             help="Whether to output as a sequence of disjoint segments.",
         )
         parser.add_argument(
+            "--stream-response-default-include-usage",
+            action="store_true",
+            help="Include usage in every streaming response "
+            "(even when stream_options is not specified).",
+        )
+        parser.add_argument(
             "--stream-output",
             action=DeprecatedStoreTrueAction,
             dest="incremental_streaming_output",
@@ -4986,18 +4994,6 @@ class ServerArgs:
         )
 
         # Speculative decoding (ngram)
-        parser.add_argument(
-            "--speculative-ngram-min-match-window-size",
-            type=int,
-            default=ServerArgs.speculative_ngram_min_match_window_size,
-            help="The minimum window size for pattern matching in ngram speculative decoding.",
-        )
-        parser.add_argument(
-            "--speculative-ngram-max-match-window-size",
-            type=int,
-            default=ServerArgs.speculative_ngram_max_match_window_size,
-            help="The maximum window size for pattern matching in ngram speculative decoding.",
-        )
         parser.add_argument(
             "--speculative-ngram-min-bfs-breadth",
             type=int,
@@ -6157,6 +6153,13 @@ class ServerArgs:
             help="Start seed server via transfer engine backend for remote instance weight loader.",
         )
         parser.add_argument(
+            "--engine-info-bootstrap-port",
+            type=int,
+            default=ServerArgs.engine_info_bootstrap_port,
+            help="Port for the engine info bootstrap server. Default is 6789. "
+            "Must be set explicitly when running multiple instances on the same node.",
+        )
+        parser.add_argument(
             "--modelexpress-config",
             type=str,
             default=ServerArgs.modelexpress_config,
@@ -6275,7 +6278,7 @@ class ServerArgs:
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         return cls(**{attr: getattr(args, attr) for attr in attrs})
 
-    def url(self):
+    def url(self, port: Optional[int] = None):
         scheme = "https" if self.ssl_certfile else "http"
         # When binding to all interfaces, use loopback for internal requests.
         host = self.host
@@ -6283,7 +6286,13 @@ class ServerArgs:
             host = "127.0.0.1"
         elif host == "::":
             host = "::1"
-        return NetworkAddress(host, self.port).to_url(scheme)
+        return NetworkAddress(host, port if port is not None else self.port).to_url(
+            scheme
+        )
+
+    @property
+    def engine_info_bootstrap_url(self):
+        return self.url(port=self.engine_info_bootstrap_port)
 
     def ssl_verify(self):
         """Return the value for the requests library's ``verify=`` parameter.

@@ -123,13 +123,17 @@ class LlamaModel(nn.Module):
                 self.config.pad_token_id if self.config.pad_token_id is not None else 0
             )
 
-        rope_scaling = config.rope_parameters
+        rope_parameters = getattr(config, "rope_parameters", None)
+        if rope_parameters is not None:
+            rope_scaling = rope_parameters
+        else:
+            rope_scaling = getattr(config, "rope_scaling", None)
         self.is_mrope_enabled = (
             rope_scaling is not None and "mrope_section" in rope_scaling
         )
         # fix rope_scaling for qwen2.5-vl
         if self.is_mrope_enabled:
-            config.rope_parameters["rope_type"] = "default"
+            rope_scaling["rope_type"] = "default"
 
         self.vocab_size = config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(

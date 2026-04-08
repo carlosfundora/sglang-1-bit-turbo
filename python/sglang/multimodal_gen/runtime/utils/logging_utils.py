@@ -509,6 +509,7 @@ def globally_suppress_loggers():
         "urllib3",
         "httpx",
         "httpcore",
+        "flash_attn.cute.cache_utils",
     ]
 
     for name in target_names:
