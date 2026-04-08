@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import logging
+from typing import TYPE_CHECKING, List
 
 import torch
 from torch.nn.functional import scaled_dot_product_attention
@@ -13,12 +14,23 @@ if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
     from sglang.srt.model_executor.model_runner import ModelRunner
 
+logger = logging.getLogger(__name__)
+
 
 class TorchNativeAttnBackend(AttentionBackend):
     def __init__(self, model_runner: ModelRunner):
         super().__init__()
         self.forward_metadata = None
         self.device = model_runner.device
+
+    def get_cuda_graph_seq_len_fill_value(self):
+        """Fill value used by CUDA graph runners when pre-allocating seq_lens.
+
+        Needed by eagle_draft_cuda_graph_runner even when graphs are disabled,
+        as the runner constructor may still read this.  Value 1 matches the
+        convention used by triton and flashinfer backends.
+        """
+        return 1
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         """Init the metadata for a forward pass."""
@@ -62,22 +74,79 @@ class TorchNativeAttnBackend(AttentionBackend):
         assert seq_lens.shape[0] == extend_prefix_lens.shape[0]
         assert seq_lens.shape[0] == extend_seq_lens.shape[0]
 
+        # ── Diagnostic: log supplied vs recomputed prefix at attention entry ──
+        try:
+            from sglang.srt.observability.spec_decode_tracer import get_tracer, ENABLED
+            if ENABLED:
+                _diag = get_tracer()
+                _sl = seq_lens.cpu().tolist()
+                _el = extend_seq_lens.cpu().tolist()
+                _pl = extend_prefix_lens.cpu().tolist()
+                _recomputed = [max(int(s) - int(e), 0) for s, e in zip(_sl, _el)]
+                _diag.log_attention_entry(
+                    backend_name="torch_native",
+                    forward_batch=type('FB', (), {
+                        'forward_mode': 'extend',
+                        'batch_size': len(_sl),
+                        'seq_lens': seq_lens,
+                        'extend_seq_lens': extend_seq_lens,
+                        'extend_prefix_lens': extend_prefix_lens,
+                    })(),
+                    supplied_prefix=_pl,
+                    recomputed_prefix=_recomputed,
+                )
+        except Exception:
+            pass
+        # ─────────────────────────────────────────────────────────────────────
+
         # [num_tokens, num_heads, head_size] -> [num_heads, num_tokens, head_size]
         query = query.movedim(0, query.dim() - 2)
 
         start_q, start_kv = 0, 0
         for seq_idx in range(seq_lens.shape[0]):
-            # TODO: this loop process a sequence per iter, this is inefficient.
-            # Need optimize the performance later.
-
             extend_seq_len_q = extend_seq_lens[seq_idx]
             prefill_seq_len_q = extend_prefix_lens[seq_idx]
 
             seq_len_kv = seq_lens[seq_idx]
+
+            # Enforce invariant: prefix + extend == total KV length.
+            # extend_seq_len_q is authoritative (matches query token count),
+            # so derive prefix from it. Speculative verify batches may have
+            # stale prefix/seq_lens that don't sum correctly.
+            prefill_seq_len_q = max(int(seq_len_kv) - int(extend_seq_len_q), 0)
+
             end_q = start_q + extend_seq_len_q
             end_kv = start_kv + seq_len_kv
 
             per_req_query = query[:, start_q:end_q, :]
+
+            if int(extend_seq_len_q) == int(seq_len_kv):
+                # Pure extend (no prefix) — skip redundant query trick
+                per_req_key = k_cache[
+                    req_to_token[req_pool_indices[seq_idx], :seq_len_kv]
+                ].movedim(0, query.dim() - 2)
+                per_req_value = v_cache[
+                    req_to_token[req_pool_indices[seq_idx], :seq_len_kv]
+                ].movedim(0, query.dim() - 2)
+                if not (per_req_query.dtype == per_req_key.dtype):
+                    per_req_key = per_req_key.to(per_req_query.dtype)
+                    per_req_value = per_req_value.to(per_req_query.dtype)
+                per_req_out = (
+                    scaled_dot_product_attention(
+                        per_req_query.unsqueeze(0),
+                        per_req_key.unsqueeze(0),
+                        per_req_value.unsqueeze(0),
+                        enable_gqa=enable_gqa,
+                        scale=scaling,
+                        is_causal=causal,
+                    )
+                    .squeeze(0)
+                    .movedim(query.dim() - 2, 0)
+                )
+                output[start_q:end_q, :, :] = per_req_out
+                start_q, start_kv = end_q, end_kv
+                continue
+
             per_req_query_redudant = torch.empty(
                 (per_req_query.shape[0], seq_len_kv, per_req_query.shape[2]),
                 dtype=per_req_query.dtype,
@@ -284,3 +353,66 @@ class TorchNativeAttnBackend(AttentionBackend):
 
     def support_triton(self):
         return False
+
+
+class TorchNativeMultiStepDraftBackend:
+    """Wrap multiple TorchNativeAttnBackend instances for EAGLE multi-step
+    speculative draft decoding.
+
+    Unlike TritonMultiStepDraftBackend, this does NOT precompute KV indices
+    via a triton kernel.  torch_native's per-request loop gathers KV directly
+    from ``req_to_token[req_pool_idx, :seq_len_kv]``, so no index buffer is
+    needed.  This makes the multi-step wrapper extremely lightweight.
+
+    Required interface (consumed by eagle_worker.py):
+        - ``init_forward_metadata(forward_batch)``
+        - ``attn_backends``  (list of per-step backends)
+        - cuda-graph stubs (no-ops; we run ``--disable-cuda-graph``)
+    """
+
+    def __init__(
+        self,
+        model_runner: "ModelRunner",
+        topk: int,
+        speculative_num_steps: int,
+    ):
+        self.topk = topk
+        self.speculative_num_steps = speculative_num_steps
+        self.device = model_runner.device
+
+        # One backend per draft step (steps - 1 because step 0 uses the
+        # target model's own attention backend).
+        self.attn_backends: List[TorchNativeAttnBackend] = [
+            TorchNativeAttnBackend(model_runner)
+            for _ in range(speculative_num_steps - 1)
+        ]
+
+        logger.info(
+            "TorchNativeMultiStepDraftBackend: topk=%d, steps=%d, backends=%d",
+            topk,
+            speculative_num_steps,
+            len(self.attn_backends),
+        )
+
+    # ── Core interface ──────────────────────────────────────────────
+
+    def init_forward_metadata(self, forward_batch: ForwardBatch):
+        """Pre-initialize all per-step backends.
+
+        For torch_native this is a no-op per backend (init_forward_metadata
+        is ``pass``), but we still iterate for interface consistency and to
+        allow future metadata if needed.
+        """
+        for backend in self.attn_backends:
+            backend.init_forward_metadata(forward_batch)
+
+    # ── CUDA graph stubs (always disabled on ROCm gfx1031) ──────────
+
+    def init_cuda_graph_state(self, *args, **kwargs):
+        pass
+
+    def init_forward_metadata_capture_cuda_graph(self, *args, **kwargs):
+        pass
+
+    def init_forward_metadata_replay_cuda_graph(self, *args, **kwargs):
+        pass

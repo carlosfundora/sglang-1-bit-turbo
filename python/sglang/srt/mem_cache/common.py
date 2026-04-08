@@ -344,15 +344,16 @@ def alloc_for_extend(
     # Create tensors for allocation
     prefix_lens_cpu = torch.tensor(batch.prefix_lens, dtype=torch.int64)
     extend_lens_cpu = torch.tensor(batch.extend_lens, dtype=torch.int64)
-    prefix_lens_device = prefix_lens_cpu.to(batch.device, non_blocking=True)
-    extend_lens_device = extend_lens_cpu.to(batch.device, non_blocking=True)
+    # Synchronous copy to avoid ROCm H2D race
+    prefix_lens_device = prefix_lens_cpu.to(batch.device)
+    extend_lens_device = extend_lens_cpu.to(batch.device)
 
     # Allocate req slots
     req_pool_indices = alloc_req_slots(
         batch.req_to_token_pool, batch.reqs, batch.tree_cache
     )
     req_pool_indices_cpu = torch.tensor(req_pool_indices, dtype=torch.int64)
-    req_pool_indices_device = req_pool_indices_cpu.to(batch.device, non_blocking=True)
+    req_pool_indices_device = req_pool_indices_cpu.to(batch.device)
 
     # Allocate KV cache (throws exception on failure)
     if batch.tree_cache.page_size == 1:

@@ -41,6 +41,7 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTe
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.llama import LlamaDecoderLayer, LlamaForCausalLM, LlamaMLP
 
+
 logger = logging.getLogger(__name__)
 _is_hip = is_hip()
 
@@ -117,10 +118,7 @@ class LlamaModel(nn.Module):
         self.config = config
         if not hasattr(self.config, "parallel_drafting"):
             self.config.parallel_drafting = False
-        if (
-            not hasattr(self.config, "mask_token_id")
-            or self.config.mask_token_id is None
-        ):
+        if not hasattr(self.config, "mask_token_id") or self.config.mask_token_id is None:
             self.config.mask_token_id = (
                 self.config.pad_token_id if self.config.pad_token_id is not None else 0
             )
@@ -139,8 +137,6 @@ class LlamaModel(nn.Module):
             config.hidden_size,
             prefix=add_prefix("embed_tokens", prefix),
         )
-        self._embed_tokens_cpu = None
-
         if hasattr(config, "target_hidden_size"):
             self.hidden_size_in = config.target_hidden_size
         else:
@@ -200,42 +196,11 @@ class LlamaModel(nn.Module):
             )
             input_ids = torch.cat([last_token_ids, mask_token_ids], dim=1)
 
-        embeds = (
-            self._lookup_embed_tokens_hip_safe(input_ids)
-            if _is_hip
-            else self.embed_tokens(input_ids)
-        )
+        # torch.nn.Embedding works fine on ROCm; CPU row-by-row loop was a
+        # workaround for a stale env and caused catastrophic throughput (~0.5 t/s).
+        embeds = self.embed_tokens(input_ids)
         projected_hidden_states = self.fc(all_hidden_states.to(self.fc.weight.dtype))
         return embeds, projected_hidden_states
-
-    def _lookup_embed_tokens_hip_safe(self, input_ids: torch.Tensor) -> torch.Tensor:
-        weight = self.embed_tokens.weight.detach()
-        cpu_ids = input_ids.detach().to(device="cpu", dtype=torch.long)
-
-        if self._embed_tokens_cpu is None:
-            logger.info(
-                "LlamaEagle3 HIP-safe draft embedding lookup enabled; using row-wise CPU copies"
-            )
-            self._embed_tokens_cpu = True
-
-        flat_ids = cpu_ids.reshape(-1)
-        cpu_embeds = torch.empty(
-            (flat_ids.numel(), weight.shape[1]),
-            dtype=weight.dtype,
-            device="cpu",
-        )
-        for row_idx, token_id in enumerate(flat_ids.tolist()):
-            token_row = weight.narrow(0, int(token_id), 1).to(
-                device="cpu",
-                dtype=weight.dtype,
-                non_blocking=False,
-            )
-            cpu_embeds[row_idx].copy_(token_row[0])
-
-        cpu_embeds = cpu_embeds.reshape(*cpu_ids.shape, weight.shape[1])
-        return cpu_embeds.to(
-            device=input_ids.device, dtype=weight.dtype, non_blocking=False
-        )
 
     def forward(
         self,
@@ -256,21 +221,11 @@ class LlamaModel(nn.Module):
                 embeds = torch.cat(
                     [
                         embeds[:-1],
-                        (
-                            self._lookup_embed_tokens_hip_safe(
-                                input_ids[-1].unsqueeze(0)
-                            )
-                            if _is_hip
-                            else self.embed_tokens(input_ids[-1].unsqueeze(0))
-                        ),
+                        self.embed_tokens(input_ids[-1].unsqueeze(0)),
                     ]
                 )
             if embeds is None:
-                embeds = (
-                    self._lookup_embed_tokens_hip_safe(input_ids)
-                    if _is_hip
-                    else self.embed_tokens(input_ids)
-                )
+                embeds = self.embed_tokens(input_ids)
         else:
             embeds = input_embeds
 
@@ -278,19 +233,40 @@ class LlamaModel(nn.Module):
             positions = forward_batch.mrope_positions
 
         hidden_states = forward_batch.spec_info.hidden_states
-        if hidden_states.shape[-1] != embeds.shape[-1]:
-            # Some EAGLE3 checkpoints and compatibility drafts emit a 2x hidden-state
-            # concat while the canonical projection expects 3x. Align to the learned
-            # projection width so the draft can still execute.
+        # Apply fc only when hidden_states are in TARGET aux-hidden space (fc.in_features = 7680
+        # for a 3-layer EAGLE3 setup).  During DECODE DRAFT STEPS, hidden_states is the draft
+        # model's own previous output (fc.out_features = 2560) and must NOT be projected again —
+        # zero-padding 2560 to 7680 and projecting through fc produces garbage logits → 0% accept.
+        if hidden_states.shape[-1] != self.fc.out_features:
+            # RESCALE: the EAGLE3 head was trained on full-precision (fp16/bf16) aux hidden
+            # states with per-layer norm ~150-250 for a 2560-dim vector.  Q1_0_G128
+            # dequantised hidden states have norms ~3000-4000 per layer (23-30× larger),
+            # causing the fc output to explode and the midlayer to produce near-uniform
+            # logits (~6e-5 per token → 0% acceptance).  Scale back to training distribution.
+            # TODO: remove once EAGLE3 head is retrained on quantised hidden states.
+            import sys
+            _hs_norm = hidden_states.float().norm(dim=-1).mean().item()
+            print(f"[E3-SCALE] PRE-SCALE hs.shape={list(hidden_states.shape)} hs.norm={_hs_norm:.1f} fc.in={self.fc.in_features} fc.out={self.fc.out_features}", file=sys.stderr, flush=True)
+            hidden_states = hidden_states * (1.0 / 25.0)
+            hidden_states = torch.clamp(hidden_states, -100.0, 100.0)
+            _hs_norm2 = hidden_states.float().norm(dim=-1).mean().item()
+            print(f"[E3-SCALE] POST-SCALE hs.norm={_hs_norm2:.1f}", file=sys.stderr, flush=True)
+
             expected_in = self.fc.in_features
             current_in = hidden_states.shape[-1]
-            if current_in < expected_in:
-                hidden_states = F.pad(hidden_states, (0, expected_in - current_in))
-            elif current_in > expected_in:
-                hidden_states = hidden_states[..., :expected_in]
+            if current_in != expected_in:
+                # Safety: handle unexpected intermediate sizes (e.g., partial aux capture)
+                if current_in < expected_in:
+                    hidden_states = F.pad(hidden_states, (0, expected_in - current_in))
+                else:
+                    hidden_states = hidden_states[..., :expected_in]
             if hidden_states.dtype != self.fc.weight.dtype:
                 hidden_states = hidden_states.to(self.fc.weight.dtype)
             hidden_states = self.fc(hidden_states)
+            import sys
+            _fc_norm = hidden_states.float().norm(dim=-1).mean().item()
+            _emb_norm = embeds.float().norm(dim=-1).mean().item()
+            print(f"[E3-SCALE] POST-FC fc_out.norm={_fc_norm:.1f} embeds.norm={_emb_norm:.1f}", file=sys.stderr, flush=True)
 
         # idle batch
         if hidden_states.shape[0] == 0:

@@ -20,6 +20,13 @@ class SpeculativeAlgorithm(Enum):
     P_EAGLE = auto()
     STANDALONE = auto()
     NGRAM = auto()
+    P_CASCADE = auto()
+    MEDUSA = auto()
+    SAGUARO = auto()  # wrapper, not standalone — wraps any other algorithm
+    CHIMERA = auto()  # CHIMERA-SD: fused P-EAGLE + Hydra + DyTC + n-gram + SSD
+    SELF_SPEC = auto()  # Self-Speculative Decoding via early-exit / hidden reuse
+    PHANTOM_SD = auto()  # NGRAM with CPU-threaded tree pre-building
+    TQ5_X = auto()  # TurboQuant 5 eXtended: HSA zero-copy ghost-draft (AMD gfx103x)
     NONE = auto()
 
     @classmethod
@@ -57,8 +64,37 @@ class SpeculativeAlgorithm(Enum):
     def is_ngram(self) -> bool:
         return self == SpeculativeAlgorithm.NGRAM
 
+    def is_p_cascade(self) -> bool:
+        return self == SpeculativeAlgorithm.P_CASCADE
+
+    def is_medusa(self) -> bool:
+        return self == SpeculativeAlgorithm.MEDUSA
+
+    def is_chimera(self) -> bool:
+        return self == SpeculativeAlgorithm.CHIMERA
+
+    def is_self_spec(self) -> bool:
+        return self == SpeculativeAlgorithm.SELF_SPEC
+
+    def is_phantom_sd(self) -> bool:
+        return self == SpeculativeAlgorithm.PHANTOM_SD
+
+    def is_tq5x(self) -> bool:
+        return self == SpeculativeAlgorithm.TQ5_X
+
     def supports_spec_v2(self) -> bool:
         return self.is_eagle() or self.is_standalone()
+
+    def needs_draft_model(self) -> bool:
+        """Whether the algorithm requires --speculative-draft-model-path."""
+        return self in {
+            SpeculativeAlgorithm.EAGLE,
+            SpeculativeAlgorithm.EAGLE3,
+            SpeculativeAlgorithm.P_EAGLE,
+            SpeculativeAlgorithm.STANDALONE,
+            SpeculativeAlgorithm.P_CASCADE,
+            SpeculativeAlgorithm.CHIMERA,
+        }
 
     def create_worker(
         self, server_args: ServerArgs
@@ -68,7 +104,18 @@ class SpeculativeAlgorithm(Enum):
         ), "Cannot create worker for NONE speculative algorithm."
 
         enable_overlap = not server_args.disable_overlap_schedule
-        if self.is_eagle() and server_args.enable_multi_layer_eagle:
+
+        if self.is_p_cascade():
+            if enable_overlap:
+                raise ValueError(
+                    "P_CASCADE does not support overlap scheduling yet. "
+                    "Use --disable-overlap-schedule."
+                )
+            from sglang.srt.speculative.p_cascade_worker import PCascadeWorker
+
+            return PCascadeWorker
+
+        elif self.is_eagle() and server_args.enable_multi_layer_eagle:
             # FIXME: migrate to EagleWorker
             if enable_overlap:
                 from sglang.srt.speculative.multi_layer_eagle_worker_v2 import (
@@ -113,6 +160,56 @@ class SpeculativeAlgorithm(Enum):
 
             return NGRAMWorker
 
+        elif self.is_medusa():
+            if enable_overlap:
+                raise ValueError(
+                    "MEDUSA does not support overlap scheduling yet. "
+                    "Use --disable-overlap-schedule."
+                )
+            from sglang.srt.speculative.medusa_worker import MedusaWorker
+
+            return MedusaWorker
+
+        elif self.is_chimera():
+            if enable_overlap:
+                raise ValueError(
+                    "CHIMERA does not support overlap scheduling yet. "
+                    "Use --disable-overlap-schedule."
+                )
+            from sglang.srt.speculative.chimera_worker import ChimeraWorker
+
+            return ChimeraWorker
+
+        elif self.is_self_spec():
+            if enable_overlap:
+                raise ValueError(
+                    "SELF_SPEC does not support overlap scheduling yet. "
+                    "Use --disable-overlap-schedule."
+                )
+            from sglang.srt.speculative.ssd_worker import SSDWorker
+
+            return SSDWorker
+
+        elif self.is_phantom_sd():
+            if enable_overlap:
+                raise ValueError(
+                    "PHANTOM_SD does not support overlap scheduling yet. "
+                    "Use --disable-overlap-schedule."
+                )
+            from sglang.srt.speculative.phantom_tree_worker import PhantomTreeWorker
+
+            return PhantomTreeWorker
+
+        elif self.is_tq5x():
+            if enable_overlap:
+                raise ValueError(
+                    "TQ5_X does not support overlap scheduling yet. "
+                    "Use --disable-overlap-schedule."
+                )
+            from sglang.srt.speculative.tq5x_worker import TQ5XWorker
+
+            return TQ5XWorker
+
         raise ValueError("Unreachable code path in create_worker.")
 
 
@@ -122,6 +219,7 @@ class SpecInputType(IntEnum):
     EAGLE_DRAFT = auto()
     EAGLE_VERIFY = auto()
     NGRAM_VERIFY = auto()
+    MEDUSA_VERIFY = auto()  # reuses NGRAM tree infrastructure
 
 
 class SpecInput(ABC):
@@ -137,6 +235,7 @@ class SpecInput(ABC):
         return self.spec_input_type in {
             SpecInputType.EAGLE_VERIFY,
             SpecInputType.NGRAM_VERIFY,
+            SpecInputType.MEDUSA_VERIFY,
         }
 
     @abstractmethod

@@ -548,22 +548,80 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         if ret.forward_mode.is_decode() or ret.forward_mode.is_target_verify():
             if ret.positions is None:
                 ret.positions = clamp_position(batch.seq_lens)
+            # TARGET_VERIFY routes through forward_extend (is_extend() returns True)
+            # but the branch above skips extend_prefix_lens/extend_seq_lens setup.
+            # Synthesize them so torch_native attention backend works correctly.
+            if ret.forward_mode.is_target_verify() and ret.extend_prefix_lens is None:
+                bs = len(batch.seq_lens)
+                spec = batch.spec_info
+                draft_num = getattr(spec, "draft_token_num", 0)
+                if draft_num > 0:
+                    # seq_lens is the original pre-draft length. For torch_native
+                    # extend attention, prefix = original seq_lens, extend = draft_num,
+                    # and total KV length = seq_lens + draft_num.
+                    # Create tensors directly on GPU to avoid async H2D race.
+                    ret.extend_prefix_lens = batch.seq_lens.to(torch.int32)
+                    ret.extend_seq_lens = torch.full(
+                        (bs,), draft_num, dtype=torch.int32, device=device
+                    )
+                    ret.extend_prefix_lens_cpu = ret.extend_prefix_lens.tolist()
+                    ret.extend_seq_lens_cpu = [draft_num] * bs
+                    ret.extend_num_tokens = bs * draft_num
+                    # Update seq_lens to full KV length for attention
+                    ret.seq_lens = ret.seq_lens + draft_num
         else:
             assert isinstance(batch.extend_seq_lens, list)
             assert isinstance(batch.extend_prefix_lens, list)
-            ret.extend_seq_lens = torch.tensor(
-                batch.extend_seq_lens, dtype=torch.int32
-            ).to(device, non_blocking=True)
-            ret.extend_prefix_lens = torch.tensor(
-                batch.extend_prefix_lens, dtype=torch.int32
-            ).to(device, non_blocking=True)
+            # Guard: catch garbage extend_seq_lens (e.g. from stale batch state
+            # after forward_draft_extend_after_decode modifies but doesn't restore
+            # batch.extend_lens).  Recompute from the authoritative seq_lens +
+            # prefix_lens tensors rather than just clamping to an arbitrary max.
+            _ctx = model_runner.server_args.context_length or 4096
+            _seq_lens_cpu = batch.seq_lens.cpu().tolist() if hasattr(batch.seq_lens, 'cpu') else list(batch.seq_lens_cpu)
+            _bad = any(v > _ctx or v < 0 for v in batch.extend_seq_lens) or \
+                   any(v > _ctx or v < 0 for v in batch.extend_prefix_lens)
+            if _bad:
+                import logging as _log
+                _log.getLogger(__name__).warning(
+                    "init_new: BAD extend lists – recomputing from seq_lens. "
+                    "extend_seq_lens=%s extend_prefix_lens=%s seq_lens_cpu=%s forward_mode=%s",
+                    batch.extend_seq_lens, batch.extend_prefix_lens,
+                    _seq_lens_cpu, batch.forward_mode,
+                )
+                # Recompute: extend_len[i] = seq_len[i] - prefix_len[i]
+                # Use good prefix_lens when available; fall back to 0.
+                fixed_prefix = [min(max(int(p), 0), int(s))
+                                for p, s in zip(batch.extend_prefix_lens, _seq_lens_cpu)]
+                batch.extend_prefix_lens = fixed_prefix
+                batch.extend_seq_lens = [int(s) - p
+                                         for s, p in zip(_seq_lens_cpu, fixed_prefix)]
+                batch.extend_num_tokens = sum(batch.extend_seq_lens)
+            # Build CPU tensors first (needed for compute_position_torch on HIP,
+            # which does .cpu() internally — using the async GPU tensors directly
+            # causes a non_blocking stream race where the H2D copy hasn't landed yet).
+            _prefix_cpu = torch.tensor(batch.extend_prefix_lens, dtype=torch.int32)
+            _seq_cpu = torch.tensor(batch.extend_seq_lens, dtype=torch.int32)
+            ret.extend_seq_lens = _seq_cpu.to(device, non_blocking=True)
+            ret.extend_prefix_lens = _prefix_cpu.to(device, non_blocking=True)
             ret.extend_num_tokens = batch.extend_num_tokens
-            positions, ret.extend_start_loc = compute_position(
-                model_runner.server_args.attention_backend,
-                ret.extend_prefix_lens,
-                ret.extend_seq_lens,
-                ret.extend_num_tokens,
-            )
+            if is_hip():
+                # On ROCm, always use CPU tensors to compute positions — avoids the
+                # non_blocking H2D race where the copy hasn't landed before .cpu().
+                positions, ret.extend_start_loc = compute_position_torch(
+                    _prefix_cpu, _seq_cpu
+                )
+                # MUST be synchronous: rotary_embedding._index_cos_sin_cache does
+                # positions.to('cpu') immediately after — a non_blocking H2D followed
+                # by a D2H in the default stream races on ROCm's copy engine stream.
+                positions = positions.to(device)
+                ret.extend_start_loc = ret.extend_start_loc.to(device, non_blocking=True)
+            else:
+                positions, ret.extend_start_loc = compute_position(
+                    model_runner.server_args.attention_backend,
+                    ret.extend_prefix_lens,
+                    ret.extend_seq_lens,
+                    ret.extend_num_tokens,
+                )
             if ret.positions is None:
                 ret.positions = positions
             ret.extend_prefix_lens_cpu = batch.extend_prefix_lens
@@ -598,6 +656,20 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                 model_runner.lora_manager.fetch_new_loras(set(ret.lora_ids))
 
             model_runner.lora_manager.prepare_lora_batch(ret)
+
+        # ── Speculative decode phase-boundary diagnostics ────────────
+        try:
+            from sglang.srt.observability.spec_decode_tracer import get_tracer, ENABLED
+            if ENABLED:
+                _diag = get_tracer()
+                _diag.snapshot_forward_batch(
+                    phase=f"init_new:{ret.forward_mode}",
+                    forward_batch=ret,
+                    extra={"_bad_extend_detected": _bad} if '_bad' in dir() else None,
+                )
+        except Exception:
+            pass
+        # ─────────────────────────────────────────────────────────────
 
         return ret
 
@@ -1178,12 +1250,28 @@ def compute_position_torch(
     # Guard against zero/negative extend_len which causes torch.arange to fail
     # with "upper bound and lower bound inconsistent with step sign"
     clamped_seq_lens = torch.clamp(extend_seq_lens, min=1)
+    # Safety guard: clamp values to a sane range to prevent multi-GiB arange OOM
+    # (e.g. when int32 overflows or warmup generates garbage extend values)
+    MAX_CONTEXT = 65536
+    pl_cpu = extend_prefix_lens.cpu()
+    sl_cpu = clamped_seq_lens.cpu()
+    bad_mask = (pl_cpu < 0) | (sl_cpu < 0) | (pl_cpu > MAX_CONTEXT) | (sl_cpu > MAX_CONTEXT)
+    if bad_mask.any():
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "compute_position_torch: CLAMPING bad extend values. "
+            "extend_prefix_lens=%s extend_seq_lens=%s",
+            pl_cpu.tolist(), sl_cpu.tolist(),
+        )
+        pl_cpu = pl_cpu.clamp(0, MAX_CONTEXT)
+        sl_cpu = sl_cpu.clamp(1, MAX_CONTEXT)
     positions = torch.cat(
         [
             torch.arange(
-                prefix_len, prefix_len + extend_len, device=extend_prefix_lens.device
+                prefix_len.item(), prefix_len.item() + extend_len.item(),
+                device=extend_prefix_lens.device,
             )
-            for prefix_len, extend_len in zip(extend_prefix_lens, clamped_seq_lens)
+            for prefix_len, extend_len in zip(pl_cpu, sl_cpu)
         ],
         axis=0,
     )

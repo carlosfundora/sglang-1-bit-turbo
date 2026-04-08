@@ -1,0 +1,1598 @@
+{
+  "WANT": [
+    [
+      "1c5c6dad5",
+      "[tiny] Fix TOCTOU race in pause-aware weight update locking (#22304)",
+      "runtime_fix"
+    ],
+    [
+      "eca62ab8f",
+      "UX: clean loggings (#22174)",
+      "log_cleanup"
+    ],
+    [
+      "117508dcd",
+      "Switch eagle_infer_beta to EAGLE3 (#22303)",
+      "eagle3_fix"
+    ],
+    [
+      "6c2a759a0",
+      "[fix] Fix writer lock deadlock in update_weights_from_ipc during pause_generation (#22290)",
+      "runtime_fix"
+    ],
+    [
+      "490fa9fa4",
+      "[Perf] Restore torch.compile fusion for topk postprocessing (#21771)",
+      "perf"
+    ],
+    [
+      "3f7dfba41",
+      "fix qwen2_5_math_rm_72b (#21295)",
+      "qwen_fix"
+    ],
+    [
+      "be0277f9a",
+      "[Spec][Ngram] Add output-as-corpus accept length benchmark for external SAM (#22199)",
+      "ngram_improvement"
+    ],
+    [
+      "e4b1366a4",
+      "[Spec][Ngram] Support multiple SAMs with dynamic HTTP API (#22203)",
+      "ngram_improvement"
+    ],
+    [
+      "5cc246e09",
+      "Fix extra calls to get_numa_node_if_available to clean up logs (#21781)",
+      "log_cleanup"
+    ],
+    [
+      "a80961333",
+      "Clean up req_time_stats: reduce overhead and simplify (#22186)",
+      "perf"
+    ],
+    [
+      "93f38fe41",
+      "tiny fix chain-style multi layer eagle comments (#22206)",
+      "eagle_fix"
+    ],
+    [
+      "8f337682b",
+      "[sgl] potential chained spec v2 fixes (#22041)",
+      "spec_v2_fix"
+    ],
+    [
+      "d72f58d1c",
+      "[Qwen3-Specv2]: Fix flaky ci (#22194)",
+      "spec_v2_fix"
+    ],
+    [
+      "3178f3959",
+      "Align incremental streaming logprobs with streamed output tokens (#21583)",
+      "logprobs"
+    ],
+    [
+      "12272b679",
+      "[Spec][Ngram] 6/N: Load an external corpus and construct a Suffix Automaton (#21425)",
+      "ngram_improvement"
+    ],
+    [
+      "6de2ff2a8",
+      "[Spec][Ngram] Followup fixes for `MatchState` incremental advance (#22180)",
+      "ngram_improvement"
+    ],
+    [
+      "b2008bf9e",
+      "[Spec][Ngram] 5/N: Store and advance anchor match state across decode steps (#21243)",
+      "ngram_improvement"
+    ],
+    [
+      "52801ff20",
+      "[sgl] two potential spec_v2 bug fixes (#21589)",
+      "spec_v2_fix"
+    ],
+    [
+      "93109cc89",
+      "[Fix] Fix setuptools-scm version resolution for rc tags (#22165)",
+      "build_fix"
+    ],
+    [
+      "75ab75d02",
+      "Fix create_grammar_backend test calls with think_end_id (#22158)",
+      "grammar_fix"
+    ],
+    [
+      "f6c9072e4",
+      "[SpecV2]: Reopen kl accuracy test for qwen3 + SpecV2 (#22104)",
+      "spec_v2_fix"
+    ],
+    [
+      "df9c831ab",
+      "Unify think_end_id to model_config as single source of truth (#22148)",
+      "model_config"
+    ],
+    [
+      "cd2d45e22",
+      "Isolate spec V1 path in decode post-processing (#22146)",
+      "spec_fix"
+    ],
+    [
+      "70658bfeb",
+      "fix: add missing f-string prefixes in warning and assert messages (#22067)",
+      "code_fix"
+    ],
+    [
+      "de9859073",
+      "Add `--stream-response-default-include-usage` server flag (#16711)",
+      "server_args"
+    ],
+    [
+      "9593d434c",
+      "fix: pause_generation should not populate running_batch on prefill nodes (#20273)",
+      "runtime_fix"
+    ],
+    [
+      "1d7a53dd0",
+      "[Fix] XGrammarGrammarBackend reset to clear inherited cache (#22054)",
+      "grammar_fix"
+    ],
+    [
+      "ee9d922f5",
+      "Revert \"[Kernel] Fuse temperature + softmax in sampling for decode speedup\" (#22046)",
+      "sampling_kernel"
+    ],
+    [
+      "fe38410c3",
+      "Remove logging for subprocess watchdog start (#21968)",
+      "log_cleanup"
+    ],
+    [
+      "9d9537fbd",
+      "Migrate ngram corpus from torch cpp_extension to TVM FFI jit_kernel (#21920)",
+      "ngram_improvement"
+    ],
+    [
+      "b684b0b72",
+      "Fix spec v2 + logprob when max_num_token is set (#20799)",
+      "spec_v2_fix"
+    ],
+    [
+      "f30df723b",
+      "scheduler: add prefill-only update in merge batch (#21840)",
+      "scheduler"
+    ],
+    [
+      "f25bf8606",
+      "Fix ngram doc for speculative_num_draft_tokens default (#21910)",
+      "ngram_improvement"
+    ],
+    [
+      "f83665807",
+      "[Spec][Ngram] 4/N: Remove `max_match_window_size` and `min_match_window_size`, matching all suffixes of the Trie (#21225)",
+      "ngram_improvement"
+    ],
+    [
+      "269589ad7",
+      "Return HTTP 400 for streaming validation errors (#21900)",
+      "api_fix"
+    ],
+    [
+      "153359b4d",
+      "Multi tool streaming fix (#20004)",
+      "api_fix"
+    ],
+    [
+      "7a59e05dd",
+      "[Kernel] Fuse temperature + softmax in sampling for decode speedup (#20501)",
+      "sampling_kernel"
+    ],
+    [
+      "cb0c2cbfd",
+      "Enable multi-thread weight loading by default (#20289)",
+      "weight_loading"
+    ],
+    [
+      "a1c725bdc",
+      "fix: pre-init tokenizer_manager to avoid AttributeError in shutdown (#21824)",
+      "runtime_fix"
+    ],
+    [
+      "95b881452",
+      "Fix in-place mode in pause generation (#21705)",
+      "runtime_fix"
+    ],
+    [
+      "835e19656",
+      "Bug fix for llama eagle3 (#21397)",
+      "eagle3_fix"
+    ],
+    [
+      "2861596fc",
+      "[Bugfix] Fix PP tied embeddings weight loading for qwen3.5 4B dense model (#21347)",
+      "weight_loading"
+    ],
+    [
+      "71baa025b",
+      "Fix added tokens config with sensible filter (#17905)",
+      "tokenizer_fix"
+    ],
+    [
+      "5bbf347bb",
+      "[jit_kernel] Optimize fused_qknorm_rope: deduplicate sincosf for interleave RoPE  (#21654)",
+      "jit_kernel"
+    ],
+    [
+      "20d07c438",
+      "Fix remote weight info nnode>1 and dp>1 (#17389)",
+      "weight_loading"
+    ],
+    [
+      "03e4f2858",
+      "[Perf]Remove H2D  for Qwen3.5 SpecV2 (#20864)",
+      "spec_v2_fix"
+    ]
+  ],
+  "MAYBE": [
+    [
+      "ea119adc9",
+      "Refactor auto benchmark unit tests and fix CI bug (#22270)",
+      "uncategorized"
+    ],
+    [
+      "cc35714b0",
+      "[tiny] migrate /get_server_info; print accept length in accuracy tests (#22282)",
+      "api_migration"
+    ],
+    [
+      "be42fbbbd",
+      "Support HTTP2 server (#21700)",
+      "feature"
+    ],
+    [
+      "233f3e31b",
+      "fix(pcg,mm): fix zeroing of input_embeds when replay PCG (#22229)",
+      "pcg"
+    ],
+    [
+      "494bb8616",
+      "Cache sub-objects in __getitem__ to ensure identity stability (#22184)",
+      "runtime"
+    ],
+    [
+      "c4240218c",
+      "Fix ut module importing (#22176)",
+      "uncategorized"
+    ],
+    [
+      "e835601fb",
+      "Cache gfx95 quant format detection in DeepseekV2DecoderLayer (#22143)",
+      "uncategorized"
+    ],
+    [
+      "5dd2c243e",
+      "fix: TRT-LLM MHA CUDA illegal address with EAGLE v2 + DP attention (#21649)",
+      "uncategorized"
+    ],
+    [
+      "3a4f4cbc5",
+      "DEBUG: reproduce flaky test_load_weights_from_remote_instance (#22150)",
+      "uncategorized"
+    ],
+    [
+      "aeff9fb7c",
+      "Add dump_metric to MMMU, lm-eval, and NeMo Skills eval paths (#22147)",
+      "uncategorized"
+    ],
+    [
+      "088203454",
+      "[Fix] Fix nightly tests (#22140)",
+      "uncategorized"
+    ],
+    [
+      "bd6a58560",
+      "Consolidate reasoning tests into test/registered/reasoning/ (#22139)",
+      "uncategorized"
+    ],
+    [
+      "904bb476d",
+      "Migrate reasoning_tokens tests to existing server fixtures (#22102)",
+      "uncategorized"
+    ],
+    [
+      "abc297521",
+      "Fix killall_sglang missing the main sglang serve process (#22103)",
+      "uncategorized"
+    ],
+    [
+      "e9d92b0e3",
+      "Relax spec decoding accuracy threshold to fix flaky test (#22100)",
+      "uncategorized"
+    ],
+    [
+      "1ad683965",
+      "[Feature] Add Reasoning Tokens Usage (#15562)",
+      "feature"
+    ],
+    [
+      "a94c3804c",
+      "fix: mistral embedding regression fix (#21913)",
+      "model_fix"
+    ],
+    [
+      "ef1303124",
+      "Tiny fix step3.5-flash launch crash (#22076)",
+      "uncategorized"
+    ],
+    [
+      "68f4c52d3",
+      "fix ut test_moe (#21735)",
+      "uncategorized"
+    ],
+    [
+      "fe92f3563",
+      "dp: add profile req hook (#22083)",
+      "uncategorized"
+    ],
+    [
+      "95cdbce34",
+      "[Test] Extract common PD server setup into base fixture (#22080)",
+      "uncategorized"
+    ],
+    [
+      "0c9dc098e",
+      "Fix DP attention worker port binding for IPv6 support (#21917)",
+      "dp_attention"
+    ],
+    [
+      "44e5d3570",
+      "[Feature][JIT Kernel] JIT activation and update skills (by codex) (#21766)",
+      "jit_kernel"
+    ],
+    [
+      "d1b7c3907",
+      "[Parallel State Refactor 2/n] Unify code path of AMD deterministic all reduce (#20871)",
+      "amd_general"
+    ],
+    [
+      "2b5aed94f",
+      "Remove maxItems=1 restriction when tool_choice is specified (#20208)",
+      "api_fix"
+    ],
+    [
+      "df94cdceb",
+      "[Parallel State Refactor 1/n] Remove stream of PyNCCL (#20866)",
+      "amd_general"
+    ],
+    [
+      "ed427e129",
+      "Migrate all callers from /get_server_info to /server_info (#21463)",
+      "api_migration"
+    ],
+    [
+      "875a61599",
+      "fix(ci): update est_time for 57 tests based on runtime analysis (#21896)",
+      "uncategorized"
+    ],
+    [
+      "0f6bedf6e",
+      "fix pcg torch dynamo recompile in mxfp8 Triton path (#21888)",
+      "pcg"
+    ],
+    [
+      "6098c51bc",
+      "fix(MiMo-V2-Flash): add mimo reasoning parser (#21414)",
+      "uncategorized"
+    ],
+    [
+      "20f419358",
+      "[Feature] JIT rmsnorm update (with claude) (#21834)",
+      "jit_kernel"
+    ],
+    [
+      "a188208e9",
+      "[AMD] Optimize Qwen3-VL decode - fuse QK-norm + 3D mRoPE + KV cache write (#21458)",
+      "amd_general"
+    ],
+    [
+      "1b45d81e9",
+      "fix: only showing recent runners from ci failure analysis (#21015)",
+      "uncategorized"
+    ],
+    [
+      "a8759dd9a",
+      "Fix killall.py crash when sglang is not yet installed (#21797)",
+      "uncategorized"
+    ],
+    [
+      "7932e4c3e",
+      "Remove redundant test_moe_eval_accuracy_large (#21787)",
+      "uncategorized"
+    ],
+    [
+      "f4505e2ee",
+      "Fix ineffective is_base_mistral CI patch for HF API rate limiting (#21729)",
+      "uncategorized"
+    ],
+    [
+      "a6a8b9b37",
+      "bugfix(model):fix deepstack index out of range error (#21727)",
+      "uncategorized"
+    ],
+    [
+      "5628e908a",
+      "[AMD] Use tgemm.mm for MoEGate router gemm in deepseek_v2.py (#21657)",
+      "amd_general"
+    ],
+    [
+      "dd9c9c1b8",
+      "Add explicit disable flag for FlashInfer allreduce fusion (#21446)",
+      "uncategorized"
+    ]
+  ],
+  "SKIP": [
+    [
+      "a5ed507a1",
+      "[refactor] [asr] add transcription adapter for extensible ASR models support (#22181)",
+      "asr_whisper"
+    ],
+    [
+      "ae8da14ea",
+      "[fix] [whisper] ensure inputs are moved to the correct device before processing. (#22293)",
+      "asr_whisper"
+    ],
+    [
+      "b5b2dbe05",
+      "[Diffusion] Add diffusion NVFP4 scaled-mm correctness test (#22127)",
+      "diffusion"
+    ],
+    [
+      "33c9cc899",
+      "[NPU] fix qwen3.5 video processor (#22266)",
+      "npu"
+    ],
+    [
+      "931dbcead",
+      "[CI] Set RUNAI_STREAMER_MEMORY_LIMIT=0 for stage-b-test-1-gpu-small (#22346)",
+      "ci"
+    ],
+    [
+      "2ad5e6df1",
+      "[CI] Relax gpt-oss 4GPU accuracy threshold from 0.60 to 0.58 (#22237)",
+      "ci"
+    ],
+    [
+      "413913763",
+      "fix: wrap _import_static_state in inference_mode to fix resume on Blackwell (#21035)",
+      "nvidia_specific"
+    ],
+    [
+      "79c82c5c4",
+      "[HiCache] Fix write_backup return type when parent not backed up (#22185)",
+      "hicache_hisparse"
+    ],
+    [
+      "712c8c505",
+      "[Score API] Add SequenceClassification Model support (#22118)",
+      "score_api"
+    ],
+    [
+      "213af1d4f",
+      "Add CI tests for GLM-5 (#22285)",
+      "unrelated_model"
+    ],
+    [
+      "c3c13dd5e",
+      "[diffusion] fix: make warmup image initialization rank-safe (#21817)",
+      "diffusion"
+    ],
+    [
+      "de0cfed15",
+      "[AMD] Fix DLPack Error in Aiter flydsl GEMM by Detaching MoE Gate Weight (#22262)",
+      "amd_mi_specific"
+    ],
+    [
+      "cd373667c",
+      "[Bugfix] [NPU] Qwen3.5 with quantization fix (#21692)",
+      "npu"
+    ],
+    [
+      "db60a620d",
+      "[AMD] Add GLM-5-FP8 nightly performance benchmarks for MI30x and MI35x (#21710)",
+      "amd_mi_specific"
+    ],
+    [
+      "729b74d8d",
+      "[AMD] Fix GLM-5 fp8 KV quant path dispatch on MI300 (#22314)",
+      "amd_mi_specific"
+    ],
+    [
+      "36f05810c",
+      "[CI] Move manual-only nightly tests out of test/registered/ (#22298)",
+      "ci"
+    ],
+    [
+      "4e4b4ac15",
+      "[NPU] enable index Cache for npu (#21502)",
+      "npu"
+    ],
+    [
+      "493ec91cb",
+      "[CI] Fix stage-b-test-1-gpu-large (0) timeout by reordering LoRA tests and using tokenizer from cache (#22292)",
+      "ci"
+    ],
+    [
+      "86e4542f3",
+      "Use dedicated runner label for deepep 8-GPU tests (#22309)",
+      "ci"
+    ],
+    [
+      "8c3d80eab",
+      "Only upload CUDA coredumps on test failure (#22301)",
+      "ci"
+    ],
+    [
+      "dd73e9a62",
+      "Revert \"[CI] Update nightly test models for H200/B200 (#22288)\" (#22297)",
+      "nvidia_specific"
+    ],
+    [
+      "f6fc39569",
+      "[CI] Migrate mgsm_en eval to gsm8k to remove openaipublic dependency (#21931)",
+      "ci"
+    ],
+    [
+      "7546d04c8",
+      "[NVIDIA] Enable FP4 flashinfer trtllm routed moe (#21240)",
+      "nvidia_specific"
+    ],
+    [
+      "0e2a0260a",
+      "Add fast-fail to multimodal-gen CI (#22284)",
+      "vlm"
+    ],
+    [
+      "e6652309c",
+      "[CI] Update nightly test models for H200/B200 (#22288)",
+      "ci"
+    ],
+    [
+      "671fe7396",
+      "Reduce unnecessary kernels and copies in the NSA indexer (#22232)",
+      "nvidia_specific"
+    ],
+    [
+      "f08726fd5",
+      "[Feature] Add DFLASH speculative decoding support (#22077)",
+      "specialized"
+    ],
+    [
+      "e14876742",
+      "[AMD] Fix test_kimi_k25_mxfp4.py : stage-c-test-large-8-gpu-amd-mi35x (linux-mi35x-gpu-8, 1) (#22188)",
+      "amd_mi_specific"
+    ],
+    [
+      "1a8eb890f",
+      "Kernels community fa3 (#20796)",
+      "nvidia_specific"
+    ],
+    [
+      "0c204fbd5",
+      "[HiSparse] Optimize the scheduling of decode backup. (#21932)",
+      "hicache_hisparse"
+    ],
+    [
+      "6131fb588",
+      "[NPU] enable mla prepare fused kernel only when being mla attn (#22024)",
+      "npu"
+    ],
+    [
+      "ec5742f4a",
+      "fix: Auto-correct page_size for Mamba no_buffer radix cache mode (#20538)",
+      "mamba"
+    ],
+    [
+      "727a18206",
+      "[Mamba] eliminate D2H if tracking mamba states (#20522)",
+      "mamba"
+    ],
+    [
+      "5ae00ecd4",
+      "[Disagg][NIXL] Support Mamba state slice transfer for heterogeneous TP (Step 2/2 for Qwen3.5) (#22240)",
+      "pd_disagg"
+    ],
+    [
+      "e7bc23cda",
+      "[diffusion] CI: fix consistency check (#22251)",
+      "diffusion"
+    ],
+    [
+      "fae90abf6",
+      "Move ring test to nightly (#22267)",
+      "ci"
+    ],
+    [
+      "98f38b14d",
+      "Add registration API for external linear attention backend (#21983)",
+      "specialized"
+    ],
+    [
+      "3d3a32c0b",
+      "[HiSparse]: Add readme docs for HiSparse Feature (#22238)",
+      "hicache_hisparse"
+    ],
+    [
+      "3148742dd",
+      "[Disagg][NIXL] Fix heterogeneous TP KV transfer for non-MLA models (same logic with mooncake, Step 1/2 for Qwen3.5 support) (#22145)",
+      "pd_disagg"
+    ],
+    [
+      "ba78f6e0e",
+      "[AMD] Add Qwen3.5-397B FP8 nightly perf benchmarks for MI30x and MI35x (#21669)",
+      "amd_mi_specific"
+    ],
+    [
+      "f6e85676b",
+      "model: support qwen3-asr (#22073)",
+      "asr_whisper"
+    ],
+    [
+      "a757c1e3f",
+      "[Apple Silicon] [MLX] Add mlx and mlx-lm dependencies (#22162)",
+      "apple_mps"
+    ],
+    [
+      "2813cb6d9",
+      "[New Model] Gemma 4 (#21952)",
+      "unrelated_model"
+    ],
+    [
+      "73fc87a74",
+      "fix(grok): adapt  huihui-ai/grok-2 (#21522)",
+      "unrelated_model"
+    ],
+    [
+      "ef2d4013d",
+      "[diffusion] CI: add consistency test (#15236)",
+      "diffusion"
+    ],
+    [
+      "49cb7d546",
+      "Move hash utils out of hicache_storage to break CUDA import chain (#22214)",
+      "hicache_hisparse"
+    ],
+    [
+      "5e2b0f860",
+      "[diffusion] perf: replace Conv3d with reshape + F.linear in PatchEmbed (#21014)",
+      "diffusion"
+    ],
+    [
+      "ae38b24cc",
+      "[NPU] Support dp-attention for MiniMax2.5 (#20919)",
+      "npu"
+    ],
+    [
+      "56266de62",
+      "[CI] Add basic unit test for Minimax-M2.5 (#21792)",
+      "ci"
+    ],
+    [
+      "6f1412f4f",
+      "[CI] Relax transformers MMLU threshold from 0.65 to 0.64 (#22210)",
+      "ci"
+    ],
+    [
+      "0bc4e0ea7",
+      "[misc] update CI_PERMISSIONS.json (#22207)",
+      "misc"
+    ],
+    [
+      "7f2fcc0b0",
+      "[VLM]: allow Qwen3.5 models for encoder disaggregation (#21849)",
+      "pd_disagg"
+    ],
+    [
+      "b95324d19",
+      "Update test coverage report (#22190)",
+      "ci"
+    ],
+    [
+      "9ca2ae1c6",
+      "Update test skills and guide (#22189)",
+      "ci"
+    ],
+    [
+      "b311db2e4",
+      "[Doc] Fix and improve DeepSeek V3.2/GLM-5 documentation (#22179)",
+      "unrelated_model"
+    ],
+    [
+      "dc125afff",
+      "Add staging buffer CI test and documentation for heterogeneous TP (#21921)",
+      "pd_disagg"
+    ],
+    [
+      "82c41a2d9",
+      "[diffusion] model: support LTX2.3 (#22111)",
+      "diffusion"
+    ],
+    [
+      "f407461ec",
+      "Tiny fix trtllm_fp8_per_tensor_scale_moe_wrapper router_logits dtype (#22006)",
+      "nvidia_specific"
+    ],
+    [
+      "682ddf641",
+      "[CI] Add unit tests for srt/utils/auth.py (#21400)",
+      "ci"
+    ],
+    [
+      "30f5b8760",
+      "[CI] Add unit tests for function_call detectors (hermes, llama32, mistral) (#21399)",
+      "ci"
+    ],
+    [
+      "8d8aca8f2",
+      "[Test] Add unit tests for srt/tokenizer/tiktoken_tokenizer (#21107)",
+      "ci"
+    ],
+    [
+      "2f00e4255",
+      "[diffusion] CI: apply diffusers backend in lora case (#22157)",
+      "diffusion"
+    ],
+    [
+      "41c7c97ff",
+      "fix hisparse LRU policy (#22170)",
+      "hicache_hisparse"
+    ],
+    [
+      "30ba1f78b",
+      "Hisparse Minor Fix (#22131)",
+      "hicache_hisparse"
+    ],
+    [
+      "20ee59bcf",
+      "[Misc] Remove unused cu13 docker release workflow (#22167)",
+      "docker"
+    ],
+    [
+      "596c34ee0",
+      "Update ci_auto_bisect.py to have streak 1 so that all failures will b\u2026 (#22161)",
+      "ci"
+    ],
+    [
+      "c5fa364b8",
+      "[Hotfix] Fix router gemm on sm103 (#22134)",
+      "nvidia_specific"
+    ],
+    [
+      "51b276de7",
+      "[BugFix][RadixTree]: Fix backup invariant violation in Hi-MambaRadixTree (#22062)",
+      "hicache_hisparse"
+    ],
+    [
+      "dccb11881",
+      "[PD] Fix staging warmup for GQA prefill decode different tp (#22153)",
+      "pd_disagg"
+    ],
+    [
+      "106baedbf",
+      "[Doc] Update GLM-5 instructions in sglang documentation (#21716)",
+      "unrelated_model"
+    ],
+    [
+      "10b18b8b2",
+      "[diffusion] Add is_float64_supported to Platform (#22112)",
+      "diffusion"
+    ],
+    [
+      "5a3531641",
+      "Enable IndexCache for DeepSeek V3.2 (#21405)",
+      "unrelated_model"
+    ],
+    [
+      "2b119ba38",
+      "[diffusion] fix: fix accuracy for flux series (#22059)",
+      "diffusion"
+    ],
+    [
+      "71544f034",
+      "[model] support voxtral (speech-to-text) (#21635)",
+      "asr_whisper"
+    ],
+    [
+      "bb9e058f5",
+      "Add failfast flag to rerun-test workflow (#22141)",
+      "ci"
+    ],
+    [
+      "edee9ae92",
+      "Update ci_auto_bisect.py to use correct model (#22142)",
+      "ci"
+    ],
+    [
+      "723ed6c3c",
+      "[CI]Temporary ban auto benchmark tool test (#22138)",
+      "ci"
+    ],
+    [
+      "675100b53",
+      "Remove flaky TestToolChoiceLfm2Moe from test_tool_choice (#22137)",
+      "unrelated_model"
+    ],
+    [
+      "dd49127fe",
+      "[AMD]: Support MLA with nhead<16 and FP8 KV cache for TP=8 (Kimi K2.5\u2026 (#21213)",
+      "unrelated_model"
+    ],
+    [
+      "8cbeacd78",
+      "feat: CI auto-bisect workflow for automated regression analysis (#22119)",
+      "ci"
+    ],
+    [
+      "efee62efa",
+      "[diffusion] CI: improve diffusion comparison benchmark setting for realistic perf and auto-discover ut (#22086)",
+      "diffusion"
+    ],
+    [
+      "0f0f004f1",
+      "[Benchmark] Add auto benchmark tool with YAML-driven server flag search and canonical dataset format (#21736)",
+      "benchmark"
+    ],
+    [
+      "da25b471e",
+      "Align diffusion nightly presets and broaden skill discovery (#22099)",
+      "diffusion"
+    ],
+    [
+      "f3f7711da",
+      "Fix Python 3.11 f-string lint error in deepgemm Blackwell benchmark (#22108)",
+      "nvidia_specific"
+    ],
+    [
+      "bf984ae65",
+      "Revert \"[Bugfix] Temporarily skip TRTLLM attention on (G)B300 (SM103) to avoid high-concurrency hang\" (#22098)",
+      "nvidia_specific"
+    ],
+    [
+      "46bf19cda",
+      "chore: bump flashinfer version to 0.6.7.post2 (#22097)",
+      "flashinfer"
+    ],
+    [
+      "24763256b",
+      "[Speculative Decoding] Add FA4-based Spec Support (#21080)",
+      "nvidia_specific"
+    ],
+    [
+      "34d5765e2",
+      "[VLM] Chunk-aware ViT encoding with per-image cache and lazy device transfer (#22038)",
+      "vlm"
+    ],
+    [
+      "b5e8c4b9e",
+      "model: support LFM2-VL (Liquid Foundation Model 2 Vision-Language) (#21230)",
+      "vlm"
+    ],
+    [
+      "1fb4bf355",
+      "[diffusion] fix: validate attention backend for Ring Attention in USPAttention (#21828)",
+      "diffusion"
+    ],
+    [
+      "9fa12d605",
+      "Add dsv3 router gemm benchmark on blackwell (#17707)",
+      "nvidia_specific"
+    ],
+    [
+      "82ea4906c",
+      "[diffusion] Default NVFP4 to CUTLASS and add all-model shape benchmarks (#22091)",
+      "diffusion"
+    ],
+    [
+      "ff8e47edf",
+      "[5/n] Lora support cuda graph (#21647)",
+      "lora"
+    ],
+    [
+      "005e582d0",
+      "[diffusion] improve: norm fusion for z-image (#18762)",
+      "diffusion"
+    ],
+    [
+      "990c7590b",
+      "[RL] Support mxfp8 DeepSeek V3 (#21280)",
+      "rl"
+    ],
+    [
+      "31c9d8e88",
+      "[Diffusion] Fix weight scale swizzle and add large-M kernel config for FLUX.2-dev-NVFP4 (#22064)",
+      "diffusion"
+    ],
+    [
+      "b7ae3b5a9",
+      "GLM-4.7 and GLM-4.7-Flash Loading and import format (#21851)",
+      "unrelated_model"
+    ],
+    [
+      "db3d4f4b7",
+      "[diffusion] model: support two stage pipeline of LTX-2 (#20707)",
+      "diffusion"
+    ],
+    [
+      "5118295f7",
+      "[CI] Support CPU stage and auto-batch same-stage files in `/rerun-test` (#22081)",
+      "ci"
+    ],
+    [
+      "90e86800f",
+      "[Score API] Implement EngineScoreMixin for scoring functionality and refactor Tok\u2026 (#21342)",
+      "score_api"
+    ],
+    [
+      "ac1e437f6",
+      "Revert \"[Feature] JIT activation and update skills (by codex)\" (#22078)",
+      "revert"
+    ],
+    [
+      "8cb337c8e",
+      "[Bugfix] Temporarily skip TRTLLM attention on (G)B300 (SM103) to avoid high-concurrency hang (#21906)",
+      "nvidia_specific"
+    ],
+    [
+      "84118acf5",
+      "chore: bump sglang-kernel version to 0.4.1 (#22009)",
+      "kernel_release"
+    ],
+    [
+      "eb407b80f",
+      "[Kernel] Make FA3/FA4 imports lazy in FlashAttentionBackend (#22028)",
+      "nvidia_specific"
+    ],
+    [
+      "6aafe756b",
+      "Revert \"[Feature] NVFP4 Marlin fallback for non-Blackwell GPUs (SM75+\u2026 (#22047)",
+      "nvidia_specific"
+    ],
+    [
+      "ed3435e37",
+      "[HiSparse]: Optimize server args checking-HiSparse is temporarily only available for DSA models. (#22065)",
+      "hicache_hisparse"
+    ],
+    [
+      "151f72716",
+      "[diffusion] fix: fix gated repo failing the generate cmd (#22040)",
+      "diffusion"
+    ],
+    [
+      "896ea7582",
+      "Remove reverted test (#22058)",
+      "ci"
+    ],
+    [
+      "47f4fd275",
+      "[CI] Fix test suite names and add suite validation (#21937)",
+      "ci"
+    ],
+    [
+      "030fb1c4b",
+      "refactor: replace mm_inputs dict with MultimodalProcessorOutput (#21738)",
+      "vlm"
+    ],
+    [
+      "9f409d074",
+      "[CI] Adjust CI server launch timeout (#22045)",
+      "ci"
+    ],
+    [
+      "97adf8a29",
+      "[misc] Add hint for kernel release trigger (#22036)",
+      "kernel_release"
+    ],
+    [
+      "98ac40192",
+      "[Workflow] Fix kernel release build failures for aarch64 and wheel renaming (#22018)",
+      "workflow"
+    ],
+    [
+      "838f815e9",
+      "[diffusion] CI: temporarily disable accuracy ci (#22031)",
+      "diffusion"
+    ],
+    [
+      "56ac9c993",
+      "[Fix] Add _MOE_TP to graph_capture for MoE models with ep>1 (#21907)",
+      "cuda_graph"
+    ],
+    [
+      "ac593fed9",
+      "[AMD][Dockerfile] Support build-arg AITER_COMMIT for rocm.Dockerfile (#21949)",
+      "amd_mi_specific"
+    ],
+    [
+      "cd75d54fc",
+      "[Bugfix] Fix CUDA graph replay issues in trtllm_mla draft_extend (#21987)",
+      "nvidia_specific"
+    ],
+    [
+      "4f84ce580",
+      "[CI] ci: add test_http_server_auth.py to CI (#21866)",
+      "ci"
+    ],
+    [
+      "658a2813d",
+      "[NPU] Update CI Dependency (#21578)",
+      "npu"
+    ],
+    [
+      "d07d0a15c",
+      "[AMD] Add MiniMax-M2.5 nightly perf benchmarks for MI30x and MI35x (#21524)",
+      "amd_mi_specific"
+    ],
+    [
+      "7431db739",
+      "[AMD] Enable FP8 KV cache and FP8 attention kernel for NSA on MI300/MI355 with TileLang backend (#21511)",
+      "amd_mi_specific"
+    ],
+    [
+      "ad0516d9c",
+      "[NPU] optimize glm4.7 (#19246)",
+      "npu"
+    ],
+    [
+      "d82097a0d",
+      "[PD] Tiny register info field cleanup for mooncake backend (#22016)",
+      "pd_disagg"
+    ],
+    [
+      "24f52e66d",
+      "fix: remove duplicate words in comments (#22007)",
+      "trivial"
+    ],
+    [
+      "4cc970290",
+      "[CI] Fix duplicate job names that bypass branch protection (#22001)",
+      "ci"
+    ],
+    [
+      "6b876a771",
+      "[ROCM][RL] Shuffle Weight In-Place to Preserve Parameter Attributes (#21825)",
+      "rl"
+    ],
+    [
+      "75de47968",
+      "[Misc] Update CI permission (#22014)",
+      "ci"
+    ],
+    [
+      "4d097047f",
+      "[PD]: Add support for HiSparse to directly transfer the cache from Prefill to Decode DRAM. (#21591)",
+      "pd_disagg"
+    ],
+    [
+      "5c082c307",
+      "[Workflow] Fix kernel release jobs skipped on push events (#22011)",
+      "workflow"
+    ],
+    [
+      "0a709cfe0",
+      "[Workflow] Avoid triggering nightly tests in kernel bump workflow (#22010)",
+      "workflow"
+    ],
+    [
+      "2c4fb8892",
+      "chore: bump sgl-kernel version to 0.4.1 (#21447)",
+      "kernel_release"
+    ],
+    [
+      "5bcbc9757",
+      "[AMD] Resolve the performance degression when launch server with \"--enable-aiter-allreduce-fusion\" (#21947)",
+      "amd_mi_specific"
+    ],
+    [
+      "81efcc353",
+      "[NPU] Optimized the wording in the npu docs (#21998)",
+      "npu"
+    ],
+    [
+      "efa7b2d5d",
+      "Revert \"[MUSA][9/N] Add FA3 attention backend support through MATE (MUSA AI Tensor Engine)\" (#22002)",
+      "musa"
+    ],
+    [
+      "5f0df1e2a",
+      "[Bugfix] Fix incorrect dp-attention parallel info in bench_one_batch (#21519)",
+      "benchmark"
+    ],
+    [
+      "69e89a1fc",
+      "[VLM] Enable per-image MM splitting by default and remove MULTI_IMAGES modality (#21899)",
+      "vlm"
+    ],
+    [
+      "8897ac58f",
+      "[PP] qwen3 vl skip layer id for pp (#19135)",
+      "pipeline_parallel"
+    ],
+    [
+      "991f3aa5b",
+      "[Feature] NVFP4 Marlin fallback for non-Blackwell GPUs (SM75+) (#19652)",
+      "nvidia_specific"
+    ],
+    [
+      "0539c62bc",
+      "[Diffusion][NPU] Add support for MOVA (#21633)",
+      "diffusion"
+    ],
+    [
+      "1f97714f9",
+      "[CI] Add timeouts to Slack upload urlopen and WebClient (#21903)",
+      "ci"
+    ],
+    [
+      "89affff29",
+      "Skip broken AutoModel mapping entries when resolving Llava submodules (#21892)",
+      "vlm"
+    ],
+    [
+      "29d8e959d",
+      "[CI] Remove stale Ascend suite entries from test/srt/run_suite.py (#21978)",
+      "npu"
+    ],
+    [
+      "34ddf135f",
+      "[Feature] Stronger transformers modeling backend with TP, PP, MoE, VLMs, and torch compile (#19163)",
+      "specialized"
+    ],
+    [
+      "939cf398a",
+      "[MUSA][9/N] Add FA3 attention backend support through MATE (MUSA AI Tensor Engine) (#17985)",
+      "musa"
+    ],
+    [
+      "566b4a4f1",
+      "[4/n] Support gpt oss 20b lora (#21570)",
+      "lora"
+    ],
+    [
+      "8732b2e9c",
+      "[CI] [Tracing] Add ci for tracing and fix bugs (#21740)",
+      "ci"
+    ],
+    [
+      "2278a321c",
+      "[diffusion] chore: fix stage profiler for multi-stage denoising (#21955)",
+      "diffusion"
+    ],
+    [
+      "b21db86e2",
+      "[CI] Fix gpu deps import in cpu test (#21950)",
+      "ci"
+    ],
+    [
+      "083304ca4",
+      "[NPU] Support  GLM-4.7-Flash on NPU (#21408)",
+      "npu"
+    ],
+    [
+      "e55a35fbc",
+      "test: add manual init test for mooncake transfer engine (#21842)",
+      "pd_disagg"
+    ],
+    [
+      "c7d03a621",
+      "Revert \"Rollback flashmla to older version [1/2]\" (#21922)",
+      "flashinfer"
+    ],
+    [
+      "fbc1f9245",
+      "[DSA] Set trtllm kernels as nsa default for Blackwell (#21914)",
+      "nvidia_specific"
+    ],
+    [
+      "d24ea24e1",
+      "[NVIDIA] Enable fp8 flashinfer_trtllm_routed MoE for MiniMax-M2.5 (#20394)",
+      "nvidia_specific"
+    ],
+    [
+      "afa14ffac",
+      "Skip Go stdlib and NVIDIA tool CVEs in Trivy scan (#21905)",
+      "docker"
+    ],
+    [
+      "fae66b405",
+      "Support PP key for file backend (#21901)",
+      "pipeline_parallel"
+    ],
+    [
+      "24997fe42",
+      "[diffusion] CI: add initial nvfp4 ci test for b200 (#21767)",
+      "diffusion"
+    ],
+    [
+      "648632b6c",
+      "[CI] Remove crashing Kimi K2.5 EAGLE3/MTP variants, keep TP8 and TP8+DP8 (#21898)",
+      "ci"
+    ],
+    [
+      "9a7f19834",
+      "[CI] Increase multimodal server test timeout from 60 to 90 minutes (#21897)",
+      "ci"
+    ],
+    [
+      "2ef12073f",
+      "[VLM] Add VLM TP=4 per-commit CI test and improve MMMU eval prompt/parser (#21841)",
+      "vlm"
+    ],
+    [
+      "7004df609",
+      "chore: bump mooncake version to 0.3.10.post1 (#21844)",
+      "pd_disagg"
+    ],
+    [
+      "8d9145d97",
+      "Direct model loading from object storage with Runai Model Streamer (#17948)",
+      "specialized"
+    ],
+    [
+      "ae3b207df",
+      "Allow /rerun-test to checkout fork PR branch for trusted users (#21890)",
+      "ci"
+    ],
+    [
+      "51ad71708",
+      "[CI] Add Per-Tensor, Blockwise FP8 Tests on SM120 (#20717)",
+      "ci"
+    ],
+    [
+      "83c315801",
+      "[CI] Add Llama 3.1 8B Instruct FP4 CI test on SM120 (#20648)",
+      "ci"
+    ],
+    [
+      "6dd2f774d",
+      "[HiCache & PD]Fixed detailed cache hit breakdown in PD scenarios. (#21764)",
+      "hicache_hisparse"
+    ],
+    [
+      "9cb362f70",
+      "[HiCache] fix: Clone host indices to avoid memory leak (#21624)",
+      "hicache_hisparse"
+    ],
+    [
+      "d7256eb69",
+      "Unify GSM8K eval path to Chat API for regression CI readiness (#21667)",
+      "ci"
+    ],
+    [
+      "1081a2598",
+      "revert: remove TTL-based hard pin from HiRadixCache (#21884)",
+      "hicache_hisparse"
+    ],
+    [
+      "1ac74e652",
+      "[Misc] Fix comparator e2e tests: add polars dep + fix dp-attention test (#21804)",
+      "misc"
+    ],
+    [
+      "70fc4ce3e",
+      "Add merge prohibition policy during CI maintenance mode (#21882)",
+      "ci"
+    ],
+    [
+      "821a8a99f",
+      "[Disagg] GPU staging buffer with dynamic ring allocator for heterogeneous TP KV transfer (#19890)",
+      "pd_disagg"
+    ],
+    [
+      "5e12c4e08",
+      "[DSA] Support trtllm sparse mla kernel for prefill batches  (#21783)",
+      "nvidia_specific"
+    ],
+    [
+      "8950d129b",
+      "[refactor] Clean up duplicate flashinfer trtllm moe code (#21233)",
+      "nvidia_specific"
+    ],
+    [
+      "013870857",
+      "[Misc] Add network timeout to eval dataset downloads (#21873)",
+      "misc"
+    ],
+    [
+      "a19ef3a61",
+      "[FlashInver v0.6.7] Integrate flashinfer_trtllm mxfp8 gemm (#21576)",
+      "nvidia_specific"
+    ],
+    [
+      "ca3286d2d",
+      "[diffusion] hardware: support FA3 attention backend on MUSA (attn backend, 14/N) (#18648)",
+      "diffusion"
+    ],
+    [
+      "c9f5d1d50",
+      "[Diffusion][NPU] add ring sp performance benchmark page in npu (#21811)",
+      "diffusion"
+    ],
+    [
+      "4f5b55e37",
+      "[diffusion][CI]: Add individual component accuracy CI for diffusion models (#18709)",
+      "diffusion"
+    ],
+    [
+      "e67b95d66",
+      "[NPU]Add a full test pipeline on NPU, resolve issues in the NPU test architecture (#20751)",
+      "npu"
+    ],
+    [
+      "ac039bd04",
+      "Use CustomTestCase for TestSessionControl to enable CI retry (#21830)",
+      "ci"
+    ],
+    [
+      "1aabe44b6",
+      "[VLM] remove AsyncMMDataProcessor wrapper (#21651)",
+      "vlm"
+    ],
+    [
+      "80b1bc5f5",
+      "[NPU] update ascend docs (#21807)",
+      "npu"
+    ],
+    [
+      "7bba319f1",
+      "[diffusion] fix: respect --prompt-path (#21756)",
+      "diffusion"
+    ],
+    [
+      "eec70286e",
+      "[Bugfix] Fix effective_mamba_size over-allocation (#20858)",
+      "mamba"
+    ],
+    [
+      "7d2b856ce",
+      "[Bug][VLM] Fix shared memory race condition in ShmPointerMMData broadcast for multi-GPU VLM serving (#21655)",
+      "vlm"
+    ],
+    [
+      "9eb75211b",
+      "style refinement for hisparse (#21198)",
+      "hicache_hisparse"
+    ],
+    [
+      "57341b128",
+      "glm_interleave for GLM-V (#21671)",
+      "unrelated_model"
+    ],
+    [
+      "912494f59",
+      "[CI] Fix lint that was not applied in #21458 (#21818)",
+      "ci"
+    ],
+    [
+      "87a276826",
+      "VLM: change default mm-attention backend from triton_attn to fa4 (on blackwell) (#21595)",
+      "nvidia_specific"
+    ],
+    [
+      "72d3d8f4c",
+      "[Feature Restoration] repetition_penalty is essential for GLM-V models (#21258)",
+      "unrelated_model"
+    ],
+    [
+      "cffc95edf",
+      "[3/n] lora moe - Support Qwen3-VL-30B-A3B-Instruct  (#21469)",
+      "lora"
+    ],
+    [
+      "ca3ba05a7",
+      "chore: bump flashinfer version to 0.6.7 (#21422)",
+      "flashinfer"
+    ],
+    [
+      "03a87068e",
+      "[KDA] Fuse scaled_dot_kkt + solve_tril + recompute_w_u for KDA (#21604)",
+      "specialized"
+    ],
+    [
+      "e9b6cce23",
+      "[MPS] Fix Triton stub sub-module imports on Python 3.12+ (#21551)",
+      "apple_mps"
+    ],
+    [
+      "ea6b22fb8",
+      "Fix CVEs in Docker image: pillow, linux-libc-dev, and broken sgl-model-gateway build (#21789)",
+      "gateway"
+    ],
+    [
+      "2488233ad",
+      "[bugfix]GLM-4V model (#17122)",
+      "unrelated_model"
+    ],
+    [
+      "f9debd651",
+      "[diffusion] CI: improve ci reliability (#21763)",
+      "diffusion"
+    ],
+    [
+      "09907795e",
+      "Add latency and throughput metrics to run_eval (#21793)",
+      "eval"
+    ],
+    [
+      "8e84f846c",
+      "[Diffusion] Add `--uvicorn-access-log-exclude-prefixes` to suppress noisy access logs (#20379)",
+      "diffusion"
+    ],
+    [
+      "d8db3077c",
+      "Fix draft extend cuda graph when spec_step=1 (#21709)",
+      "cuda_graph"
+    ],
+    [
+      "e4c565f2f",
+      "[Misc] Tiny: Add test network timeouts and dynamic max-parallel for 5090/2-gpu runners (#21800)",
+      "nvidia_specific"
+    ],
+    [
+      "1389962f0",
+      "[gRPC] Preserve original ImportError in grpc_server.py (#21801)",
+      "grpc"
+    ],
+    [
+      "6a9b09847",
+      "CUTLASS NVFP4 GEMM improvement of SM120 (#21314)",
+      "nvidia_specific"
+    ],
+    [
+      "cdd7d6a22",
+      "Remove obsolete sgl-kernel legacy paths (#21528)",
+      "kernel_release"
+    ],
+    [
+      "5f6250769",
+      "Reduce redundant speculative decoding CI tests (#21779)",
+      "ci"
+    ],
+    [
+      "b6fe0cca9",
+      "Switch MooncakeSpec to EAGLE3 + Llama-3.1 (#21794)",
+      "pd_disagg"
+    ],
+    [
+      "d047d41ba",
+      "Increase hicache eval to 200 examples (#21791)",
+      "hicache_hisparse"
+    ],
+    [
+      "7581d814a",
+      "Add CompletionSampler for non-chat eval in run_eval (#21785)",
+      "nvidia_specific"
+    ],
+    [
+      "1f7cee81d",
+      "[moe] add customized option to moe-a2a-backend (#21786)",
+      "specialized"
+    ],
+    [
+      "883ba640b",
+      "[CI] Remove more redundant PCG tests (#21554)",
+      "ci"
+    ],
+    [
+      "8c66f4a90",
+      "Add Trivy vulnerability scanning to nightly dev Docker builds (#21772)",
+      "docker"
+    ],
+    [
+      "53d8aa23a",
+      "Cache nvidia wheels locally to skip repeated 830 MB downloads in CI (#21778)",
+      "ci"
+    ],
+    [
+      "f60f2ccc1",
+      "[Fix] Fall back to triton MOE for GPT-OSS on Blackwell with driver >= 595 (#21780)",
+      "nvidia_specific"
+    ],
+    [
+      "9191b02ed",
+      "Fix cuda graph max bs capture upper bound (#21005)",
+      "cuda_graph"
+    ],
+    [
+      "3c91ebdf5",
+      "[2/n] lora - Shared outer experts and support qwen3_30b_a3b_instruct (#21466)",
+      "lora"
+    ],
+    [
+      "b91f78d25",
+      "[bugfix] Fix rope theta config for MiniMax after transformers v5 update (#21241)",
+      "unrelated_model"
+    ],
+    [
+      "8d919bbd4",
+      "[AMD] Fix Handle missing rope_theta in get_rope_config for Grok-1 (#21518)",
+      "unrelated_model"
+    ],
+    [
+      "91048b2a8",
+      "[HiMambaTree]: Optimize mamba host lock mechanism (#21750)",
+      "hicache_hisparse"
+    ],
+    [
+      "e67dbf257",
+      "[diffusion] fix: fix Wan2.2-I2V-A14B video max size issue(#21390)",
+      "diffusion"
+    ],
+    [
+      "7790645b8",
+      "[diffusion] UX: replace deprecated ORJSONResponse with orjson_response (#21755)",
+      "diffusion"
+    ],
+    [
+      "ca2b2130b",
+      "[PD] Tiny cleanup after KVReceiver refactor (#21760)",
+      "pd_disagg"
+    ],
+    [
+      "c7adca999",
+      "Fix kimi-linear launch server error (#21752)",
+      "unrelated_model"
+    ],
+    [
+      "dbc97456a",
+      "Enable evict swa with piecewise cuda graph (#21754)",
+      "cuda_graph"
+    ],
+    [
+      "91ab75b50",
+      "[CI] Fix ring test timeout (#21751)",
+      "ci"
+    ],
+    [
+      "4455d1761",
+      "[PD] Refactor Disagg Conn and Fix Hang with total_request/total_tokens Balancing (#21299)",
+      "pd_disagg"
+    ],
+    [
+      "acd37d870",
+      "[CI] Fix rerun-test suite detection to skip commented registrations (#21753)",
+      "ci"
+    ],
+    [
+      "6c03ae6fe",
+      "[diffusion] fix: fix typo (#21746)",
+      "diffusion"
+    ],
+    [
+      "2456889f9",
+      "Rename rerun-ut to rerun-test (#21747)",
+      "ci"
+    ],
+    [
+      "08d3c1a13",
+      "Fix disaggregation hybrid attention ci (#21745)",
+      "pd_disagg"
+    ],
+    [
+      "d52757fe9",
+      "[CI]Remove msgm-en and mmlu tests which cause timeout (#21733)",
+      "ci"
+    ],
+    [
+      "b4cb31f69",
+      "[NPU] fix conflict between empty_cache and use_mem_pool (#21507)",
+      "npu"
+    ],
+    [
+      "68a457362",
+      "[diffusion] fix: fix Flux.2 with tp(#21664)",
+      "diffusion"
+    ],
+    [
+      "8ba992411",
+      "[AMD] Fix CI multimodal-gen-test-1-gpu-amd for gen model  (#21621)",
+      "vlm"
+    ]
+  ]
+}

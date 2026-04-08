@@ -54,6 +54,7 @@ sources = [
     "csrc/moe/moe_topk_sigmoid_kernels.cu",
     "csrc/quantization/gguf/gguf_kernel.cu",
     "csrc/speculative/eagle_utils.cu",
+    "csrc/speculative/ngram_utils.cu",
     "csrc/speculative/speculative_sampling.hip",
     "csrc/kvcacheio/transfer.cu",
     "csrc/memory/weak_ref_tensor.cpp",

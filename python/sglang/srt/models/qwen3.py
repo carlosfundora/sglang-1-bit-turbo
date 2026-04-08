@@ -337,6 +337,62 @@ class Qwen3Model(Qwen2Model):
             alt_stream=alt_stream,
         )
 
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        input_embeds: torch.Tensor = None,
+        pp_proxy_tensors: Optional[PPProxyTensors] = None,
+    ):
+        from sglang.srt.model_executor.forward_batch_info import PPProxyTensors as _PPT
+
+        if self.pp_group.is_first_rank:
+            if input_embeds is None:
+                hidden_states = self.embed_tokens(input_ids)
+            else:
+                hidden_states = input_embeds
+            residual = None
+        else:
+            assert pp_proxy_tensors is not None
+            hidden_states = pp_proxy_tensors["hidden_states"]
+            residual = pp_proxy_tensors["residual"]
+
+        # Capture aux hidden states AFTER each layer (SpecForge-style).
+        # layers_to_capture uses eagle_aux_hidden_state_layer_ids directly —
+        # no +1 offset — so index N captures the output of layer N.
+        aux_hidden_states = []
+        for i in range(self.start_layer, self.end_layer):
+            layer = self.layers[i]
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                forward_batch,
+                residual,
+            )
+            if i in self.layers_to_capture:
+                # In SGLang's fused-residual scheme the true post-layer
+                # activation is hidden_states + residual (residual is kept
+                # separate for LayerNorm fusion).  This matches what SpecForge
+                # captures via a post-layer forward hook.
+                aux_hidden_states.append(
+                    hidden_states + residual if residual is not None else hidden_states
+                )
+
+        if not self.pp_group.is_last_rank:
+            return _PPT({"hidden_states": hidden_states, "residual": residual})
+
+        if hidden_states.shape[0] != 0:
+            if residual is None:
+                hidden_states = self.norm(hidden_states)
+            else:
+                hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) == 0:
+            return hidden_states
+
+        return hidden_states, aux_hidden_states
+
 
 class Qwen3ForCausalLM(nn.Module):
     # BitandBytes specific attributes
@@ -592,14 +648,17 @@ class Qwen3ForCausalLM(nn.Module):
 
         self.capture_aux_hidden_states = True
         if layer_ids is None:
+            # SpecForge defaults: low / mid / near-last layer
             num_layers = self.config.num_hidden_layers
             self.model.layers_to_capture = [
-                2,
+                1,
                 num_layers // 2,
-                num_layers - 3,
-            ]  # Specific layers for EAGLE3 support
+                num_layers - 1,
+            ]
         else:
-            self.model.layers_to_capture = [val + 1 for val in layer_ids]
+            # Use eagle_aux_hidden_state_layer_ids directly.
+            # Qwen3Model.forward captures AFTER each layer so no +1 offset.
+            self.model.layers_to_capture = list(layer_ids)
 
 
 EntryClass = Qwen3ForCausalLM

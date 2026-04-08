@@ -157,8 +157,8 @@ class NGRAMWorker:
         draft_tokens = self.draft_tokens_batch[bs]
 
         req_drafts, mask = self._prepare_draft_tokens(batch)
-        tree_mask.copy_(torch.from_numpy(mask), non_blocking=True)
-        draft_tokens.copy_(torch.from_numpy(req_drafts), non_blocking=True)
+        tree_mask.copy_(torch.from_numpy(mask))
+        draft_tokens.copy_(torch.from_numpy(req_drafts))
 
         reconstruct_indices_from_tree_mask(
             tree_mask,

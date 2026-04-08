@@ -521,6 +521,30 @@ class ServerArgs:
     speculative_ngram_capacity: int = 10 * 1000 * 1000
     enable_multi_layer_eagle: bool = False
 
+    # Speculative decoding — Medusa heads
+    medusa_model_path: Optional[str] = None
+    medusa_num_heads: int = 5
+    medusa_topk: int = 1
+    medusa_paltrow_heads: Optional[str] = None  # "auto" | "none" | "0,1" (comma-sep indices)
+    medusa_typical_acceptance: bool = False      # entropy-adaptive candidate generation
+    medusa_posterior_threshold: float = 0.09     # fixed threshold for typical acceptance
+    medusa_posterior_alpha: float = 0.3          # entropy scaling factor (≈ √threshold)
+    medusa_tree_structure: str = "linear"        # "linear" | "mc_sim_63" | "auto"
+    medusa_no_step0: bool = False                # skip Step 0 decode; use shifted heads (Head 1→draft 0)
+
+    # Speculative decoding — PALTROW / AMD SAM / ReBAR hardware
+    sam_enabled: Optional[bool] = None           # None = auto-detect from PCIe BAR
+    gtt_pool_mb: Optional[int] = None            # GTT pool size in MB (auto-detect)
+    paltrow_pin_memory: bool = True              # use pinned memory for PALTROW heads
+
+    # Speculative decoding — SAGUARO (SSD) async wrapper
+    ssd_enable: bool = False
+
+    # Speculative decoding — CHIMERA-SD (stub)
+    chimera_num_steps: int = 6
+    chimera_ssd_enable: bool = False
+    chimera_level: Optional[int] = None  # None = dynamic routing
+
     # Expert parallelism
     ep_size: int = 1
     moe_a2a_backend: Literal[
@@ -976,6 +1000,21 @@ class ServerArgs:
             self.speculative_draft_model_quantization = (
                 self.quantization if draft_uses_gguf else None
             )
+
+        # Auto-detect draft load_format: if the main model is GGUF but the draft
+        # model path is a directory (safetensors checkpoint), default draft load
+        # format to "auto" so the GGUF loader is not incorrectly applied to it.
+        if (
+            self.speculative_draft_load_format is None
+            and self.speculative_draft_model_path is not None
+            and self.load_format == "gguf"
+            and not check_gguf_file(self.speculative_draft_model_path)
+        ):
+            import logging as _logging
+            _logging.getLogger(__name__).info(
+                "Draft model path is not a GGUF file; overriding speculative_draft_load_format to 'auto'."
+            )
+            self.speculative_draft_load_format = "auto"
         elif self.speculative_draft_model_quantization == "unquant":
             self.speculative_draft_model_quantization = None
 
@@ -2988,11 +3027,14 @@ class ServerArgs:
         if self.speculative_algorithm == "NEXTN":
             self.speculative_algorithm = "EAGLE"
 
-        if self.speculative_algorithm in ("EAGLE", "EAGLE3", "P_EAGLE", "STANDALONE"):
+        if self.speculative_algorithm in ("EAGLE", "EAGLE3", "P_EAGLE", "STANDALONE", "P_CASCADE"):
             if self.speculative_algorithm in ("EAGLE3", "P_EAGLE"):
                 self._validate_eagle3_draft_model(
                     require_parallel_drafting=self.speculative_algorithm == "P_EAGLE"
                 )
+            elif self.speculative_algorithm == "P_CASCADE":
+                # P_CASCADE uses EAGLE3/P_EAGLE internally — validate the draft model
+                self._validate_eagle3_draft_model(require_parallel_drafting=False)
 
             if self.speculative_algorithm == "STANDALONE" and self.enable_dp_attention:
                 # TODO: support dp attention for standalone speculative decoding
@@ -3146,6 +3188,53 @@ class ServerArgs:
                 raise ValueError(
                     "Currently ngram speculative decoding does not support dp attention."
                 )
+
+        if self.speculative_algorithm == "MEDUSA":
+            if self.medusa_model_path is None:
+                raise ValueError(
+                    "MEDUSA algorithm requires --medusa-model-path pointing to "
+                    "trained Medusa head weights."
+                )
+            self.disable_overlap_schedule = True
+            self.enable_mixed_chunk = False
+            if self.max_running_requests is None:
+                self.max_running_requests = 48
+            if self.speculative_num_draft_tokens is None:
+                self.speculative_num_draft_tokens = self.medusa_num_heads
+            if self.speculative_num_steps is None:
+                self.speculative_num_steps = self.medusa_num_heads
+            if self.speculative_eagle_topk is None:
+                self.speculative_eagle_topk = self.medusa_topk
+            logger.info(
+                "MEDUSA: %d heads, top-k=%d, model=%s",
+                self.medusa_num_heads,
+                self.medusa_topk,
+                self.medusa_model_path,
+            )
+
+        if self.speculative_algorithm == "CHIMERA":
+            self._validate_eagle3_draft_model(require_parallel_drafting=False)
+            self.disable_overlap_schedule = True
+            self.enable_mixed_chunk = False
+            if self.max_running_requests is None:
+                self.max_running_requests = 48
+            if self.speculative_num_steps is None:
+                self.speculative_num_steps = self.chimera_num_steps
+            logger.info(
+                "CHIMERA-SD: steps=%d, ssd=%s, level=%s",
+                self.chimera_num_steps,
+                self.chimera_ssd_enable,
+                self.chimera_level or "dynamic",
+            )
+
+        # SAGUARO wraps any algorithm — validate inner algorithm is set
+        if self.ssd_enable and self.speculative_algorithm is None:
+            raise ValueError(
+                "--ssd-enable requires a --speculative-algorithm to wrap "
+                "(e.g., EAGLE3, P_CASCADE, MEDUSA)."
+            )
+
+
 
     def _validate_eagle3_draft_model(self, require_parallel_drafting: bool = False):
         if self.speculative_draft_model_path is None:
@@ -4799,7 +4888,7 @@ class ServerArgs:
         parser.add_argument(
             "--speculative-algorithm",
             type=str,
-            choices=["EAGLE", "EAGLE3", "P_EAGLE", "NEXTN", "STANDALONE", "NGRAM"],
+            choices=["EAGLE", "EAGLE3", "P_EAGLE", "NEXTN", "STANDALONE", "NGRAM", "P_CASCADE", "MEDUSA", "SAGUARO", "CHIMERA", "TQ5_X", "SELF_SPEC", "PHANTOM_SD"],
             help="Speculative algorithm.",
         )
         parser.add_argument(
@@ -4946,6 +5035,166 @@ class ServerArgs:
             "--enable-multi-layer-eagle",
             action="store_true",
             help="Enable multi-layer Eagle speculative decoding.",
+        )
+
+        # Medusa speculative decoding
+        parser.add_argument(
+            "--medusa-model-path",
+            type=str,
+            default=None,
+            help="Path to trained Medusa head weights (safetensors or .pt).",
+        )
+        parser.add_argument(
+            "--medusa-num-heads",
+            type=int,
+            default=ServerArgs.medusa_num_heads,
+            help="Number of Medusa parallel draft heads (default: 5).",
+        )
+        parser.add_argument(
+            "--medusa-topk",
+            type=int,
+            default=ServerArgs.medusa_topk,
+            help="Top-k candidates per Medusa head (default: 1).",
+        )
+        parser.add_argument(
+            "--medusa-paltrow-heads",
+            type=str,
+            default=ServerArgs.medusa_paltrow_heads,
+            help=(
+                "PALTROW heads: Pinned-memory Auxiliary Latency-Tolerant Relocated "
+                "On-CPU Workers. Specifies which Medusa heads to run on CPU with "
+                "pinned memory instead of GPU. Screen/bloom/volatility filter heads "
+                "are ideal PALTROW candidates — they're latency-tolerant pre-rejection "
+                "filters that don't need GPU speed. Saves GPU VRAM for KV cache and "
+                "precision draft heads. "
+                "Values: 'auto' (detect screen+bloom heads from tiered config), "
+                "'none' (all GPU), or comma-separated indices like '0' or '0,1,2'. "
+                "Heads that OOM on GPU are auto-promoted to PALTROW regardless. "
+                "Default: auto-detect from medusa_config.json."
+            ),
+        )
+
+        parser.add_argument(
+            "--medusa-typical-acceptance",
+            action="store_true",
+            default=ServerArgs.medusa_typical_acceptance,
+            help=(
+                "Use entropy-adaptive typical acceptance for Medusa candidate generation. "
+                "Instead of greedy argmax, candidates are sampled from a distribution "
+                "where low-probability tokens are removed based on an entropy-adaptive "
+                "threshold: threshold = min(posterior_threshold, exp(-entropy) * alpha). "
+                "Low-entropy (confident) distributions use strict thresholds; high-entropy "
+                "(uncertain) distributions use looser thresholds. From FasterDecoding/Medusa."
+            ),
+        )
+        parser.add_argument(
+            "--medusa-posterior-threshold",
+            type=float,
+            default=ServerArgs.medusa_posterior_threshold,
+            help="Fixed ceiling for typical acceptance threshold (default: 0.09).",
+        )
+        parser.add_argument(
+            "--medusa-posterior-alpha",
+            type=float,
+            default=ServerArgs.medusa_posterior_alpha,
+            help=(
+                "Entropy scaling factor for typical acceptance (default: 0.3). "
+                "Effective threshold = min(posterior_threshold, exp(-entropy) * alpha). "
+                "Empirically alpha ≈ sqrt(posterior_threshold)."
+            ),
+        )
+        parser.add_argument(
+            "--medusa-tree-structure",
+            type=str,
+            default=ServerArgs.medusa_tree_structure,
+            choices=["linear", "mc_sim_63", "auto"],
+            help=(
+                "Tree topology for Medusa candidate verification. "
+                "'linear': simple chain (current + K drafts, lower overhead). "
+                "'mc_sim_63': 63-candidate tree from Medusa paper (higher acceptance, more compute). "
+                "'auto': mc_sim_63 for ≤5 heads, linear for >5 heads. "
+                "Default: linear."
+            ),
+        )
+
+        parser.add_argument(
+            "--medusa-no-step0",
+            action="store_true",
+            default=ServerArgs.medusa_no_step0,
+            help=(
+                "Skip the Step 0 decode that refreshes hidden states before drafting. "
+                "Uses shifted heads: Head 1 becomes draft 0, Head 2 becomes draft 1, etc. "
+                "Eliminates 1 extra forward pass per round at the cost of Head 0 (echo). "
+                "Requires ≥ num_draft_tokens+1 non-screen heads. Default: False."
+            ),
+        )
+
+        # PALTROW / AMD SAM / ReBAR hardware settings
+        parser.add_argument(
+            "--sam-enabled",
+            type=str,
+            default=None,
+            help=(
+                "AMD Smart Access Memory / Resizable BAR status. "
+                "'auto' (default): detect from PCIe BAR size (BAR >= VRAM = enabled). "
+                "'true': force-enable SAM optimizations (pinned DMA, BAR-mapped transfers). "
+                "'false': disable SAM optimizations. "
+                "When enabled, PALTROW heads use pinned DMA at ~14 GB/s instead of pageable copies."
+            ),
+        )
+        parser.add_argument(
+            "--gtt-pool-mb",
+            type=int,
+            default=ServerArgs.gtt_pool_mb,
+            help=(
+                "AMD GTT (Graphics Translation Table) pool size in MB. "
+                "Auto-detected from /sys/class/drm if not set. "
+                "GTT is system RAM accessible by GPU via PCIe — used for PALTROW head "
+                "parameters and pinned hidden-state buffers. Typical: 33600 MB (half system RAM)."
+            ),
+        )
+        parser.add_argument(
+            "--paltrow-pin-memory",
+            action="store_true",
+            default=ServerArgs.paltrow_pin_memory,
+            help=(
+                "Use CUDA/HIP pinned (page-locked) memory for PALTROW head buffers. "
+                "Enables async DMA transfers at full PCIe bandwidth (~14 GB/s with SAM). "
+                "Disable with --no-paltrow-pin-memory if pinned allocation fails. "
+                "Default: true."
+            ),
+        )
+        parser.add_argument(
+            "--no-paltrow-pin-memory",
+            action="store_false",
+            dest="paltrow_pin_memory",
+            help="Disable pinned memory for PALTROW heads (use pageable copies).",
+        )
+
+        # SAGUARO (SSD) async wrapper
+        parser.add_argument(
+            "--ssd-enable",
+            action="store_true",
+            help="Enable SAGUARO speculative-speculative async caching around any draft algorithm.",
+        )
+
+        # CHIMERA-SD (experimental)
+        parser.add_argument(
+            "--chimera-num-steps",
+            type=int,
+            default=ServerArgs.chimera_num_steps,
+            help="Max draft steps for CHIMERA-SD (default: 6).",
+        )
+        parser.add_argument(
+            "--chimera-ssd-enable",
+            action="store_true",
+            help="Enable Saguaro async layer inside CHIMERA-SD.",
+        )
+        parser.add_argument(
+            "--chimera-level",
+            type=int,
+            default=None,
+            help="Force CHIMERA cascade level (1-3). None = dynamic routing.",
         )
 
         # Expert parallelism

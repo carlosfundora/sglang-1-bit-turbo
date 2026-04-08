@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
@@ -22,6 +23,9 @@ from sglang.srt.utils import (
     is_hip,
     next_power_of_2,
 )
+
+logger = logging.getLogger(__name__)
+_hip_diag = is_hip() and os.environ.get("HIP_DIAG_ENABLE", "0") == "1"
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
@@ -1213,6 +1217,12 @@ class TritonMultiStepDraftBackend:
             next_power_of_2(bs),
             self.page_size,
         )
+        if _hip_diag and forward_batch.req_pool_indices is not None and forward_batch.req_pool_indices.numel() > 0:
+            logger.info(
+                "generate_draft_decode_kv_indices done: req_pool_indices=%s kv_indptr[0:5]=%s",
+                forward_batch.req_pool_indices.tolist(),
+                self.kv_indptr[0, : min(5, self.kv_indptr.shape[1])].tolist(),
+            )
 
         if call_fn is None:
             return
