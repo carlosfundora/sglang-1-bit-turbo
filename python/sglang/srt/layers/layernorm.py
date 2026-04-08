@@ -77,8 +77,24 @@ elif _is_hip:
 
         _has_vllm_rms_norm = True
     except ImportError:
-        # Fallback: vllm not available, will use forward_native
-        _has_vllm_rms_norm = False
+        # Fallback: Triton-based RMSNorm for HIP without aiter/vllm
+        # This enables RDNA2 (gfx1030) GPUs to run without MI-series dependencies
+        try:
+            from sglang.srt.layers.elementwise import rmsnorm_autotune
+
+            def rms_norm(x, weight, epsilon):
+                return rmsnorm_autotune(x, weight, epsilon)
+
+            def fused_add_rms_norm(x, residual, weight, epsilon):
+                x = x + residual
+                return rms_norm(x, weight, epsilon), x
+
+            _has_vllm_rms_norm = True
+            logger.info(
+                "Using Triton RMSNorm fallback for HIP (no aiter/vllm available)"
+            )
+        except ImportError:
+            _has_vllm_rms_norm = False
 
 logger = logging.getLogger(__name__)
 

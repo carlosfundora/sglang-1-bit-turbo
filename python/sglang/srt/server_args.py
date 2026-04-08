@@ -2595,6 +2595,46 @@ class ServerArgs:
         if is_hip():
             self.triton_attention_num_kv_splits = 16
 
+            # gfx1031 (RDNA2) specific optimizations
+            try:
+                from sglang.srt.hardware_backend.rocm.arch_detection import (
+                    get_rocm_arch,
+                    is_rdna2,
+                    is_fp8_hw_available,
+                    get_wave_size,
+                )
+                from sglang.srt.hardware_backend.rocm.gfx1031_defaults import (
+                    apply_gfx1031_env,
+                    get_gfx1031_server_defaults,
+                )
+
+                arch = get_rocm_arch()
+                if arch and is_rdna2():
+                    logger.info(
+                        f"Detected RDNA2 GPU ({arch}), applying gfx1031 optimizations"
+                    )
+                    apply_gfx1031_env()
+                    defaults = get_gfx1031_server_defaults()
+
+                    # Apply defaults only where user hasn't set explicit values
+                    if self.attention_backend is None:
+                        self.attention_backend = defaults["attention_backend"]
+                    if not self.disable_cuda_graph:
+                        self.cuda_graph_bs = defaults.get("cuda_graph_bs")
+
+                    # Wave32 tuning for triton attention
+                    wave_size = get_wave_size()
+                    if wave_size == 32:
+                        # Fewer KV splits for Wave32 (half the wavefront width)
+                        self.triton_attention_num_kv_splits = 8
+
+                    logger.info(
+                        f"RDNA2 config: attention={self.attention_backend}, "
+                        f"wave_size={wave_size}, fp8_hw={is_fp8_hw_available()}"
+                    )
+            except ImportError:
+                pass  # ROCm backend module not available
+
     def _handle_nccl_pre_warm(self):
         # pre_warm_nccl is only used with CUDA or HIP hardware
         if self.pre_warm_nccl and not (is_cuda() or is_hip()):

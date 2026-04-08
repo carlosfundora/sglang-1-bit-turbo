@@ -469,10 +469,21 @@ def _decode_grouped_att_m_fwd(
 
     extra_kargs = {}
     num_stages = 2
+    _decode_num_warps = 4
     if _is_hip:
         # https://rocm.docs.amd.com/en/docs-6.2.0/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
-        # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
-        extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
+        _gcn = ""
+        try:
+            _gcn = torch.cuda.get_device_properties(0).gcnArchName
+        except Exception:
+            pass
+        if "gfx103" in _gcn:
+            # RDNA2 (gfx1030): Wave32, no matrix instructions
+            extra_kargs = {"waves_per_eu": 2}
+            _decode_num_warps = 2
+        else:
+            # CDNA (MI-series): Wave64, matrix instructions available
+            extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
         num_stages = 1
 
     _fwd_grouped_kernel_stage1[grid](
@@ -504,7 +515,7 @@ def _decode_grouped_att_m_fwd(
         MIN_BLOCK_KV=_MIN_BLOCK_KV,
         logit_cap=logit_cap,
         xai_temperature_len=xai_temperature_len,
-        num_warps=4,
+        num_warps=_decode_num_warps,
         num_stages=num_stages,
         Lk=Lk,
         Lv=Lv,
@@ -603,10 +614,19 @@ def _decode_softmax_reducev_fwd(
     HAS_SINK = sinks is not None
 
     extra_kargs = {}
+    _stage2_warps = 4
     if _is_hip:
-        # https://rocm.docs.amd.com/en/docs-6.2.0/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
-        # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
-        extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
+        _gcn2 = ""
+        try:
+            _gcn2 = torch.cuda.get_device_properties(0).gcnArchName
+        except Exception:
+            pass
+        if "gfx103" in _gcn2:
+            # RDNA2 (gfx1030): Wave32, no matrix instructions
+            extra_kargs = {"waves_per_eu": 4}
+            _stage2_warps = 2
+        else:
+            extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
 
     grid = (batch, head_num)
     _fwd_kernel_stage2[grid](
@@ -627,7 +647,7 @@ def _decode_softmax_reducev_fwd(
         BLOCK_DV=BLOCK_DV,
         Lv=Lv,
         HAS_SINK=HAS_SINK,
-        num_warps=4,
+        num_warps=_stage2_warps,
         num_stages=2,
         **extra_kargs,
     )

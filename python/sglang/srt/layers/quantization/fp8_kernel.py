@@ -98,8 +98,23 @@ logger = logging.getLogger(__name__)
 @lru_cache()
 def is_fp8_fnuz() -> bool:
     if _is_hip:
-        # only device 0 is checked, this assumes MI300 platforms are homogeneous
-        return "gfx94" in torch.cuda.get_device_properties(0).gcnArchName
+        gcn_name = torch.cuda.get_device_properties(0).gcnArchName
+        # MI300 (gfx94x) uses fnuz format; RDNA2/3 use standard e4m3fn
+        return "gfx94" in gcn_name
+    return False
+
+
+@lru_cache()
+def is_fp8_sw_emulated() -> bool:
+    """Check if FP8 is software-emulated (no native FP8 matrix cores).
+
+    On RDNA2 (gfx1030/gfx1031), FP8 works via Triton software dequant
+    to FP16/BF16 before GEMM. Saves memory bandwidth but no compute speedup.
+    """
+    if _is_hip:
+        gcn_name = torch.cuda.get_device_properties(0).gcnArchName
+        # gfx94x and gfx95x have hardware FP8; everything else is software
+        return not ("gfx94" in gcn_name or "gfx95" in gcn_name)
     return False
 
 
