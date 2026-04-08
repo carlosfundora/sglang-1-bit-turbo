@@ -107,6 +107,19 @@ class MedusaModel(nn.Module):
         logits = self.forward(hidden_states)
         return torch.stack([lg.argmax(dim=-1) for lg in logits], dim=1)
 
+    def predict_with_logits(
+        self, hidden_states: torch.Tensor
+    ) -> tuple:
+        """Get draft tokens AND raw logits from all heads.
+
+        Returns:
+            tokens: [batch_size, num_heads] draft token IDs
+            logits: List of [batch_size, vocab_size] per head
+        """
+        logits = self.forward(hidden_states)
+        tokens = torch.stack([lg.argmax(dim=-1) for lg in logits], dim=1)
+        return tokens, logits
+
     # ------------------------------------------------------------------
     # Loading
     # ------------------------------------------------------------------
@@ -129,7 +142,9 @@ class MedusaModel(nn.Module):
 
         config_path = os.path.join(model_path, "config.json")
         if not os.path.exists(config_path):
-            raise FileNotFoundError(f"No config.json at {model_path}")
+            config_path = os.path.join(model_path, "medusa_config.json")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"No config.json or medusa_config.json at {model_path}")
 
         with open(config_path) as f:
             cfg = json.load(f)
@@ -196,7 +211,23 @@ class MedusaModel(nn.Module):
                 else:
                     mapped[f"heads.{head_idx}.blocks.{sub_idx}.{rest}"] = tensor
             elif key.startswith("heads."):
-                mapped[key] = tensor
+                # Handle raw nn.Sequential index format:
+                #   heads.{head}.{sub}.linear.weight → heads.{head}.blocks.{sub}.linear.weight
+                #   heads.{head}.{last}.weight       → heads.{head}.proj.weight
+                parts = key.replace("heads.", "", 1).split(".")
+                head_idx = int(parts[0])
+                sub_idx = int(parts[1])
+                rest = ".".join(parts[2:])
+
+                if head_idx >= model.num_heads:
+                    continue
+                num_blocks = len(model.heads[head_idx].blocks)
+                if sub_idx == num_blocks:
+                    mapped[f"heads.{head_idx}.proj.{rest}"] = tensor
+                elif f"heads.{head_idx}.blocks.{sub_idx}.{rest}" in model.state_dict():
+                    mapped[f"heads.{head_idx}.blocks.{sub_idx}.{rest}"] = tensor
+                else:
+                    mapped[key] = tensor
             else:
                 mapped[key] = tensor
 

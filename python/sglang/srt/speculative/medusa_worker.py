@@ -5,9 +5,13 @@ model's last hidden state.  No autoregressive loop — all drafts from one pass.
 Verification reuses the NgramVerifyInput tree infrastructure (same tree attention
 as EAGLE3/NGRAM).
 
+Includes DraftPreFilter integration: layered pre-rejection of draft tokens
+before verification (n-gram surprisal → screen head inversion → head agreement).
+
 Worker pattern: coordinator (like NGRAMWorker / PCascadeWorker).
 """
 
+import json
 import logging
 import os
 from typing import List, Optional
@@ -15,14 +19,33 @@ from typing import List, Optional
 import numpy as np
 import torch
 
+from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.managers.utils import GenerationBatchResult
+from sglang.srt.mem_cache.common import alloc_for_decode
 from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardMode
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 logger = logging.getLogger(__name__)
+
+
+class _MedusaCaptureCarrier:
+    """Minimal spec_info stand-in that requests hidden-state capture.
+
+    The scheduler may call filter_batch / merge_batch on spec_info.  This
+    carrier implements them as no-ops so it doesn't break the scheduler loop.
+    It is set only during the forward call and cleared immediately after.
+    """
+
+    capture_hidden_mode = CaptureHiddenMode.LAST
+
+    def filter_batch(self, **kwargs):
+        pass
+
+    def merge_batch(self, *args, **kwargs):
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -53,13 +76,18 @@ MC_SIM_63: List[List[int]] = [
 ]
 
 
-def _build_linear_tree_mask(num_draft: int) -> np.ndarray:
-    """Lower-triangular mask for a linear draft chain.
+def _build_linear_tree_mask(tree_size: int) -> np.ndarray:
+    """Lower-triangular mask for a linear draft chain (current + K drafts).
+
+    The NgramVerifyInput infrastructure expects the first token in the tree
+    to be the current (uncommitted) token from output_ids[-1].  Subsequent
+    tokens are the actual draft predictions.  This matches the C++ ngram
+    corpus behaviour (result.cpp:fillResult prepends ``last_token``).
 
     Returns:
-        (num_draft, num_draft) bool numpy array.
+        (tree_size, tree_size) bool numpy array — lower-triangular.
     """
-    return np.tril(np.ones((num_draft, num_draft), dtype=bool))
+    return np.tril(np.ones((tree_size, tree_size), dtype=bool))
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +130,6 @@ class MedusaWorker:
         self.num_heads = getattr(server_args, "medusa_num_heads", 5)
         self.medusa_topk = getattr(server_args, "medusa_topk", 1)
         draft_tokens = server_args.speculative_num_draft_tokens or 8
-        self.draft_token_num = min(draft_tokens, self.num_heads)
 
         # Load the model
         model_path = getattr(server_args, "medusa_model_path", None)
@@ -122,7 +149,24 @@ class MedusaWorker:
             "MedusaWorker: loaded %d heads from %s", self.medusa_model.num_heads, model_path
         )
 
-        # Use linear chain tree (simple, guaranteed to work)
+        # Detect tiered architecture: build head reorder map that skips screen
+        # heads and orders remaining heads by their prediction offset (t+1, t+2, ...)
+        self._draft_head_indices = self._build_draft_head_order(model_path)
+        num_draft_heads = len(self._draft_head_indices)
+        self.num_draft_tokens = min(draft_tokens, num_draft_heads)  # K = pure drafts
+
+        # tree_token_num = K + 1: the NgramVerifyInput tree must have the
+        # current (uncommitted) token at position 0, followed by K drafts.
+        # This matches the invariant from the C++ ngram corpus (result.cpp:15).
+        self.draft_token_num = self.num_draft_tokens + 1  # tree size for verify infra
+        logger.info(
+            "MedusaWorker: draft head order = %s (skipped screen), K=%d, tree_size=%d",
+            self._draft_head_indices[:self.num_draft_tokens],
+            self.num_draft_tokens,
+            self.draft_token_num,
+        )
+
+        # Use linear chain tree (current + K drafts)
         self.tree_mask_np = _build_linear_tree_mask(self.draft_token_num)
 
         # Pre-allocated tensors
@@ -133,10 +177,123 @@ class MedusaWorker:
         self._cached_hidden: Optional[torch.Tensor] = None
         self._hidden_available = False
 
+        # DraftPreFilter: layered pre-rejection (n-gram → screen → agreement)
+        self.prefilter = self._init_prefilter(model_path)
+
         logger.info(
-            "MedusaWorker ready: %d heads, %d draft tokens, linear tree",
+            "MedusaWorker ready: %d heads, %d draft tokens (tree size %d), linear tree, prefilter=%s",
             self.num_heads,
+            self.num_draft_tokens,
             self.draft_token_num,
+            "ON" if self.prefilter else "OFF",
+        )
+
+    def _build_draft_head_order(self, model_path: str) -> list:
+        """Build ordered list of head indices for drafting.
+
+        For tiered models: skip screen heads, order remaining by prediction
+        offset (t+1 first, then t+2, ...).  Pick the best head per offset
+        (precision > easy when both cover the same offset).
+
+        For flat models: identity order [0, 1, ..., num_heads-1].
+        """
+        config_path = os.path.join(model_path, "medusa_config.json")
+        if not os.path.exists(config_path):
+            return list(range(self.num_heads))
+
+        with open(config_path) as f:
+            cfg = json.load(f)
+
+        tiered = cfg.get("tiered_architecture")
+        if not tiered:
+            return list(range(self.num_heads))
+
+        screen_set = set(tiered.get("screen_heads", []))
+        offsets = cfg.get("head_offsets", {})
+
+        # Parse offset position from description strings like "precision t+2"
+        def _parse_offset(desc: str) -> int:
+            if "screen" in desc.lower():
+                return -1  # sentinel: skip
+            import re
+            m = re.search(r"t\+(\d+)", desc)
+            return int(m.group(1)) if m else 0
+
+        # Build (head_idx, offset, priority) tuples — precision > easy
+        candidates = []
+        for idx in range(self.num_heads):
+            if idx in screen_set:
+                continue
+            desc = offsets.get(str(idx), "")
+            off = _parse_offset(desc)
+            if off < 0:
+                continue
+            is_precision = "precision" in desc.lower()
+            candidates.append((idx, off, 0 if is_precision else 1))
+
+        # Sort by offset ascending, precision first within same offset
+        candidates.sort(key=lambda x: (x[1], x[2]))
+
+        # Deduplicate: keep best head per offset
+        seen_offsets = set()
+        result = []
+        for idx, off, _prio in candidates:
+            if off in seen_offsets:
+                continue
+            seen_offsets.add(off)
+            result.append(idx)
+
+        if not result:
+            logger.warning("No non-screen heads found, falling back to identity order")
+            return list(range(self.num_heads))
+
+        return result
+
+    def _init_prefilter(self, model_path: str):
+        """Initialize DraftPreFilter if tiered config or env var enables it."""
+        from sglang.srt.speculative.draft_prefilter import DraftPreFilter
+
+        # Check for tiered architecture config
+        config_path = os.path.join(model_path, "medusa_config.json")
+        screen_head_idx = None
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                cfg = json.load(f)
+            tiered = cfg.get("tiered_architecture", {})
+            screen_heads = tiered.get("screen_heads", [])
+            if screen_heads:
+                screen_head_idx = screen_heads[0]
+                logger.info("DraftPreFilter: screen head at index %d", screen_head_idx)
+
+        # Enable prefilter if screen head exists or env var set
+        enable = screen_head_idx is not None or os.environ.get(
+            "SGLANG_MEDUSA_PREFILTER", ""
+        ) == "1"
+
+        if not enable:
+            return None
+
+        # Load n-gram trie if available alongside the medusa model
+        ngram_trie = None
+        trie_path = os.path.join(model_path, "ngram_trie.pkl")
+        if os.path.exists(trie_path):
+            import pickle
+            with open(trie_path, "rb") as f:
+                ngram_trie = pickle.load(f)
+            logger.info("DraftPreFilter: loaded n-gram trie from %s", trie_path)
+
+        return DraftPreFilter(
+            ngram_trie=ngram_trie,
+            screen_head_idx=screen_head_idx,
+            surprisal_threshold=float(os.environ.get(
+                "SGLANG_PREFILTER_SURPRISAL", "8.0"
+            )),
+            screen_confidence_threshold=float(os.environ.get(
+                "SGLANG_PREFILTER_SCREEN_CONF", "0.3"
+            )),
+            collect_telemetry=os.environ.get(
+                "SGLANG_PREFILTER_TELEMETRY", "1"
+            ) == "1",
         )
 
     def _init_preallocated_tensors(self):
@@ -190,6 +347,61 @@ class MedusaWorker:
         self._cached_hidden = None
         self._hidden_available = False
 
+    def get_prefilter_stats(self) -> Optional[dict]:
+        """Get DraftPreFilter statistics (for monitoring/API)."""
+        if self.prefilter is not None:
+            return self.prefilter.get_stats()
+        return None
+
+    def export_prefilter_telemetry(self) -> Optional[list]:
+        """Export head agreement data for contrastive fine-tuning."""
+        if self.prefilter is not None:
+            return self.prefilter.export_agreement_data()
+        return None
+
+    # ---- Batch preparation ----
+
+    def _prepare_batch_for_decode(self, batch: ScheduleBatch):
+        """Prepare a ScheduleBatch for a standard 1-token decode.
+
+        When speculative decoding is active, schedule_batch.prepare_for_decode()
+        returns early (it defers to the speculative worker).  This method does
+        the work that was skipped: set input_ids from last output, allocate one
+        KV cache slot per request, and bump seq_lens.
+        """
+        bs = batch.batch_size()
+        if bs == 0:
+            return
+
+        # Clear any stale spec_info (e.g. NgramVerifyInput from warmup)
+        # so it doesn't leak positions into ForwardBatch.init_new.
+        batch.spec_info = None
+
+        # Build input_ids from the per-request output_ids (authoritative).
+        # batch.output_ids may be stale after tree verify (contains all accepted
+        # tokens, not one per request) and filter_batch doesn't trim it when
+        # no requests are removed.
+        last_tokens = [req.output_ids[-1] for req in batch.reqs]
+        batch.input_ids = torch.tensor(
+            last_tokens, dtype=torch.int32, device=batch.seq_lens.device
+        )
+        batch.output_ids = None
+
+        # Allocate 1 KV cache slot per request
+        batch.out_cache_loc = alloc_for_decode(batch, token_per_req=1)
+
+        # Bump per-request bookkeeping
+        for req in batch.reqs:
+            req.decode_batch_idx += 1
+            req.kv_committed_len += 1
+            req.kv_allocated_len += 1
+
+        # Bump aggregate seq_lens
+        batch.seq_lens.add_(1)
+        batch.seq_lens_cpu.add_(1)
+        batch.orig_seq_lens.add_(1)
+        batch.seq_lens_sum += bs
+
     # ---- Main dispatch ----
 
     def forward_batch_generation(
@@ -201,6 +413,7 @@ class MedusaWorker:
             result = self.target_worker.forward_batch_generation(
                 batch.get_model_worker_batch()
             )
+            self._disable_hidden_capture(batch)
             self._capture_hidden_from_result(result)
             return result
 
@@ -216,55 +429,121 @@ class MedusaWorker:
                 return self._forward_medusa(batch)
             except Exception as e:
                 logger.warning("Medusa draft failed (%s), falling back to target-only", e)
+                if batch.forward_mode != ForwardMode.DECODE:
+                    # _forward_medusa partially modified the batch (e.g., switched
+                    # to TARGET_VERIFY and allocated KV).  Recovery is unsafe — 
+                    # re-raise so the scheduler can handle it.
+                    raise
 
-        # Fallback: target-only decode (with hidden capture enabled)
+        # Fallback: target-only decode (with hidden capture enabled).
+        # prepare_for_decode() was skipped by the scheduler for spec algorithms,
+        # so we must do the standard decode prep here.
+        self._prepare_batch_for_decode(batch)
         self._enable_hidden_capture(batch)
         result = self.target_worker.forward_batch_generation(
             batch.get_model_worker_batch()
         )
+        self._disable_hidden_capture(batch)
         self._capture_hidden_from_result(result)
+
+        # Spec v1 scheduler won't auto-append output_ids for spec algorithms,
+        # so we do it here (same as non-spec path in process_batch_result_decode).
+        if result.next_token_ids is not None:
+            next_ids = result.next_token_ids.tolist()
+            for req, tid in zip(batch.reqs, next_ids):
+                req.output_ids.append(tid)
+                req.check_finished()
+
         return result
 
     # ---- Medusa draft + verify ----
 
     def _forward_medusa(self, batch: ScheduleBatch) -> GenerationBatchResult:
-        """Generate Medusa drafts and verify via NgramVerifyInput."""
+        """Generate Medusa drafts and verify via NgramVerifyInput.
+
+        The NgramVerifyInput tree requires the current (uncommitted) token at
+        position 0, followed by K draft predictions.  This matches the C++
+        ngram corpus invariant (result.cpp:fillResult prepends last_token).
+        """
         from sglang.srt.speculative.ngram_info import NgramVerifyInput
 
         bs = batch.batch_size()
-        K = self.draft_token_num
+        K = self.num_draft_tokens       # pure draft count from Medusa heads
+        T = self.draft_token_num         # tree size = K + 1 (current + drafts)
 
-        # Step 1: Run Medusa heads on cached hidden states
+        # Step 1: Run Medusa heads on cached hidden states (with logits for prefilter)
         hidden = self._cached_hidden
         if hidden.shape[0] < bs:
-            # Pad or truncate to batch size
             hidden = hidden[:bs]
         elif hidden.shape[0] > bs:
             hidden = hidden[:bs]
 
         with torch.no_grad():
-            draft_tokens = self.medusa_model.predict_tokens(hidden)  # [bs, num_heads]
-            draft_tokens = draft_tokens[:, :K]  # trim to draft_token_num
+            if self.prefilter is not None:
+                all_tokens, head_logits = self.medusa_model.predict_with_logits(hidden)
+            else:
+                all_tokens = self.medusa_model.predict_tokens(hidden)
+                head_logits = None
 
-        # Step 2: Build flat draft token + tree mask arrays (ngram format)
-        flat_drafts = draft_tokens.reshape(-1).contiguous()  # [bs * K]
+            # Reorder heads: skip screen, use offset-sorted draft heads
+            reorder = self._draft_head_indices[:K]
+            draft_tokens = all_tokens[:, reorder]  # [bs, K]
 
-        # Tree mask: tile the linear mask for each request
-        mask_per_req = self.tree_mask_np.flatten()  # K*K bools
+        # Step 1.5: DraftPreFilter — drop unlikely candidates before verification
+        if self.prefilter is not None and head_logits is not None:
+            context_ids = None
+            if self.prefilter.ngram_trie is not None:
+                context_ids = []
+                for req in batch.reqs:
+                    ctx = list(req.origin_input_ids) + list(req.output_ids)
+                    context_ids.append(ctx[-16:])
+
+            screen_logits = None
+            if self.prefilter.screen_head_idx is not None:
+                sidx = self.prefilter.screen_head_idx
+                if sidx < len(head_logits):
+                    screen_logits = head_logits[sidx][:bs]
+
+            filtered, keep_mask, telem = self.prefilter.filter_drafts(
+                draft_tokens, [head_logits[i][:bs] for i in reorder],
+                context_ids=context_ids,
+                screen_logits=screen_logits,
+            )
+
+            # Replace dropped tokens with a safe fallback (repeat last accepted token)
+            if not keep_mask.all():
+                for b in range(bs):
+                    last_tok = batch.reqs[b].output_ids[-1] if batch.reqs[b].output_ids else 0
+                    for k in range(K):
+                        if not keep_mask[b, k]:
+                            draft_tokens[b, k] = last_tok
+
+            self.prefilter.log_periodic_stats(interval=50)
+
+        # Step 2: Build tree token array — prepend current token, then K drafts.
+        # This matches the NGRAM invariant: tree[0] = current_token.
+        tree_tokens_list = []
+        for i in range(bs):
+            tree_tokens_list.append(batch.output_ids[i:i+1])   # current (uncommitted) token
+            tree_tokens_list.append(draft_tokens[i])            # K draft predictions
+        flat_tree = torch.cat(tree_tokens_list).contiguous()    # [bs * T]
+
+        # Tree mask: tile the (T×T) linear mask for each request
+        mask_per_req = self.tree_mask_np.flatten()              # T*T bools
         mask_tiled = np.tile(mask_per_req, bs)
 
         # Copy to pre-allocated GPU tensors
-        self._draft_tokens_buf[: bs * K].copy_(flat_drafts, non_blocking=True)
-        self._tree_mask_buf[: bs * K * K].copy_(
+        self._draft_tokens_buf[: bs * T].copy_(flat_tree, non_blocking=True)
+        self._tree_mask_buf[: bs * T * T].copy_(
             torch.from_numpy(mask_tiled), non_blocking=True
         )
 
         # Step 3: Reconstruct tree indices
-        positions = self._positions_buf[: bs * K]
-        retrive_index = self._retrieve_indexes[:bs, :K]
-        retrive_next_token = self._retrive_next_token[:bs, :K]
-        retrive_next_sibling = self._retrive_next_sibling[:bs, :K]
-        tree_mask_gpu = self._tree_mask_buf[: bs * K * K]
+        positions = self._positions_buf[: bs * T]
+        retrive_index = self._retrieve_indexes[:bs, :T]
+        retrive_next_token = self._retrive_next_token[:bs, :T]
+        retrive_next_sibling = self._retrive_next_sibling[:bs, :T]
+        tree_mask_gpu = self._tree_mask_buf[: bs * T * T]
 
         try:
             from sgl_kernel.speculative import reconstruct_indices_from_tree_mask
@@ -277,7 +556,7 @@ class MedusaWorker:
                 retrive_next_token,
                 retrive_next_sibling,
                 bs,
-                K,
+                T,
             )
         except Exception as e:
             logger.warning("Medusa reconstruct_indices failed (%s), falling back", e)
@@ -285,10 +564,10 @@ class MedusaWorker:
 
         # Step 4: Build full attention mask (prefix + tree)
         tree_mask_list = []
-        mask_np_3d = mask_tiled.reshape(bs, K, K)
+        mask_np_3d = mask_tiled.reshape(bs, T, T)
         for i, req in enumerate(batch.reqs):
             seq_len = len(req.origin_input_ids) + len(req.output_ids)
-            prefix_mask = torch.ones((K, seq_len - 1), device="cuda")
+            prefix_mask = torch.ones((T, seq_len - 1), device="cuda")
             tree_part = torch.from_numpy(mask_np_3d[i]).cuda()
             full_mask = torch.cat((prefix_mask, tree_part), dim=1).to(torch.bool)
             tree_mask_list.append(full_mask.flatten())
@@ -299,14 +578,16 @@ class MedusaWorker:
         batch.spec_algorithm = SpeculativeAlgorithm.NGRAM  # reuse ngram verify path
         batch.forward_mode = ForwardMode.TARGET_VERIFY
         batch.spec_info = NgramVerifyInput(
-            self._draft_tokens_buf[: bs * K],
+            self._draft_tokens_buf[: bs * T],
             full_tree_mask,
             positions,
             retrive_index,
             retrive_next_token,
             retrive_next_sibling,
-            K,
+            T,
         )
+        # Capture hidden states during verify so we can feed Medusa heads next round.
+        batch.spec_info.capture_hidden_mode = CaptureHiddenMode.FULL
         batch.spec_info.prepare_for_verify(batch, self.page_size)
 
         model_worker_batch = batch.get_model_worker_batch()
@@ -326,8 +607,31 @@ class MedusaWorker:
             batch.forward_mode = ForwardMode.DECODE
             batch.spec_algorithm = original_algo
 
-            # Capture hidden states for next round
-            self._capture_hidden_from_result(batch_result)
+            # Feed verify results back to prefilter for adaptive threshold tuning.
+            # accept_length counts accepted nodes in the TREE (including the always-
+            # accepted current token at position 0).  For prefilter feedback we only
+            # care about the K draft positions (positions 1..K), so subtract 1.
+            if self.prefilter is not None and accept_lens is not None:
+                try:
+                    accepted_mask = torch.zeros(bs, K, dtype=torch.bool, device="cuda")
+                    accept_lens_list = (
+                        accept_lens.tolist()
+                        if isinstance(accept_lens, torch.Tensor)
+                        else accept_lens
+                    )
+                    for b_idx, alen in enumerate(accept_lens_list):
+                        if b_idx < bs:
+                            # alen includes current token at pos 0; draft acceptance = alen - 1
+                            n_draft_accepted = min(max(int(alen) - 1, 0), K)
+                            accepted_mask[b_idx, :n_draft_accepted] = True
+                    self.prefilter.record_verify_results(accepted_mask)
+                except Exception as e:
+                    logger.debug("Prefilter feedback failed: %s", e)
+
+            # After verify, logits_output.hidden_states is filtered to accepted
+            # positions only.  Take the LAST accepted position's hidden state
+            # for the next Medusa drafting round.
+            self._capture_hidden_from_verify(batch_result, logits_output)
 
             return GenerationBatchResult(
                 logits_output=logits_output,
@@ -344,14 +648,17 @@ class MedusaWorker:
     # ---- Hidden state capture ----
 
     def _enable_hidden_capture(self, batch: ScheduleBatch):
-        """Ensure the target forward will capture last hidden states for Medusa."""
-        if batch.spec_info is not None:
-            batch.spec_info.capture_hidden_mode = CaptureHiddenMode.LAST
-        else:
-            # Create a minimal spec_info carrier for the capture mode
-            from types import SimpleNamespace
+        """Ensure the target forward will capture last hidden states for Medusa.
 
-            batch.spec_info = SimpleNamespace(capture_hidden_mode=CaptureHiddenMode.LAST)
+        ALWAYS replace spec_info — stale objects (e.g. NgramVerifyInput left
+        by warmup or a previous scheduler cycle) carry a .positions attribute
+        that overrides the correct decode positions in ForwardBatch.init_new.
+        """
+        batch.spec_info = _MedusaCaptureCarrier()
+
+    def _disable_hidden_capture(self, batch: ScheduleBatch):
+        """Clear spec_info after forward so the scheduler doesn't trip over it."""
+        batch.spec_info = None
 
     def _capture_hidden_from_result(self, result: GenerationBatchResult):
         """Extract hidden states from logits_output (same path as EAGLE)."""
@@ -367,13 +674,40 @@ class MedusaWorker:
             pass
         self._hidden_available = False
 
+    def _capture_hidden_from_verify(
+        self, batch_result: GenerationBatchResult, verified_logits: LogitsProcessorOutput
+    ):
+        """After verify, hidden_states in verified_logits are filtered to accepted
+        positions.  Take the last hidden state per request for the next round."""
+        try:
+            h = getattr(verified_logits, "hidden_states", None)
+            if h is not None and isinstance(h, torch.Tensor) and h.numel() > 0:
+                # verified_logits.hidden_states is already filtered to accepted
+                # positions by NgramVerifyInput.verify().  For each request the
+                # last entry is the hidden state of the last accepted token.
+                # For a simple single-request batch, h[-1:] is correct.
+                self._cached_hidden = h[-1:].detach()
+                self._hidden_available = True
+                return
+        except Exception:
+            pass
+        # Fallback: try batch_result (pre-verify, unfiltered)
+        self._capture_hidden_from_result(batch_result)
+
     # ---- Fallback ----
 
     def _fallback_target_only(self, batch: ScheduleBatch) -> GenerationBatchResult:
         batch.forward_mode = ForwardMode.DECODE
+        self._prepare_batch_for_decode(batch)
         self._enable_hidden_capture(batch)
         result = self.target_worker.forward_batch_generation(
             batch.get_model_worker_batch()
         )
+        self._disable_hidden_capture(batch)
         self._capture_hidden_from_result(result)
+        if result.next_token_ids is not None:
+            next_ids = result.next_token_ids.tolist()
+            for req, tid in zip(batch.reqs, next_ids):
+                req.output_ids.append(tid)
+                req.check_finished()
         return result
