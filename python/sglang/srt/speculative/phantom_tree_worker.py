@@ -134,7 +134,10 @@ class PhantomTreeWorker:
 
     @property
     def model_config(self):
-        return self.inner.model_config
+        # NGRAMWorker has model_runner but not model_config directly
+        if hasattr(self.inner, "model_config"):
+            return self.inner.model_config
+        return self.inner.model_runner.model_config
 
     def get_memory_pool(self):
         return self.inner.get_memory_pool()

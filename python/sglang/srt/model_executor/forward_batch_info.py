@@ -657,6 +657,20 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
 
             model_runner.lora_manager.prepare_lora_batch(ret)
 
+        # ── Speculative decode phase-boundary diagnostics ────────────
+        try:
+            from sglang.srt.observability.spec_decode_tracer import get_tracer, ENABLED
+            if ENABLED:
+                _diag = get_tracer()
+                _diag.snapshot_forward_batch(
+                    phase=f"init_new:{ret.forward_mode}",
+                    forward_batch=ret,
+                    extra={"_bad_extend_detected": _bad} if '_bad' in dir() else None,
+                )
+        except Exception:
+            pass
+        # ─────────────────────────────────────────────────────────────
+
         return ret
 
     def adjust_num_token_non_padded_for_attn_tp(self, server_args) -> None:

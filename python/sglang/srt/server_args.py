@@ -529,6 +529,7 @@ class ServerArgs:
     medusa_posterior_threshold: float = 0.09     # fixed threshold for typical acceptance
     medusa_posterior_alpha: float = 0.3          # entropy scaling factor (≈ √threshold)
     medusa_tree_structure: str = "linear"        # "linear" | "mc_sim_63" | "auto"
+    medusa_no_step0: bool = False                # skip Step 0 decode; use shifted heads (Head 1→draft 0)
 
     # Speculative decoding — PALTROW / AMD SAM / ReBAR hardware
     sam_enabled: Optional[bool] = None           # None = auto-detect from PCIe BAR
@@ -4877,7 +4878,7 @@ class ServerArgs:
         parser.add_argument(
             "--speculative-algorithm",
             type=str,
-            choices=["EAGLE", "EAGLE3", "P_EAGLE", "NEXTN", "STANDALONE", "NGRAM", "P_CASCADE", "MEDUSA", "SAGUARO", "CHIMERA"],
+            choices=["EAGLE", "EAGLE3", "P_EAGLE", "NEXTN", "STANDALONE", "NGRAM", "P_CASCADE", "MEDUSA", "SAGUARO", "CHIMERA", "TQ5_X", "SELF_SPEC", "PHANTOM_SD"],
             help="Speculative algorithm.",
         )
         parser.add_argument(
@@ -5103,6 +5104,18 @@ class ServerArgs:
                 "'mc_sim_63': 63-candidate tree from Medusa paper (higher acceptance, more compute). "
                 "'auto': mc_sim_63 for ≤5 heads, linear for >5 heads. "
                 "Default: linear."
+            ),
+        )
+
+        parser.add_argument(
+            "--medusa-no-step0",
+            action="store_true",
+            default=ServerArgs.medusa_no_step0,
+            help=(
+                "Skip the Step 0 decode that refreshes hidden states before drafting. "
+                "Uses shifted heads: Head 1 becomes draft 0, Head 2 becomes draft 1, etc. "
+                "Eliminates 1 extra forward pass per round at the cost of Head 0 (echo). "
+                "Requires ≥ num_draft_tokens+1 non-screen heads. Default: False."
             ),
         )
 

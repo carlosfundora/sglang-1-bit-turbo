@@ -136,6 +136,7 @@ class MedusaWorker:
         self.posterior_threshold = getattr(server_args, "medusa_posterior_threshold", 0.09)
         self.posterior_alpha = getattr(server_args, "medusa_posterior_alpha", 0.3)
         self.tree_structure = getattr(server_args, "medusa_tree_structure", "linear")
+        self.no_step0 = getattr(server_args, "medusa_no_step0", False)
 
         # AMD SAM / ReBAR / PALTROW hardware detection
         self._sam_info = self._detect_sam_rebar(server_args)
@@ -173,6 +174,24 @@ class MedusaWorker:
         # Detect tiered architecture: build head reorder map that skips screen
         # heads and orders remaining heads by their prediction offset (t+1, t+2, ...)
         self._draft_head_indices = self._build_draft_head_order(model_path)
+
+        # --medusa-no-step0: skip the t+1 head (it echoes with stale hidden).
+        # Head t+2 becomes draft[0], t+3 becomes draft[1], etc.
+        if self.no_step0:
+            if len(self._draft_head_indices) > 1:
+                self._draft_head_indices = self._draft_head_indices[1:]
+                logger.info(
+                    "MedusaWorker: no-step0 mode — shifted heads, "
+                    "skipped t+1 echo head, using %s",
+                    self._draft_head_indices,
+                )
+            else:
+                logger.warning(
+                    "MedusaWorker: no-step0 requires ≥2 non-screen heads; "
+                    "falling back to step0 mode"
+                )
+                self.no_step0 = False
+
         num_draft_heads = len(self._draft_head_indices)
         self.num_draft_tokens = min(draft_tokens, num_draft_heads)  # K = pure drafts
 
@@ -198,13 +217,14 @@ class MedusaWorker:
         # Hidden-state cache (populated after each target forward)
         self._cached_hidden: Optional[torch.Tensor] = None
         self._hidden_available = False
+        self._last_accept_lens: Optional[torch.Tensor] = None
 
         # DraftPreFilter: layered pre-rejection (n-gram → screen → agreement)
         self.prefilter = self._init_prefilter(model_path)
 
         logger.info(
             "MedusaWorker ready: %d heads, %d draft tokens (tree size %d), "
-            "tree=%s, typical=%s (τ=%.3f α=%.3f), prefilter=%s, SAM=%s",
+            "tree=%s, typical=%s (τ=%.3f α=%.3f), prefilter=%s, SAM=%s, step0=%s",
             self.num_heads,
             self.num_draft_tokens,
             self.draft_token_num,
@@ -214,6 +234,7 @@ class MedusaWorker:
             self.posterior_alpha,
             "ON" if self.prefilter else "OFF",
             "ON" if self._sam_info.get("enabled") else "OFF",
+            "OFF (shifted heads)" if self.no_step0 else "ON",
         )
 
     def _build_draft_head_order(self, model_path: str) -> list:
@@ -628,12 +649,88 @@ class MedusaWorker:
         The NgramVerifyInput tree requires the current (uncommitted) token at
         position 0, followed by K draft predictions.  This matches the C++
         ngram corpus invariant (result.cpp:fillResult prepends last_token).
+
+        **Step 0 Decode (Off-by-one fix):**
+        After verify, _cached_hidden = h(last_accepted_tree_position).  The bonus
+        token (sampled from logits at that position) has NEVER been through the
+        model, so Medusa heads working from the stale hidden always echo the
+        current token at Head 0.
+
+        We fix this by decoding the current token through the target model at
+        the start of each round, then rolling back ALL batch state so the verify
+        tree sees the original seq_lens.  The Step 0 KV slot is freed — only the
+        captured hidden state h(current) survives.
         """
         from sglang.srt.speculative.ngram_info import NgramVerifyInput
 
         bs = batch.batch_size()
         K = self.num_draft_tokens       # pure draft count from Medusa heads
         T = self.draft_token_num         # tree size = K + 1 (current + drafts)
+
+        # Determine if we can skip Step 0 this round.
+        # no_step0 mode uses the stale hidden from verify, but the very first
+        # round after prefill may not have cached hidden yet — fall back to Step 0.
+        skip_step0 = self.no_step0 and self._hidden_available
+
+        # ---- Step 0: Decode current token to get fresh h(current) ----
+        # The bonus token from the previous verify has NEVER been through the
+        # model, so _cached_hidden is stale.  We run ONE target forward of the
+        # current token, capture h(current), then FULLY roll back batch state.
+        # The only surviving side-effect is self._cached_hidden = h(current).
+        #
+        # When --medusa-no-step0 is enabled, we skip this entirely and use the
+        # stale hidden from verify.  Head 0 will echo (useless) but Heads 1..K
+        # shift down: Head 1 predicts +1 from current, Head 2 predicts +2, etc.
+        # This eliminates 1 extra forward pass per round (~2× speed improvement).
+        #
+        # All mutations are wrapped in try/finally so an exception (OOM, NCCL,
+        # etc.) cannot leave batch state corrupted.
+        if not skip_step0:
+            seq_lens_save = batch.seq_lens.clone()
+            seq_lens_cpu_save = batch.seq_lens_cpu.clone()
+            orig_seq_lens_save = batch.orig_seq_lens.clone()
+            seq_lens_sum_save = batch.seq_lens_sum
+            output_ids_save = batch.output_ids
+            input_ids_save = batch.input_ids
+            spec_info_save = batch.spec_info
+            out_cache_loc_save = batch.out_cache_loc
+            req_state_save = [
+                (r.decode_batch_idx, r.kv_committed_len, r.kv_allocated_len)
+                for r in batch.reqs
+            ]
+            # Save the req_to_token_pool slot that alloc_for_decode will overwrite
+            rtp_positions = seq_lens_save.to(torch.int64)
+            rtp_old_values = batch.req_to_token_pool.req_to_token[
+                batch.req_pool_indices, rtp_positions
+            ].clone()
+
+            try:
+                self._prepare_batch_for_decode(batch)
+                self._enable_hidden_capture(batch)
+                step0_mwb = batch.get_model_worker_batch()
+                step0_result = self.target_worker.forward_batch_generation(step0_mwb)
+                self._disable_hidden_capture(batch)
+                self._capture_hidden_from_result(step0_result)
+            finally:
+                # Unconditional rollback — runs even on exception
+                if batch.out_cache_loc is not None:
+                    batch.token_to_kv_pool_allocator.free(batch.out_cache_loc)
+                # Restore the req_to_token_pool entry overwritten by alloc_for_decode
+                batch.req_to_token_pool.req_to_token[
+                    batch.req_pool_indices, rtp_positions
+                ] = rtp_old_values
+                batch.seq_lens.copy_(seq_lens_save)
+                batch.seq_lens_cpu.copy_(seq_lens_cpu_save)
+                batch.orig_seq_lens.copy_(orig_seq_lens_save)
+                batch.seq_lens_sum = seq_lens_sum_save
+                batch.output_ids = output_ids_save
+                batch.input_ids = input_ids_save
+                batch.spec_info = spec_info_save
+                batch.out_cache_loc = out_cache_loc_save
+                for r, (dbi, kcl, kal) in zip(batch.reqs, req_state_save):
+                    r.decode_batch_idx = dbi
+                    r.kv_committed_len = kcl
+                    r.kv_allocated_len = kal
 
         # Step 1: Run Medusa heads on cached hidden states (with logits for prefilter)
         hidden = self._cached_hidden
@@ -696,9 +793,15 @@ class MedusaWorker:
 
         # Step 2: Build tree token array — prepend current token, then K drafts.
         # This matches the NGRAM invariant: tree[0] = current_token.
+        # batch.input_ids was set by Step 0's _prepare_batch_for_decode and
+        # still holds the current token per request.
         tree_tokens_list = []
+        current_tokens = torch.tensor(
+            [req.output_ids[-1] for req in batch.reqs],
+            dtype=torch.int32, device="cuda",
+        )
         for i in range(bs):
-            tree_tokens_list.append(batch.output_ids[i:i+1])   # current (uncommitted) token
+            tree_tokens_list.append(current_tokens[i:i+1])     # current token
             tree_tokens_list.append(draft_tokens[i])            # K draft predictions
         flat_tree = torch.cat(tree_tokens_list).contiguous()    # [bs * T]
 
@@ -739,6 +842,8 @@ class MedusaWorker:
             return self._fallback_target_only(batch)
 
         # Step 4: Build full attention mask (prefix + tree) using cached 3D mask
+        # seq_lens is restored to pre-Step-0 state; prefix = everything before
+        # the current token (tree[0]), which is seq_len - 1.
         tree_mask_list = []
         mask_np_3d = self._cached_mask_np_3d[:bs]  # use pre-cached, avoid reshape per call
         for i, req in enumerate(batch.reqs):
@@ -783,6 +888,30 @@ class MedusaWorker:
             batch.forward_mode = ForwardMode.DECODE
             batch.spec_algorithm = original_algo
 
+            # Lightweight periodic acceptance logging
+            if not hasattr(self, "_acc_count"):
+                self._acc_count = 0
+                self._acc_sum = 0.0
+            if accept_lens is not None:
+                self._acc_count += 1
+                mean_al = accept_lens.float().mean().item() if isinstance(accept_lens, torch.Tensor) else sum(accept_lens)/max(len(accept_lens),1)
+                self._acc_sum += mean_al
+                if self._acc_count % 10 == 0:
+                    logger.info("MEDUSA accept_rate: last=%.2f avg=%.2f (K=%d, %d rounds)", mean_al, self._acc_sum / self._acc_count, K, self._acc_count)
+
+            # Advance decode_batch_idx by accepted tokens + bonus.
+            # This counter drives SWA eviction scheduling; without it, SWA
+            # windows grow unbounded on the Medusa path.
+            if accept_lens is not None:
+                accept_lens_list = (
+                    accept_lens.tolist()
+                    if isinstance(accept_lens, torch.Tensor)
+                    else accept_lens
+                )
+                for i, req in enumerate(batch.reqs):
+                    if i < len(accept_lens_list):
+                        req.decode_batch_idx += int(accept_lens_list[i]) + 1
+
             # Feed verify results back to prefilter for adaptive threshold tuning.
             # accept_length counts accepted nodes in the TREE (including the always-
             # accepted current token at position 0).  For prefilter feedback we only
@@ -804,9 +933,10 @@ class MedusaWorker:
                 except Exception as e:
                     logger.debug("Prefilter feedback failed: %s", e)
 
-            # After verify, logits_output.hidden_states is filtered to accepted
-            # positions only.  Take the LAST accepted position's hidden state
-            # for the next Medusa drafting round.
+            # Capture hidden state from verify for next round's Medusa heads.
+            # Note: this captures h(last_accepted), which is stale by one position.
+            # The Step 0 decode at the start of _forward_medusa refreshes it.
+            self._last_accept_lens = accept_lens
             self._capture_hidden_from_verify(batch_result, logits_output)
 
             return GenerationBatchResult(
@@ -854,15 +984,19 @@ class MedusaWorker:
         self, batch_result: GenerationBatchResult, verified_logits: LogitsProcessorOutput
     ):
         """After verify, hidden_states in verified_logits are filtered to accepted
-        positions.  Take the last hidden state per request for the next round."""
+        positions (flattened across all requests).  Extract the last accepted
+        hidden per request using cumulative accept_length offsets."""
         try:
             h = getattr(verified_logits, "hidden_states", None)
             if h is not None and isinstance(h, torch.Tensor) and h.numel() > 0:
-                # verified_logits.hidden_states is already filtered to accepted
-                # positions by NgramVerifyInput.verify().  For each request the
-                # last entry is the hidden state of the last accepted token.
-                # For a simple single-request batch, h[-1:] is correct.
-                self._cached_hidden = h[-1:].detach()
+                # h shape: [sum(accept_length_i + 1), hidden] — flattened
+                if hasattr(self, '_last_accept_lens') and self._last_accept_lens is not None:
+                    al = self._last_accept_lens  # [bs] tensor
+                    offsets = torch.cumsum(al + 1, dim=0) - 1  # last pos per req
+                    offsets = offsets.clamp(max=h.shape[0] - 1)
+                    self._cached_hidden = h[offsets].detach()
+                else:
+                    self._cached_hidden = h[-1:].detach()
                 self._hidden_available = True
                 return
         except Exception:

@@ -118,13 +118,13 @@ class _FrozenCorpus:
 
     def batch_get(self, batch_tokens: List[List[int]]) -> Tuple[np.ndarray, np.ndarray]:
         """Read-only lookup — safe to call from any thread after freeze()."""
-        result = self._corpus._ngram.batchMatch(batch_tokens)
-        return np.array(result.token), np.array(result.mask)
+        token_arr, mask_arr = self._corpus.batch_get(batch_tokens)
+        return token_arr, mask_arr
 
     def insert(self, batch_tokens: List[List[int]]):
         """Insert tokens into corpus (only before freeze)."""
         if not self._frozen:
-            self._corpus.asyncInsert(batch_tokens)
+            self._corpus.batch_put(batch_tokens)
 
 
 class TQ5XWorker:
