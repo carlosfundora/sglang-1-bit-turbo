@@ -1,9 +1,5 @@
 #pragma once
 
-#include "param.h"
-#include "queue.h"
-#include "result.h"
-#include "trie.h"
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +7,11 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+
+#include "param.h"
+#include "queue.h"
+#include "result.h"
+#include "trie.h"
 
 namespace ngram {
 

@@ -1,7 +1,5 @@
 #pragma once
 
-#include "param.h"
-#include "result.h"
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -11,6 +9,9 @@
 #include <tuple>
 #include <unordered_map>
 #include <vector>
+
+#include "param.h"
+#include "result.h"
 
 namespace ngram {
 

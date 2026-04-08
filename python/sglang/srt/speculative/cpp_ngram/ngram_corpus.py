@@ -1,13 +1,25 @@
 # -*- coding: utf-8 -*-
 
 import logging
+import os
 from typing import List, Tuple
 
 import numpy as np
-
-from sglang.jit_kernel.ngram_corpus import get_ngram_corpus_cls
+from torch.utils.cpp_extension import load
 
 logger = logging.getLogger(__name__)
+
+_abs_path = os.path.dirname(os.path.abspath(__file__))
+ngram_corpus_cpp = load(
+    name="ngram_corpus_cpp",
+    sources=[
+        f"{_abs_path}/ngram_corpus_binding.cpp",
+        f"{_abs_path}/ngram.cpp",
+        f"{_abs_path}/trie.cpp",
+        f"{_abs_path}/result.cpp",
+    ],
+    extra_cflags=["-O3", "-std=c++20"],
+)
 
 
 class NgramCorpus:
@@ -19,30 +31,30 @@ class NgramCorpus:
         draft_token_num=8,
         match_type="BFS",
         capacity=1000000,
-    ) -> None:
-        cls = get_ngram_corpus_cls()
-        self._obj = cls(
-            capacity=capacity,
-            max_trie_depth=max_trie_depth,
-            min_bfs_breadth=min_bfs_breadth,
-            max_bfs_breadth=max_bfs_breadth,
-            draft_token_num=draft_token_num,
-            match_type=match_type,
-        )
+    ):
+        param = ngram_corpus_cpp.Param()
+        param.max_trie_depth = max_trie_depth
+        param.min_bfs_breadth = min_bfs_breadth
+        param.max_bfs_breadth = max_bfs_breadth
+        param.draft_token_num = draft_token_num
+        param.match_type = match_type
+        self._ngram = ngram_corpus_cpp.Ngram(capacity, param)
+
         self.default_mask = np.ones((1, 1), dtype=np.int64)
         self.draft_token_num = draft_token_num
 
     def batch_put(self, batch_tokens: List[List[int]]):
-        self._obj.insert(batch_tokens)
+        self._ngram.asyncInsert(batch_tokens)
 
     def synchronize(self):
-        self._obj.synchronize()  # type: ignore
+        self._ngram.synchronize()
 
     def reset(self):
-        self._obj.reset()  # type: ignore
+        self._ngram.reset()
 
     def batch_get(self, batch_tokens: List[List[int]]) -> Tuple[np.ndarray, np.ndarray]:
-        return self._obj.match(batch_tokens)
+        result = self._ngram.batchMatch(batch_tokens)
+        return np.array(result.token), np.array(result.mask)
 
     def leaf_paths_from_mask(
         self, tokens: List[int], tree_mask: List[List[int]]

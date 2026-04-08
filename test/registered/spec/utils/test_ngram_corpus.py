@@ -480,39 +480,41 @@ class TestDraftBudgetSaturation(CustomTestCase):
 
 
 class TestTruncate(CustomTestCase):
-    """Verify truncation logic on batch_get output."""
+    """Verify the Result.truncate method via the Python binding."""
 
     def test_truncate_reduces_output(self):
         corpus = _make_corpus("BFS", draft_token_num=8)
         corpus.batch_put(SEED_SEQUENCES)
         corpus.synchronize()
 
-        ids, masks = corpus.batch_get([[1, 2, 3]])
-        ids = ids.reshape(8)
-        self.assertEqual(len(ids), 8)
+        result = corpus._ngram.batchMatch([[1, 2, 3]])
+        original_len = len(result.token)
+        self.assertEqual(original_len, 8)
 
-        # Simulate truncate to 4
-        trunc_n = 4
-        trunc_ids = ids[:trunc_n]
-        self.assertEqual(len(trunc_ids), trunc_n)
+        result.truncate(4)
+        self.assertEqual(len(result.token), 4)
+        self.assertEqual(len(result.mask), 4 * 4)
 
     def test_truncate_preserves_mask_structure(self):
         corpus = _make_corpus("BFS", draft_token_num=8)
         corpus.batch_put(SEED_SEQUENCES)
         corpus.synchronize()
 
-        ids, masks = corpus.batch_get([[1, 2, 3]])
-        n = 8
-        full_mask = masks.reshape(n, n)
+        result = corpus._ngram.batchMatch([[1, 2, 3]])
+        full_ids = list(result.token)
+        full_mask = list(result.mask)
+        n = len(full_ids)
 
+        result_copy = corpus._ngram.batchMatch([[1, 2, 3]])
         trunc_n = 4
-        trunc_mask = full_mask[:trunc_n, :trunc_n]
+        result_copy.truncate(trunc_n)
+        trunc_mask = list(result_copy.mask)
 
         for i in range(trunc_n):
             for j in range(trunc_n):
                 self.assertEqual(
-                    trunc_mask[i, j],
-                    full_mask[i, j],
+                    trunc_mask[i * trunc_n + j],
+                    full_mask[i * n + j],
                     f"Mask mismatch at ({i},{j})",
                 )
 
