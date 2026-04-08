@@ -2866,9 +2866,13 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compress (T, head_num, dim) into packed indices + fp16 norms.
 
-        On HIP/CUDA: uses GPU-vectorized path (no CPU round-trips).
-        Fallback: CPU vectorized (no Python head loop).
+        On CUDA: GPU-vectorized (searchsorted + bitpack).
+        On HIP/ROCm: CPU-vectorized — gfx1030 segfaults on float32 GEMM,
+        searchsorted, and uint8 bitwise ops in the TQ4 compress pipeline.
+        CPU path uses pre-cached mirrors of Pi/boundaries (~0.1ms per layer).
         """
+        if _is_hip:
+            return self._compress_cpu_vectorized(data, dim)
         return self._compress_gpu(data, dim)
 
     def _compress_heads(self, data: torch.Tensor, dim: int) -> torch.Tensor:
@@ -2973,18 +2977,18 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
     ):
         """Decompress packed indices + norms into out[:n_active, head_num, dim].
 
-        GPU-vectorized path: processes all heads simultaneously, no CPU round-trips.
-        Replaces former per-head Python loop + D2H/H2D transfers that consumed
-        ~42% of decode CPU time (py-spy profile, 2026-05-XX).
-
-        Algorithm (for each token t, head h):
-          1. Unpack tq_bit_width-bit indices from packed uint8
-          2. Codebook lookup: y_hat = centroids[indices] / tq_scale
-          3. Rotate back: y_hat @ Pi   (Pi is orthogonal)
-          4. Scale by per-token norm
+        On CUDA: GPU-vectorized — all heads simultaneously, no CPU round-trips.
+        On HIP/ROCm: CPU-vectorized — gfx1030 segfaults on uint8 bitwise unpack,
+        float32 GEMM rotation, and codebook indexing with TQ4 buffer shapes.
+        CPU path uses pre-cached mirrors (~0.2ms per layer for typical decode).
         """
         if n_active <= 0:
             return
+
+        if _is_hip:
+            return self._decompress_heads_split_cpu(
+                packed, norms, dim, out, n_active
+            )
 
         T = n_active
         H = self.head_num
@@ -3029,6 +3033,55 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
 
         # --- Scale by norms and write to output ---
         norm_flat = norms[:T].reshape(T * H, 1).float()
+        restored = (restored * norm_flat).reshape(T, H, dim)
+        out[:T, :, :dim].copy_(restored.to(out.dtype))
+
+    def _decompress_heads_split_cpu(
+        self,
+        packed: torch.Tensor,
+        norms: torch.Tensor,
+        dim: int,
+        out: torch.Tensor,
+        n_active: int,
+    ):
+        """CPU decompress for HIP/ROCm — avoids gfx1030 GPU segfaults.
+
+        Moves packed+norms to CPU, unpacks, looks up centroids, rotates back,
+        then copies the result to the GPU output tensor.
+        """
+        T = n_active
+        H = self.head_num
+
+        p = packed[:T].cpu()
+        n = norms[:T].cpu().float()
+        tq_pi = self.tq_Pi_cpu
+        centroids_cpu = self.tq_centroids_cpu
+
+        if self.tq_bit_width == 4:
+            lo = (p & 0x0F).to(torch.int64)
+            hi = ((p >> 4) & 0x0F).to(torch.int64)
+            indices = torch.stack([lo, hi], dim=-1).reshape(T, H, dim)
+        elif self.tq_bit_width == 2:
+            b0 = (p & 0x03).to(torch.int64)
+            b1 = ((p >> 2) & 0x03).to(torch.int64)
+            b2 = ((p >> 4) & 0x03).to(torch.int64)
+            b3 = ((p >> 6) & 0x03).to(torch.int64)
+            indices = torch.stack([b0, b1, b2, b3], dim=-1).reshape(T, H, dim)
+        else:
+            from sglang.srt.layers.quantization.turboquant_engine import (
+                unpack_indices,
+            )
+            indices_list = []
+            for h in range(H):
+                idx_h = unpack_indices(p[:, h, :], dim, self.tq_bit_width)[:, :dim]
+                indices_list.append(idx_h)
+            indices = torch.stack(indices_list, dim=1)
+
+        y_hat = centroids_cpu[indices.reshape(-1)].reshape(T, H, dim) / self.tq_scale
+        y_flat = y_hat.reshape(T * H, dim)
+        restored = torch.mm(y_flat, tq_pi)
+
+        norm_flat = n.reshape(T * H, 1)
         restored = (restored * norm_flat).reshape(T, H, dim)
         out[:T, :, :dim].copy_(restored.to(out.dtype))
 
@@ -3179,12 +3232,11 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
                 is_dense_run = (
                     sorted_loc.numel() == (row_stop - row_start)
                     and torch.equal(
-                        sorted_loc,
+                        sorted_loc_cpu,
                         torch.arange(
                             row_start,
                             row_stop,
-                            dtype=sorted_loc.dtype,
-                            device=sorted_loc.device,
+                            dtype=sorted_loc_cpu.dtype,
                         ),
                     )
                 )

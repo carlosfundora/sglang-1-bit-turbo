@@ -216,6 +216,63 @@ class MedusaWorker:
             "ON" if self._sam_info.get("enabled") else "OFF",
         )
 
+    def _build_draft_head_order(self, model_path: str) -> list:
+        """Build ordered list of head indices for drafting.
+
+        For tiered models: skip screen heads, order remaining by prediction
+        offset (t+1 first, then t+2, ...).  Pick the best head per offset
+        (precision > easy when both cover the same offset).
+
+        For flat models: identity order [0, 1, ..., num_heads-1].
+        """
+        config_path = os.path.join(model_path, "medusa_config.json")
+        if not os.path.exists(config_path):
+            return list(range(self.num_heads))
+
+        with open(config_path) as f:
+            cfg = json.load(f)
+
+        tiered = cfg.get("tiered_architecture")
+        if not tiered:
+            return list(range(self.num_heads))
+
+        screen_set = set(tiered.get("screen_heads", []))
+        offsets = cfg.get("head_offsets", {})
+
+        def _parse_offset(desc: str) -> int:
+            if "screen" in desc.lower():
+                return -1
+            import re
+            m = re.search(r"t\+(\d+)", desc)
+            return int(m.group(1)) if m else 0
+
+        candidates = []
+        for idx in range(self.num_heads):
+            if idx in screen_set:
+                continue
+            desc = offsets.get(str(idx), "")
+            off = _parse_offset(desc)
+            if off < 0:
+                continue
+            is_precision = "precision" in desc.lower()
+            candidates.append((idx, off, 0 if is_precision else 1))
+
+        candidates.sort(key=lambda x: (x[1], x[2]))
+
+        seen_offsets = set()
+        result = []
+        for idx, off, _prio in candidates:
+            if off in seen_offsets:
+                continue
+            seen_offsets.add(off)
+            result.append(idx)
+
+        if not result:
+            logger.warning("No non-screen heads found, falling back to identity order")
+            return list(range(self.num_heads))
+
+        return result
+
     # ---- AMD SAM / ReBAR auto-detection ----
 
     @staticmethod
@@ -331,65 +388,6 @@ class MedusaWorker:
             "Cached tree buffers: T=%d, max_bs=%d, GPU mask=%.1f KB",
             T, max_bs, self._cached_mask_tiled_gpu.numel() / 1024,
         )
-        """Build ordered list of head indices for drafting.
-
-        For tiered models: skip screen heads, order remaining by prediction
-        offset (t+1 first, then t+2, ...).  Pick the best head per offset
-        (precision > easy when both cover the same offset).
-
-        For flat models: identity order [0, 1, ..., num_heads-1].
-        """
-        config_path = os.path.join(model_path, "medusa_config.json")
-        if not os.path.exists(config_path):
-            return list(range(self.num_heads))
-
-        with open(config_path) as f:
-            cfg = json.load(f)
-
-        tiered = cfg.get("tiered_architecture")
-        if not tiered:
-            return list(range(self.num_heads))
-
-        screen_set = set(tiered.get("screen_heads", []))
-        offsets = cfg.get("head_offsets", {})
-
-        # Parse offset position from description strings like "precision t+2"
-        def _parse_offset(desc: str) -> int:
-            if "screen" in desc.lower():
-                return -1  # sentinel: skip
-            import re
-            m = re.search(r"t\+(\d+)", desc)
-            return int(m.group(1)) if m else 0
-
-        # Build (head_idx, offset, priority) tuples — precision > easy
-        candidates = []
-        for idx in range(self.num_heads):
-            if idx in screen_set:
-                continue
-            desc = offsets.get(str(idx), "")
-            off = _parse_offset(desc)
-            if off < 0:
-                continue
-            is_precision = "precision" in desc.lower()
-            candidates.append((idx, off, 0 if is_precision else 1))
-
-        # Sort by offset ascending, precision first within same offset
-        candidates.sort(key=lambda x: (x[1], x[2]))
-
-        # Deduplicate: keep best head per offset
-        seen_offsets = set()
-        result = []
-        for idx, off, _prio in candidates:
-            if off in seen_offsets:
-                continue
-            seen_offsets.add(off)
-            result.append(idx)
-
-        if not result:
-            logger.warning("No non-screen heads found, falling back to identity order")
-            return list(range(self.num_heads))
-
-        return result
 
     def _init_prefilter(self, model_path: str):
         """Initialize DraftPreFilter if tiered config or env var enables it."""
