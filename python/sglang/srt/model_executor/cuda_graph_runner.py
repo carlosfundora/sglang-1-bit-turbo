@@ -831,7 +831,21 @@ class CudaGraphRunner:
         return out
 
     def _create_device_graph(self):
-        return torch.cuda.CUDAGraph()
+        graph = torch.cuda.CUDAGraph()
+        # On RDNA2 (gfx1030), hipGraph capture may need extra care:
+        # - Ensure HSA_OVERRIDE_GFX_VERSION=10.3.0 is set
+        # - AMD_SERIALIZE_KERNEL=3 helps stability during graph capture
+        if _is_hip:
+            gcn = ""
+            try:
+                gcn = torch.cuda.get_device_properties(0).gcnArchName
+            except Exception:
+                pass
+            if "gfx103" in gcn:
+                import os
+                os.environ.setdefault("AMD_SERIALIZE_KERNEL", "3")
+                os.environ.setdefault("AMD_SERIALIZE_COPY", "3")
+        return graph
 
     def capture_one_batch_size(
         self, bs: int, forward: Callable, stream_idx: Optional[int] = None
