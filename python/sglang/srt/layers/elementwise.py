@@ -95,6 +95,13 @@ class Softcap:
 
 rmsnorm_autotune = triton.autotune(
     configs=[
+        # Wave32-friendly configs (RDNA2 gfx1030: 2-4 warps sweet spot)
+        triton.Config(kwargs={"BLOCK_SIZE": 1024}, num_warps=2, num_stages=1),
+        triton.Config(kwargs={"BLOCK_SIZE": 1024}, num_warps=4, num_stages=1),
+        triton.Config(kwargs={"BLOCK_SIZE": 2048}, num_warps=2, num_stages=1),
+        triton.Config(kwargs={"BLOCK_SIZE": 2048}, num_warps=4, num_stages=1),
+        triton.Config(kwargs={"BLOCK_SIZE": 4096}, num_warps=4, num_stages=1),
+        # Standard configs (Wave64 CDNA / wider GPUs)
         triton.Config(kwargs={"BLOCK_SIZE": 1024}, num_warps=4, num_stages=1),
         triton.Config(kwargs={"BLOCK_SIZE": 1024}, num_warps=8, num_stages=1),
         triton.Config(kwargs={"BLOCK_SIZE": 1024}, num_warps=16, num_stages=1),
