@@ -108,6 +108,7 @@ class EAGLEWorker(TpModelWorker):
         self.speculative_algorithm = SpeculativeAlgorithm.from_string(
             server_args.speculative_algorithm
         )
+        self.is_p_eagle = self.speculative_algorithm.is_p_eagle()
 
         # Override the context length of the draft model to be the same as the target model.
         server_args.context_length = target_worker.model_runner.model_config.context_len
@@ -265,6 +266,11 @@ class EAGLEWorker(TpModelWorker):
                 "use_aux_hidden_state", True
             )
         logger.info("EAGLE draft worker init: initializing attention backend and cuda graphs")
+        if self.is_p_eagle:
+            logger.info(
+                "P_EAGLE mode: parallel drafting enabled (depth-1 tree, K=%d candidates per pass)",
+                self.topk,
+            )
         with self.draft_tp_context(
             self.draft_model_runner.tp_group
         ), speculative_moe_backend_context(), speculative_moe_a2a_backend_context():
@@ -660,8 +666,10 @@ class EAGLEWorker(TpModelWorker):
         forward_batch = ForwardBatch.init_new(
             model_worker_batch, self.draft_model_runner
         )
-        can_cuda_graph = self.cuda_graph_runner and self.cuda_graph_runner.can_run(
-            forward_batch
+        can_cuda_graph = (
+            self.cuda_graph_runner
+            and self.cuda_graph_runner.can_run(forward_batch)
+            and not self.is_p_eagle  # P_EAGLE uses a different forward path
         )
         if can_cuda_graph:
             parent_list, top_scores_index, draft_tokens = self.cuda_graph_runner.replay(
@@ -675,10 +683,17 @@ class EAGLEWorker(TpModelWorker):
             ):
                 # Skip attention backend init for idle mode or 1-step draft
                 self.draft_attn_backend.init_forward_metadata(forward_batch)
-            # Run forward steps
-            parent_list, top_scores_index, draft_tokens = self.draft_forward(
-                forward_batch
-            )
+
+            if self.is_p_eagle and not forward_batch.forward_mode.is_idle():
+                # P_EAGLE: single parallel forward pass instead of sequential loop
+                parent_list, top_scores_index, draft_tokens = (
+                    self.draft_forward_p_eagle(forward_batch)
+                )
+            else:
+                # EAGLE / EAGLE3: sequential multi-step draft
+                parent_list, top_scores_index, draft_tokens = self.draft_forward(
+                    forward_batch
+                )
 
         if batch.forward_mode.is_idle():
             return EagleVerifyInput.create_idle_input(
@@ -686,6 +701,9 @@ class EAGLEWorker(TpModelWorker):
                 self.speculative_num_steps,
                 self.speculative_num_draft_tokens,
             )
+
+        # P_EAGLE produces a depth-1 tree; spec_steps for tree building = 1
+        effective_spec_steps = 1 if self.is_p_eagle else self.speculative_num_steps
 
         (
             tree_mask,
@@ -702,7 +720,7 @@ class EAGLEWorker(TpModelWorker):
             batch.seq_lens,
             batch.seq_lens_sum,
             self.topk,
-            self.speculative_num_steps,
+            effective_spec_steps,
             self.speculative_num_draft_tokens,
         )
 
@@ -714,7 +732,7 @@ class EAGLEWorker(TpModelWorker):
             retrive_next_token=retrive_next_token,
             retrive_next_sibling=retrive_next_sibling,
             retrive_cum_len=None,
-            spec_steps=self.speculative_num_steps,
+            spec_steps=effective_spec_steps,
             topk=self.topk,
             draft_token_num=self.server_args.speculative_num_draft_tokens,
             capture_hidden_mode=CaptureHiddenMode.FULL,
@@ -801,6 +819,130 @@ class EAGLEWorker(TpModelWorker):
         )
 
         return parent_list, top_scores_index, draft_tokens
+
+    def draft_forward_p_eagle(self, forward_batch: ForwardBatch):
+        """P_EAGLE parallel drafting: single forward pass producing K candidates.
+
+        Instead of EAGLE3's sequential multi-step loop, P_EAGLE generates all K
+        draft candidates in one shot using mask_hidden for slots 1..K-1.
+
+        The draft model's prepare_p_eagle_inputs() builds:
+          - slot 0:      real last token + fused hidden state from target
+          - slots 1..K-1: mask token + learned mask_hidden parameter
+
+        This produces a depth-1 tree: K independent branches from the root.
+        organize_draft_results handles len(parents_list)==1 by returning
+        parent_list=empty, which build_tree_kernel_efficient interprets as a
+        flat fan-out tree.
+        """
+        spec_info = forward_batch.spec_info
+        assert isinstance(spec_info, EagleDraftInput)
+
+        # --- Retrieve target model's hidden states and the verified token ---
+        hidden_states = spec_info.hidden_states       # [bs, hidden*3] or [bs, 1, hidden*3]
+        verified_id = spec_info.verified_id            # [bs] last accepted token
+
+        if hidden_states is None or hidden_states.numel() == 0:
+            # Idle batch — produce empty results matching sequential path format
+            bs = forward_batch.batch_size
+            device = forward_batch.input_ids.device
+            empty_parents = torch.empty(bs, 0, device=device, dtype=torch.long)
+            empty_scores = torch.empty(bs, 0, device=device)
+            empty_tokens = torch.empty(bs, 0, device=device, dtype=torch.long)
+            return empty_parents, empty_scores, empty_tokens
+
+        bs = verified_id.shape[0]
+        device = verified_id.device
+
+        # Reshape hidden_states to [bs, 1, feat_dim] for prepare_p_eagle_inputs
+        if hidden_states.dim() == 2:
+            hidden_states = hidden_states.unsqueeze(1)
+
+        # Call the model's P_EAGLE input builder
+        draft_model = self.draft_model_runner.model
+        token_ids = verified_id.unsqueeze(-1)  # [bs, 1]
+        embeds, projected_hidden = draft_model.prepare_p_eagle_inputs(
+            token_ids, hidden_states, k=self.topk
+        )
+        # embeds:            [bs, K, hidden_size]
+        # projected_hidden:  [bs, K, hidden_size]
+
+        # Flatten for the draft model forward: [bs*K, hidden_size]
+        flat_embeds = embeds.reshape(-1, embeds.shape[-1])
+        flat_hidden = projected_hidden.reshape(-1, projected_hidden.shape[-1])
+
+        # Set up forward_batch for the single P_EAGLE forward pass
+        # All K positions are at the SAME sequence position (parallel alternatives)
+        positions_per_req = spec_info.positions  # [bs*topk] from preprocess
+        forward_batch.input_ids = draft_model.embed_tokens(
+            torch.cat([token_ids, torch.full(
+                (bs, self.topk - 1), draft_model.mask_token_id,
+                dtype=token_ids.dtype, device=device
+            )], dim=1).flatten()
+        ) if False else token_ids.flatten().repeat_interleave(self.topk)
+        # Actually: set input_embeds and hidden_states directly
+        forward_batch.input_ids = torch.cat([
+            token_ids,
+            torch.full(
+                (bs, self.topk - 1), draft_model.mask_token_id,
+                dtype=token_ids.dtype, device=device
+            )
+        ], dim=1).flatten()  # [bs*K]
+
+        # Override hidden states with the projected P_EAGLE hidden states
+        spec_info.hidden_states = flat_hidden
+
+        # Use the first-step out_cache_loc
+        out_cache_loc = forward_batch.out_cache_loc
+        out_cache_loc = out_cache_loc.reshape(
+            forward_batch.batch_size, self.topk, self.speculative_num_steps
+        )
+        forward_batch.out_cache_loc = out_cache_loc[:, :, 0].reshape(-1)
+
+        # Set the attention backend for single-step decode
+        if self.speculative_num_steps > 1 and self.draft_attn_backend.attn_backends:
+            forward_batch.attn_backend = self.draft_attn_backend.attn_backends[0]
+
+        # Run ONE forward pass through the draft model
+        logits_output = self.draft_model_runner.forward(
+            forward_batch, skip_attn_backend_init=True
+        ).logits_output
+        maybe_detect_nan(logits_output.next_token_logits, "p_eagle_draft: NaN in logits")
+
+        # Get top-K predictions from each of the K parallel positions
+        probs = torch.softmax(logits_output.next_token_logits, dim=-1)  # [bs*K, vocab]
+        topk_p, topk_index = fast_topk(probs, self.topk, dim=-1)  # [bs*K, topk]
+
+        if self.hot_token_id is not None:
+            topk_index = self.hot_token_id[topk_index]
+
+        # Reshape to [bs, K, topk] and take the FIRST token from each parallel slot
+        topk_p = topk_p.reshape(bs, self.topk, self.topk)
+        topk_index = topk_index.reshape(bs, self.topk, self.topk)
+
+        # For the depth-1 tree: each of K parallel positions contributes its top-1 token
+        # Scores: probability of each candidate
+        # Parents: all point to root (-1)
+        draft_scores = topk_p[:, :, 0]    # [bs, K] — top-1 prob from each slot
+        draft_tokens = topk_index[:, :, 0]  # [bs, K] — top-1 token from each slot
+
+        # Build tree_info in the format organize_draft_results expects:
+        # score_list[0]: (bs, 1, topk) — the initial fan-out scores
+        # token_list[0]: (bs, topk) — the token IDs
+        # parents_list[0]: (bs, topk+1) — parent indices, starting with -1 for root
+        score_list = [draft_scores.unsqueeze(1)]  # [bs, 1, K]
+        token_list = [draft_tokens]                # [bs, K]
+        parents_list = [
+            torch.arange(-1, self.topk, dtype=torch.long, device=device)
+            .unsqueeze(0)
+            .expand(bs, -1)
+        ]  # [bs, K+1]
+
+        parent_list, top_scores_index, final_draft_tokens = organize_draft_results(
+            score_list, token_list, parents_list, self.speculative_num_draft_tokens
+        )
+
+        return parent_list, top_scores_index, final_draft_tokens
 
     def clear_cache_pool(self):
         # allocator and kv cache pool are shared with target worker
