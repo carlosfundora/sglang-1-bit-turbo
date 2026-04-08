@@ -189,3 +189,113 @@ sglang uses Python argparse, which supports prefix matching. When `--speculative
 - Q1_0_G128: 128 elements/block, 18 bytes (2B fp16 scale + 16B sign bits)
 - Ternary dequant: `bit==1 ? +d : -d`
 - Type IDs: 42 (Q1_0), 43 (Q1_0_G128) — remapped from PrismML 40/41
+
+---
+
+## FasterDecoding/Medusa Audit Findings (2026-04-08)
+
+Comprehensive audit of the [FasterDecoding/Medusa](https://github.com/FasterDecoding/Medusa) reference
+implementation (`/home/local/ai/repos/training/Medusa/`). Key techniques adopted into sglang-1-bit-turbo:
+
+### Adopted: Typical Acceptance (Entropy-Adaptive Candidate Generation)
+
+**Source:** `medusa/model/utils.py` lines 227-256, `get_typical_one_token()`
+
+Instead of greedy argmax for draft candidate selection, uses entropy-adaptive thresholding:
+```
+probs = softmax(logits)
+entropy = -Σ(probs × log(probs + 1e-5))
+threshold = min(posterior_threshold, exp(-entropy) × posterior_alpha)
+```
+- Low-entropy (confident model) → strict threshold → fewer but higher-quality candidates
+- High-entropy (uncertain model) → looser threshold → more diversity, better exploration
+- Default: `posterior_threshold=0.09`, `posterior_alpha=0.3` (α ≈ √τ empirically)
+- **Placement:** In candidate generation (`medusa_model.predict_tokens(typical=True)`), NOT post-verify.
+  Post-verify rejection breaks cache/index coherency — verify() mutates request state in-place.
+
+### Adopted: Cached Tree Buffers
+
+**Source:** `medusa/model/medusa_model.py` — buffer caching pattern
+
+FasterDecoding caches `medusa_buffers` (attn mask, tree indices, position IDs, retrieve indices) and
+reuses across iterations unless `medusa_choices` changes. We now pre-compute and cache:
+- `_cached_mask_per_req_flat`: flattened single-request mask [T*T]
+- `_cached_mask_tiled_gpu`: pre-tiled GPU tensor [max_bs * T * T]
+- `_cached_mask_np_3d`: reshaped view [max_bs, T, T]
+
+This eliminates per-call `np.tile()` + `torch.from_numpy()` conversion overhead.
+
+### Adopted: Non-Blocking KV Copy + Stream Sync
+
+**Source:** `medusa/model/kv_cache.py` — `dst.copy_(tgt, non_blocking=True)`
+
+All buffer copies use `non_blocking=True` for DMA overlap. Added explicit
+`torch.cuda.current_stream().synchronize()` before verify to prevent race conditions
+where `reconstruct_indices_from_tree_mask()` reads stale buffer data.
+
+### Adopted: PALTROW Mixed CPU/GPU Placement
+
+**Novel extension** — not in FasterDecoding. PALTROW heads run on CPU with pinned memory.
+Auto-detection from tiered config + OOM auto-fallback. Integrated with AMD SAM/ReBAR detection
+for optimal pinned DMA bandwidth (~14 GB/s).
+
+### Noted: Cumprod Prefix Validation
+
+**Source:** `medusa/model/utils.py` line 464
+
+```python
+candidates_accept_length = torch.cumprod(posterior_mask, dim=1).sum(dim=1)
+```
+Ensures accepted tokens form contiguous prefix (can't skip tokens). Already handled by
+SGLang's `NgramVerifyInput.verify()` — no additional implementation needed.
+
+### Noted: KV Cache Pre-Allocation (current_length on CPU)
+
+**Source:** `medusa/model/kv_cache.py` lines 94-113
+
+Their KV cache pre-allocates one contiguous tensor for all layers and keeps `current_length`
+on CPU for zero-sync access. SGLang's RadixCache handles this differently (token-level pooling),
+so this pattern doesn't directly apply. But the CPU-length-tracking insight is relevant for
+any auxiliary KV management we add.
+
+### Noted: TOPK=10 Hardcoded
+
+FasterDecoding uses `TOPK=10` candidates per head position. Their comment says "10 is sufficient."
+Our `--medusa-topk` defaults to 1 (greedy), but the infrastructure supports higher values.
+
+### NOT Adopted: Batch > 1 Verification
+
+FasterDecoding explicitly asserts `batch_size == 1` in `medusa_generate()`. Batched tree verification
+would require significant rework of their approach. SGLang's `NgramVerifyInput` already handles
+batched verification, so this is not a limitation for us.
+
+### Key Reference Files
+
+| File | Purpose | Key Lines |
+|------|---------|-----------|
+| `medusa/model/utils.py` (593 lines) | Tree buffers, typical acceptance, KV compaction | 32-125 (tree), 227-256 (typical) |
+| `medusa/model/medusa_model.py` (409 lines) | Generation loop, candidate flow | 197-340 (medusa_generate) |
+| `medusa/model/kv_cache.py` (113 lines) | Pre-allocated KV, non_blocking copy | 38-50 (copy), 94-113 (init) |
+| `medusa/model/medusa_choices.py` | Pre-computed tree structures | mc_sim_7b_63 (63 candidates) |
+| `train_medusa_heads.py` (438 lines) | Chunked CE loss, head-specific shifts | 138-171 (loss) |
+
+---
+
+## AMD SAM / ReBAR / GTT Integration Notes
+
+### Hardware Detection
+- SAM active when PCIe BAR ≥ VRAM (read from `/sys/class/drm/card*/device/mem_info_vis_vram_total`)
+- GTT pool from `/sys/class/drm/card*/device/mem_info_gtt_total` (typically ~half system RAM)
+- Driver detection: symlink at `device/driver` contains "amdgpu"
+- Auto-detect runs once at MedusaWorker init, cached in `_sam_info` dict
+
+### Bandwidth Characteristics (RX 6700 XT, PCIe 4.0 x16)
+- Pinned DMA: ~14 GB/s (with SAM active)
+- Pageable copy: ~8 GB/s
+- GTT access from GPU: ~13.8 GB/s (measured)
+- Hidden state D2H for PALTROW: ~4 KB per batch element (negligible at any bandwidth)
+
+### CLI Args
+- `--sam-enabled auto|true|false` — auto-detect or force
+- `--gtt-pool-mb N` — override detected GTT pool size
+- `--paltrow-pin-memory` / `--no-paltrow-pin-memory` — control pinned allocation

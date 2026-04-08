@@ -131,6 +131,15 @@ class MedusaWorker:
         self.medusa_topk = getattr(server_args, "medusa_topk", 1)
         draft_tokens = server_args.speculative_num_draft_tokens or 8
 
+        # Typical acceptance (entropy-adaptive candidate generation)
+        self.typical_acceptance = getattr(server_args, "medusa_typical_acceptance", False)
+        self.posterior_threshold = getattr(server_args, "medusa_posterior_threshold", 0.09)
+        self.posterior_alpha = getattr(server_args, "medusa_posterior_alpha", 0.3)
+        self.tree_structure = getattr(server_args, "medusa_tree_structure", "linear")
+
+        # AMD SAM / ReBAR / PALTROW hardware detection
+        self._sam_info = self._detect_sam_rebar(server_args)
+
         # Load the model
         model_path = getattr(server_args, "medusa_model_path", None)
         if model_path is None:
@@ -140,10 +149,22 @@ class MedusaWorker:
 
         from sglang.srt.speculative.medusa_model import MedusaModel
 
+        # Parse PALTROW head indices from server args or auto-detect from config
+        paltrow_arg = getattr(server_args, "medusa_paltrow_heads", None)
+        paltrow_head_indices = None  # None = auto-detect from tiered config
+        if paltrow_arg is not None:
+            if paltrow_arg == "none":
+                paltrow_head_indices = []  # force all GPU
+            elif paltrow_arg == "auto":
+                paltrow_head_indices = None  # auto-detect screen+bloom heads
+            else:
+                paltrow_head_indices = [int(x) for x in paltrow_arg.split(",") if x.strip()]
+
         self.medusa_model = MedusaModel.from_pretrained(
             model_path,
             device=self.device,
             dtype=target_worker.model_runner.model_config.dtype,
+            paltrow_head_indices=paltrow_head_indices,
         )
         logger.info(
             "MedusaWorker: loaded %d heads from %s", self.medusa_model.num_heads, model_path
@@ -169,9 +190,10 @@ class MedusaWorker:
         # Use linear chain tree (current + K drafts)
         self.tree_mask_np = _build_linear_tree_mask(self.draft_token_num)
 
-        # Pre-allocated tensors
+        # Pre-allocated tensors + cached tree buffers
         self.max_batch_size = target_worker.max_running_requests
         self._init_preallocated_tensors()
+        self._init_cached_tree_buffers()
 
         # Hidden-state cache (populated after each target forward)
         self._cached_hidden: Optional[torch.Tensor] = None
@@ -181,14 +203,134 @@ class MedusaWorker:
         self.prefilter = self._init_prefilter(model_path)
 
         logger.info(
-            "MedusaWorker ready: %d heads, %d draft tokens (tree size %d), linear tree, prefilter=%s",
+            "MedusaWorker ready: %d heads, %d draft tokens (tree size %d), "
+            "tree=%s, typical=%s (τ=%.3f α=%.3f), prefilter=%s, SAM=%s",
             self.num_heads,
             self.num_draft_tokens,
             self.draft_token_num,
+            self.tree_structure,
+            self.typical_acceptance,
+            self.posterior_threshold,
+            self.posterior_alpha,
             "ON" if self.prefilter else "OFF",
+            "ON" if self._sam_info.get("enabled") else "OFF",
         )
 
-    def _build_draft_head_order(self, model_path: str) -> list:
+    # ---- AMD SAM / ReBAR auto-detection ----
+
+    @staticmethod
+    def _detect_sam_rebar(server_args: ServerArgs) -> dict:
+        """Detect AMD Smart Access Memory / Resizable BAR hardware status.
+
+        Checks PCIe BAR size vs VRAM and GTT pool size from sysfs.
+        SAM is active when BAR >= VRAM (full GPU memory visible to CPU).
+
+        Returns:
+            dict with keys: enabled, bar_mb, vram_mb, gtt_mb, bandwidth_note
+        """
+        info = {"enabled": False, "bar_mb": 0, "vram_mb": 0, "gtt_mb": 0, "bandwidth_note": ""}
+
+        # Check explicit override
+        sam_arg = getattr(server_args, "sam_enabled", None)
+        if sam_arg is not None:
+            if isinstance(sam_arg, str):
+                if sam_arg.lower() == "false":
+                    info["enabled"] = False
+                    logger.info("SAM/ReBAR: disabled by --sam-enabled=false")
+                    return info
+                elif sam_arg.lower() == "true":
+                    info["enabled"] = True
+                    logger.info("SAM/ReBAR: force-enabled by --sam-enabled=true")
+                    return info
+
+        # Auto-detect from sysfs (AMD GPUs)
+        try:
+            import glob as globmod
+            drm_dirs = sorted(globmod.glob("/sys/class/drm/card*/device"))
+            for drm_dir in drm_dirs:
+                # Check if this is an AMD GPU (amdgpu driver)
+                driver_link = os.path.join(drm_dir, "driver")
+                if os.path.islink(driver_link) and "amdgpu" in os.readlink(driver_link):
+                    # Read VRAM size
+                    vram_path = os.path.join(drm_dir, "mem_info_vram_total")
+                    if os.path.exists(vram_path):
+                        with open(vram_path) as f:
+                            info["vram_mb"] = int(f.read().strip()) // (1024 * 1024)
+
+                    # Read visible VRAM (BAR size) — SAM = visible == total
+                    vis_path = os.path.join(drm_dir, "mem_info_vis_vram_total")
+                    if os.path.exists(vis_path):
+                        with open(vis_path) as f:
+                            info["bar_mb"] = int(f.read().strip()) // (1024 * 1024)
+
+                    # Read GTT pool size
+                    gtt_path = os.path.join(drm_dir, "mem_info_gtt_total")
+                    if os.path.exists(gtt_path):
+                        with open(gtt_path) as f:
+                            info["gtt_mb"] = int(f.read().strip()) // (1024 * 1024)
+
+                    # Override GTT from CLI if provided
+                    cli_gtt = getattr(server_args, "gtt_pool_mb", None)
+                    if cli_gtt is not None:
+                        info["gtt_mb"] = cli_gtt
+
+                    # SAM is active when BAR >= VRAM
+                    if info["bar_mb"] > 0 and info["vram_mb"] > 0:
+                        info["enabled"] = info["bar_mb"] >= info["vram_mb"]
+
+                    if info["enabled"]:
+                        info["bandwidth_note"] = (
+                            "PCIe DMA ~14 GB/s pinned, ~8 GB/s pageable"
+                        )
+                        logger.info(
+                            "SAM/ReBAR ACTIVE: BAR=%d MB, VRAM=%d MB, GTT=%d MB. "
+                            "PALTROW heads will use pinned DMA for optimal bandwidth.",
+                            info["bar_mb"], info["vram_mb"], info["gtt_mb"],
+                        )
+                    else:
+                        logger.info(
+                            "SAM/ReBAR inactive: BAR=%d MB < VRAM=%d MB. "
+                            "PALTROW heads use standard PCIe copies.",
+                            info["bar_mb"], info["vram_mb"],
+                        )
+                    break  # Use first AMD GPU found
+        except Exception as e:
+            logger.debug("SAM/ReBAR detection failed: %s", e)
+
+        return info
+
+    # ---- Cached tree buffers (avoid per-call recomputation) ----
+
+    def _init_cached_tree_buffers(self):
+        """Pre-compute and cache tree mask buffers for the maximum batch size.
+
+        Avoids repeated numpy→torch conversion and tiling in _forward_medusa().
+        Buffers are sliced to actual batch size at call time.
+
+        Cached:
+          _cached_mask_per_req_flat: [T*T] numpy, flattened single-request mask
+          _cached_mask_tiled_gpu: [max_bs * T * T] torch.bool on GPU, pre-tiled
+          _cached_mask_np_3d: [max_bs, T, T] numpy, for attention mask construction
+        """
+        T = self.draft_token_num
+        max_bs = self.max_batch_size
+
+        # Flatten single-request mask
+        self._cached_mask_per_req_flat = self.tree_mask_np.flatten()  # [T*T]
+
+        # Pre-tile for max batch and convert to GPU tensor once
+        mask_tiled_np = np.tile(self._cached_mask_per_req_flat, max_bs)  # [max_bs * T * T]
+        self._cached_mask_tiled_gpu = torch.from_numpy(mask_tiled_np).to(
+            device=self.device, dtype=torch.bool
+        )
+
+        # 3D view for attention mask construction
+        self._cached_mask_np_3d = mask_tiled_np.reshape(max_bs, T, T)
+
+        logger.debug(
+            "Cached tree buffers: T=%d, max_bs=%d, GPU mask=%.1f KB",
+            T, max_bs, self._cached_mask_tiled_gpu.numel() / 1024,
+        )
         """Build ordered list of head indices for drafting.
 
         For tiered models: skip screen heads, order remaining by prediction
@@ -359,6 +501,30 @@ class MedusaWorker:
             return self.prefilter.export_agreement_data()
         return None
 
+    def get_sam_info(self) -> dict:
+        """Get AMD SAM/ReBAR hardware info (for monitoring/API)."""
+        return dict(self._sam_info)
+
+    def get_medusa_config(self) -> dict:
+        """Get full Medusa configuration (for monitoring/API)."""
+        return {
+            "num_heads": self.num_heads,
+            "num_draft_tokens": self.num_draft_tokens,
+            "tree_structure": self.tree_structure,
+            "typical_acceptance": self.typical_acceptance,
+            "posterior_threshold": self.posterior_threshold,
+            "posterior_alpha": self.posterior_alpha,
+            "topk": self.medusa_topk,
+            "paltrow_heads": sorted(self.medusa_model._cpu_head_indices)
+            if hasattr(self.medusa_model, "_cpu_head_indices")
+            else [],
+            "gpu_heads": sorted(self.medusa_model._gpu_head_indices)
+            if hasattr(self.medusa_model, "_gpu_head_indices")
+            else list(range(self.num_heads)),
+            "sam": self._sam_info,
+            "prefilter": "ON" if self.prefilter else "OFF",
+        }
+
     # ---- Batch preparation ----
 
     def _prepare_batch_for_decode(self, batch: ScheduleBatch):
@@ -480,9 +646,19 @@ class MedusaWorker:
 
         with torch.no_grad():
             if self.prefilter is not None:
-                all_tokens, head_logits = self.medusa_model.predict_with_logits(hidden)
+                all_tokens, head_logits = self.medusa_model.predict_with_logits(
+                    hidden,
+                    typical=self.typical_acceptance,
+                    posterior_threshold=self.posterior_threshold,
+                    posterior_alpha=self.posterior_alpha,
+                )
             else:
-                all_tokens = self.medusa_model.predict_tokens(hidden)
+                all_tokens = self.medusa_model.predict_tokens(
+                    hidden,
+                    typical=self.typical_acceptance,
+                    posterior_threshold=self.posterior_threshold,
+                    posterior_alpha=self.posterior_alpha,
+                )
                 head_logits = None
 
             # Reorder heads: skip screen, use offset-sorted draft heads
@@ -528,15 +704,17 @@ class MedusaWorker:
             tree_tokens_list.append(draft_tokens[i])            # K draft predictions
         flat_tree = torch.cat(tree_tokens_list).contiguous()    # [bs * T]
 
-        # Tree mask: tile the (T×T) linear mask for each request
-        mask_per_req = self.tree_mask_np.flatten()              # T*T bools
-        mask_tiled = np.tile(mask_per_req, bs)
+        # Tree mask: use pre-cached GPU tensor (avoid numpy→torch per call)
+        # _cached_mask_tiled_gpu is pre-tiled for max_batch_size; slice to actual bs
+        cached_mask_slice = self._cached_mask_tiled_gpu[: bs * T * T]
 
-        # Copy to pre-allocated GPU tensors
+        # Copy to pre-allocated GPU tensors with non-blocking DMA
         self._draft_tokens_buf[: bs * T].copy_(flat_tree, non_blocking=True)
-        self._tree_mask_buf[: bs * T * T].copy_(
-            torch.from_numpy(mask_tiled), non_blocking=True
-        )
+        self._tree_mask_buf[: bs * T * T].copy_(cached_mask_slice, non_blocking=True)
+
+        # Stream sync: ensure non-blocking copies complete before verify reads them.
+        # Without this, reconstruct_indices may read stale buffer data.
+        torch.cuda.current_stream().synchronize()
 
         # Step 3: Reconstruct tree indices
         positions = self._positions_buf[: bs * T]
@@ -562,9 +740,9 @@ class MedusaWorker:
             logger.warning("Medusa reconstruct_indices failed (%s), falling back", e)
             return self._fallback_target_only(batch)
 
-        # Step 4: Build full attention mask (prefix + tree)
+        # Step 4: Build full attention mask (prefix + tree) using cached 3D mask
         tree_mask_list = []
-        mask_np_3d = mask_tiled.reshape(bs, T, T)
+        mask_np_3d = self._cached_mask_np_3d[:bs]  # use pre-cached, avoid reshape per call
         for i, req in enumerate(batch.reqs):
             seq_len = len(req.origin_input_ids) + len(req.output_ids)
             prefix_mask = torch.ones((T, seq_len - 1), device="cuda")

@@ -524,6 +524,16 @@ class ServerArgs:
     medusa_model_path: Optional[str] = None
     medusa_num_heads: int = 5
     medusa_topk: int = 1
+    medusa_paltrow_heads: Optional[str] = None  # "auto" | "none" | "0,1" (comma-sep indices)
+    medusa_typical_acceptance: bool = False      # entropy-adaptive candidate generation
+    medusa_posterior_threshold: float = 0.09     # fixed threshold for typical acceptance
+    medusa_posterior_alpha: float = 0.3          # entropy scaling factor (≈ √threshold)
+    medusa_tree_structure: str = "linear"        # "linear" | "mc_sim_63" | "auto"
+
+    # Speculative decoding — PALTROW / AMD SAM / ReBAR hardware
+    sam_enabled: Optional[bool] = None           # None = auto-detect from PCIe BAR
+    gtt_pool_mb: Optional[int] = None            # GTT pool size in MB (auto-detect)
+    paltrow_pin_memory: bool = True              # use pinned memory for PALTROW heads
 
     # Speculative decoding — SAGUARO (SSD) async wrapper
     ssd_enable: bool = False
@@ -5034,6 +5044,108 @@ class ServerArgs:
             type=int,
             default=ServerArgs.medusa_topk,
             help="Top-k candidates per Medusa head (default: 1).",
+        )
+        parser.add_argument(
+            "--medusa-paltrow-heads",
+            type=str,
+            default=ServerArgs.medusa_paltrow_heads,
+            help=(
+                "PALTROW heads: Pinned-memory Auxiliary Latency-Tolerant Relocated "
+                "On-CPU Workers. Specifies which Medusa heads to run on CPU with "
+                "pinned memory instead of GPU. Screen/bloom/volatility filter heads "
+                "are ideal PALTROW candidates — they're latency-tolerant pre-rejection "
+                "filters that don't need GPU speed. Saves GPU VRAM for KV cache and "
+                "precision draft heads. "
+                "Values: 'auto' (detect screen+bloom heads from tiered config), "
+                "'none' (all GPU), or comma-separated indices like '0' or '0,1,2'. "
+                "Heads that OOM on GPU are auto-promoted to PALTROW regardless. "
+                "Default: auto-detect from medusa_config.json."
+            ),
+        )
+
+        parser.add_argument(
+            "--medusa-typical-acceptance",
+            action="store_true",
+            default=ServerArgs.medusa_typical_acceptance,
+            help=(
+                "Use entropy-adaptive typical acceptance for Medusa candidate generation. "
+                "Instead of greedy argmax, candidates are sampled from a distribution "
+                "where low-probability tokens are removed based on an entropy-adaptive "
+                "threshold: threshold = min(posterior_threshold, exp(-entropy) * alpha). "
+                "Low-entropy (confident) distributions use strict thresholds; high-entropy "
+                "(uncertain) distributions use looser thresholds. From FasterDecoding/Medusa."
+            ),
+        )
+        parser.add_argument(
+            "--medusa-posterior-threshold",
+            type=float,
+            default=ServerArgs.medusa_posterior_threshold,
+            help="Fixed ceiling for typical acceptance threshold (default: 0.09).",
+        )
+        parser.add_argument(
+            "--medusa-posterior-alpha",
+            type=float,
+            default=ServerArgs.medusa_posterior_alpha,
+            help=(
+                "Entropy scaling factor for typical acceptance (default: 0.3). "
+                "Effective threshold = min(posterior_threshold, exp(-entropy) * alpha). "
+                "Empirically alpha ≈ sqrt(posterior_threshold)."
+            ),
+        )
+        parser.add_argument(
+            "--medusa-tree-structure",
+            type=str,
+            default=ServerArgs.medusa_tree_structure,
+            choices=["linear", "mc_sim_63", "auto"],
+            help=(
+                "Tree topology for Medusa candidate verification. "
+                "'linear': simple chain (current + K drafts, lower overhead). "
+                "'mc_sim_63': 63-candidate tree from Medusa paper (higher acceptance, more compute). "
+                "'auto': mc_sim_63 for ≤5 heads, linear for >5 heads. "
+                "Default: linear."
+            ),
+        )
+
+        # PALTROW / AMD SAM / ReBAR hardware settings
+        parser.add_argument(
+            "--sam-enabled",
+            type=str,
+            default=None,
+            help=(
+                "AMD Smart Access Memory / Resizable BAR status. "
+                "'auto' (default): detect from PCIe BAR size (BAR >= VRAM = enabled). "
+                "'true': force-enable SAM optimizations (pinned DMA, BAR-mapped transfers). "
+                "'false': disable SAM optimizations. "
+                "When enabled, PALTROW heads use pinned DMA at ~14 GB/s instead of pageable copies."
+            ),
+        )
+        parser.add_argument(
+            "--gtt-pool-mb",
+            type=int,
+            default=ServerArgs.gtt_pool_mb,
+            help=(
+                "AMD GTT (Graphics Translation Table) pool size in MB. "
+                "Auto-detected from /sys/class/drm if not set. "
+                "GTT is system RAM accessible by GPU via PCIe — used for PALTROW head "
+                "parameters and pinned hidden-state buffers. Typical: 33600 MB (half system RAM)."
+            ),
+        )
+        parser.add_argument(
+            "--paltrow-pin-memory",
+            action="store_true",
+            default=ServerArgs.paltrow_pin_memory,
+            help=(
+                "Use CUDA/HIP pinned (page-locked) memory for PALTROW head buffers. "
+                "Enables async DMA transfers at full PCIe bandwidth (~14 GB/s with SAM). "
+                "Disable with --no-paltrow-pin-memory if pinned allocation fails. "
+                "Default: true."
+            ),
+        )
+        parser.add_argument(
+            "--no-paltrow-pin-memory",
+            action="store_false",
+            dest="paltrow_pin_memory",
+            help="Disable pinned memory for PALTROW heads (use pageable copies).",
         )
 
         # SAGUARO (SSD) async wrapper
