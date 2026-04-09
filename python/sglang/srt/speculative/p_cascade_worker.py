@@ -219,11 +219,9 @@ class PCascadeWorker:
 
         self.draft_token_num = server_args.speculative_num_draft_tokens or 16
         max_trie_depth = server_args.speculative_ngram_max_trie_depth or 6
-        max_match_window = server_args.speculative_ngram_max_match_window_size or 32
+        max_match_window = max_trie_depth  # use trie depth as match window
 
         self.ngram_corpus = NgramCorpus(
-            min_match_window_size=server_args.speculative_ngram_min_match_window_size or 4,
-            max_match_window_size=max_match_window,
             min_bfs_breadth=server_args.speculative_ngram_min_bfs_breadth or 1,
             max_bfs_breadth=server_args.speculative_ngram_max_bfs_breadth or 3,
             match_type=server_args.speculative_ngram_match_type or "suffix",

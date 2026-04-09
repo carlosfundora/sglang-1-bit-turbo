@@ -172,16 +172,15 @@ class TQ5XWorker:
         self.page_size = server_args.page_size
         self.draft_token_num = server_args.speculative_num_draft_tokens or 8
         self.max_batch_size = target_worker.max_running_requests
-        self.max_match_window_size = (
-            server_args.speculative_ngram_max_match_window_size
+        # max_match_window controls how far back we look for n-gram matches
+        self.max_match_window_size = getattr(
+            server_args, "speculative_ngram_max_trie_depth", 18
         )
 
         # Create the n-gram corpus (will be frozen after first prefill)
         from sglang.srt.speculative.cpp_ngram.ngram_corpus import NgramCorpus
 
         raw_corpus = NgramCorpus(
-            min_match_window_size=server_args.speculative_ngram_min_match_window_size,
-            max_match_window_size=server_args.speculative_ngram_max_match_window_size,
             min_bfs_breadth=server_args.speculative_ngram_min_bfs_breadth,
             max_bfs_breadth=server_args.speculative_ngram_max_bfs_breadth,
             match_type=server_args.speculative_ngram_match_type,
