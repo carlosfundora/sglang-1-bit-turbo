@@ -3381,3 +3381,481 @@ class MHATokenToKVPoolTQ(MHATokenToKVPool):
             self._v_deq[layer_idx].index_copy_(
                 0, sorted_tgt, self._v_deq[layer_idx].index_select(0, sorted_src)
             )
+
+
+class MHATokenToKVPoolRQ(MHATokenToKVPool):
+    """GQA/MHA KV cache pool with RotorQuant compression (3/4-bit).
+
+    Compresses K and V per-head using RotorQuant PlanarQuant or IsoQuant.
+    PlanarQuant uses 2D Givens rotations (256 FMAs/vec, fastest).
+    IsoQuant uses 4D quaternion rotations (512 FMAs/vec, best quality).
+
+    Args:
+        rq_method: 'planar' or 'iso'
+        rq_bit_width: 3 or 4
+
+    Activate with: --kv-cache-dtype rq3_planar / rq4_planar / rq3_iso / rq4_iso
+
+    Integration: transparent — get_key_buffer/get_value_buffer return
+    dequantized FP16, so attention backends work unchanged.
+    """
+
+    _RQ_VALID_METHODS = ("planar", "iso")
+    _RQ_VALID_BITS = (3, 4)
+
+    def __init__(self, *args, rq_method: str = "planar", rq_bit_width: int = 4, **kwargs):
+        if rq_method not in self._RQ_VALID_METHODS:
+            raise ValueError(f"rq_method must be one of {self._RQ_VALID_METHODS}, got {rq_method!r}")
+        if rq_bit_width not in self._RQ_VALID_BITS:
+            raise ValueError(f"rq_bit_width must be one of {self._RQ_VALID_BITS}, got {rq_bit_width}")
+        self._rq_method = rq_method
+        self._rq_bit_width = rq_bit_width
+        super().__init__(*args, **kwargs)
+
+    def _create_buffers(self):
+        import math
+        from sglang.srt.layers.quantization.rotorquant_engine import (
+            get_codebook,
+            generate_givens_rotations,
+            generate_quaternion_rotations,
+            packed_bytes_per_dim,
+        )
+
+        # Codebook (shared between planar and iso)
+        centroids, boundaries = get_codebook(self._rq_bit_width)
+        self._rq_codebook = {
+            "centroids": centroids.to(self.device),
+            "boundaries": boundaries.to(self.device),
+        }
+        if _is_hip:
+            self._rq_codebook_cpu = {
+                "centroids": centroids.cpu(),
+                "boundaries": boundaries.cpu(),
+            }
+        else:
+            self._rq_codebook_cpu = None
+
+        # Rotation parameters
+        if self._rq_method == "planar":
+            rot2 = generate_givens_rotations(self.head_dim, seed=42)
+            self._rq_rotations = {"rot2": rot2.to(self.device)}
+            if _is_hip:
+                self._rq_rotations_cpu = {"rot2": rot2.cpu()}
+            else:
+                self._rq_rotations_cpu = None
+        else:
+            q_L, q_R = generate_quaternion_rotations(self.head_dim, seed=42)
+            self._rq_rotations = {
+                "q_L": q_L.to(self.device),
+                "q_R": q_R.to(self.device),
+            }
+            if _is_hip:
+                self._rq_rotations_cpu = {
+                    "q_L": q_L.cpu(),
+                    "q_R": q_R.cpu(),
+                }
+            else:
+                self._rq_rotations_cpu = None
+
+        # For iso, effective dim is padded to multiple of 4
+        if self._rq_method == "iso":
+            n_groups = (self.head_dim + 3) // 4
+            self._rq_eff_dim = n_groups * 4
+        else:
+            self._rq_eff_dim = self.head_dim
+
+        pb = packed_bytes_per_dim(self._rq_eff_dim, self._rq_bit_width)
+        self._rq_packed_per_head = pb
+        self._rq_bytes_per_head = pb + 2  # + 2 for FP16 norm
+
+        # Always use split storage (packed indices + norms separate)
+        self._use_split_rq_storage = True
+
+        with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
+            with (
+                torch.cuda.use_mem_pool(self.custom_mem_pool)
+                if self.enable_custom_mem_pool
+                else nullcontext()
+            ):
+                m = self.size + self.page_size
+                self.k_buffer = [
+                    torch.zeros(
+                        (m, self.head_num, self._rq_packed_per_head),
+                        dtype=torch.uint8,
+                        device=self.device,
+                    )
+                    for _ in range(self.layer_num)
+                ]
+                self.v_buffer = [
+                    torch.zeros(
+                        (m, self.head_num, self._rq_packed_per_head),
+                        dtype=torch.uint8,
+                        device=self.device,
+                    )
+                    for _ in range(self.layer_num)
+                ]
+                self.k_norm_buffer = [
+                    torch.zeros(
+                        (m, self.head_num, 1),
+                        dtype=torch.float16,
+                        device=self.device,
+                    )
+                    for _ in range(self.layer_num)
+                ]
+                self.v_norm_buffer = [
+                    torch.zeros(
+                        (m, self.head_num, 1),
+                        dtype=torch.float16,
+                        device=self.device,
+                    )
+                    for _ in range(self.layer_num)
+                ]
+
+                # Decompressed FP16 buffers for attention
+                self._k_deq = [
+                    torch.zeros(
+                        (m, self.head_num, self.head_dim),
+                        dtype=self.dtype,
+                        device=self.device,
+                    )
+                    for _ in range(self.layer_num)
+                ]
+                self._v_deq = [
+                    torch.zeros(
+                        (m, self.head_num, self.v_head_dim),
+                        dtype=self.dtype,
+                        device=self.device,
+                    )
+                    for _ in range(self.layer_num)
+                ]
+
+        self._deq_dirty_k = [True] * self.layer_num
+        self._deq_dirty_v = [True] * self.layer_num
+        self._rq_active = [0] * self.layer_num
+
+        # data_ptrs / data_strides for kv copy kernels
+        self.k_data_ptrs = torch.tensor(
+            [x.data_ptr() for x in self._k_deq], dtype=torch.uint64, device=self.device
+        )
+        self.v_data_ptrs = torch.tensor(
+            [x.data_ptr() for x in self._v_deq], dtype=torch.uint64, device=self.device
+        )
+        self.data_ptrs = torch.cat([self.k_data_ptrs, self.v_data_ptrs])
+        self.data_strides = torch.tensor(
+            [np.prod(x.shape[1:]) * x.dtype.itemsize for x in self._k_deq + self._v_deq],
+            device=self.device,
+        )
+        self.row_dim = self.head_num * self.head_dim
+        self.same_kv_dim = self.head_dim == self.v_head_dim
+
+        orig_k = self.head_num * self.head_dim * 2  # FP16
+        comp_k = self.head_num * self._rq_bytes_per_head
+        logger.info(
+            f"RotorQuant MHA KV Pool: {self._rq_method} {self._rq_bit_width}-bit, "
+            f"head_num={self.head_num}, head_dim={self.head_dim}, "
+            f"{comp_k} bytes/token K (vs {orig_k} FP16), "
+            f"{orig_k / comp_k:.2f}x compression"
+        )
+
+    def _compress_heads(
+        self, data: torch.Tensor, dim: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compress (T, head_num, dim) -> packed (T, H, packed_per_head) + norms (T, H, 1).
+
+        On HIP/ROCm: uses CPU path to avoid gfx1030 segfaults.
+        """
+        from sglang.srt.layers.quantization.rotorquant_engine import compress_kv_head
+
+        T = data.shape[0]
+        H = self.head_num
+        use_cpu = _is_hip
+        dev = data.device
+
+        if use_cpu:
+            data_cpu = data.detach().cpu().float()
+            rotations = self._rq_rotations_cpu
+            codebook = self._rq_codebook_cpu
+            target_dev = torch.device("cpu")
+        else:
+            data_cpu = data.float()
+            rotations = self._rq_rotations
+            codebook = self._rq_codebook
+            target_dev = dev
+
+        all_packed = []
+        all_norms = []
+        for h in range(H):
+            head_data = data_cpu[:, h, :dim] if not use_cpu else data_cpu[:, h, :dim]
+            packed_h, norms_h = compress_kv_head(
+                head_data.to(target_dev),
+                self._rq_method,
+                self._rq_bit_width,
+                rotations,
+                codebook,
+                target_dev,
+                use_triton=(not use_cpu),
+            )
+            all_packed.append(packed_h)  # (T, packed_per_head)
+            all_norms.append(norms_h)    # (T,)
+
+        packed = torch.stack(all_packed, dim=1)  # (T, H, packed_per_head)
+        norms = torch.stack(all_norms, dim=1).unsqueeze(-1)  # (T, H, 1)
+
+        if use_cpu:
+            packed = packed.to(device=dev, non_blocking=False)
+            norms = norms.to(device=dev, non_blocking=False)
+
+        return packed, norms.to(torch.float16)
+
+    def _decompress_heads(
+        self,
+        packed: torch.Tensor,
+        norms: torch.Tensor,
+        dim: int,
+        out: torch.Tensor,
+        n_active: int,
+    ):
+        """Decompress packed+norms -> out[:n_active, head_num, dim]."""
+        if n_active <= 0:
+            return
+
+        from sglang.srt.layers.quantization.rotorquant_engine import decompress_kv_head
+
+        T = n_active
+        H = self.head_num
+        use_cpu = _is_hip
+        dev = out.device
+
+        p = packed[:T]  # (T, H, packed_per_head)
+        n = norms[:T]   # (T, H, 1)
+
+        if use_cpu:
+            p = p.cpu()
+            n_flat = n.squeeze(-1).cpu()
+            rotations = self._rq_rotations_cpu
+            codebook = self._rq_codebook_cpu
+            target_dev = torch.device("cpu")
+        else:
+            n_flat = n.squeeze(-1)
+            rotations = self._rq_rotations
+            codebook = self._rq_codebook
+            target_dev = dev
+
+        heads = []
+        for h in range(H):
+            x_hat = decompress_kv_head(
+                p[:, h, :].contiguous().to(target_dev),
+                n_flat[:, h].contiguous().to(target_dev),
+                self._rq_method,
+                self._rq_bit_width,
+                dim,
+                rotations,
+                codebook,
+                target_dev,
+                use_triton=(not use_cpu),
+            )
+            heads.append(x_hat)  # (T, dim)
+
+        restored = torch.stack(heads, dim=1)  # (T, H, dim)
+        if use_cpu:
+            restored = restored.to(device=dev, non_blocking=False)
+        out[:T, :, :dim].copy_(restored.to(out.dtype))
+
+    def _clear_buffers(self):
+        del self.k_buffer
+        del self.v_buffer
+        del self.k_norm_buffer
+        del self.v_norm_buffer
+
+    def get_key_buffer(self, layer_id: int):
+        if self.layer_transfer_counter is not None:
+            self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
+        layer_idx = layer_id - self.start_layer
+        if self._deq_dirty_k[layer_idx]:
+            n = self._rq_active[layer_idx]
+            self._decompress_heads(
+                self.k_buffer[layer_idx],
+                self.k_norm_buffer[layer_idx],
+                self.head_dim,
+                self._k_deq[layer_idx],
+                n,
+            )
+            self._deq_dirty_k[layer_idx] = False
+        return self._k_deq[layer_idx]
+
+    def get_value_buffer(self, layer_id: int):
+        if self.layer_transfer_counter is not None:
+            self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
+        layer_idx = layer_id - self.start_layer
+        if self._deq_dirty_v[layer_idx]:
+            n = self._rq_active[layer_idx]
+            self._decompress_heads(
+                self.v_buffer[layer_idx],
+                self.v_norm_buffer[layer_idx],
+                self.v_head_dim,
+                self._v_deq[layer_idx],
+                n,
+            )
+            self._deq_dirty_v[layer_idx] = False
+        return self._v_deq[layer_idx]
+
+    def set_kv_buffer(
+        self,
+        layer: "RadixAttention",
+        loc: torch.Tensor,
+        cache_k: torch.Tensor,
+        cache_v: torch.Tensor,
+        k_scale=None,
+        v_scale=None,
+        layer_id_override=None,
+    ):
+        layer_id = layer_id_override if layer_id_override is not None else layer.layer_id
+        layer_idx = layer_id - self.start_layer
+
+        if cache_k.dtype != self.dtype:
+            cache_k = cache_k.to(self.dtype)
+            cache_v = cache_v.to(self.dtype)
+        cache_k = cache_k.contiguous()
+        cache_v = cache_v.contiguous()
+
+        k_comp, k_norm = self._compress_heads(cache_k, self.head_dim)
+        v_comp, v_norm = self._compress_heads(cache_v, self.v_head_dim)
+
+        loc = loc.to(device=self.k_buffer[layer_idx].device, dtype=torch.long).contiguous()
+
+        if _is_hip and loc.numel() > 0:
+            loc_cpu = loc.detach().to("cpu", dtype=torch.long)
+            perm_cpu = torch.argsort(loc_cpu)
+            sorted_loc_cpu = loc_cpu.index_select(0, perm_cpu)
+            sorted_loc = sorted_loc_cpu.to(device=loc.device, dtype=loc.dtype)
+
+            is_identity = torch.equal(perm_cpu, torch.arange(loc_cpu.numel(), dtype=perm_cpu.dtype))
+            if is_identity:
+                k_sorted, v_sorted = k_comp.contiguous(), v_comp.contiguous()
+                kn_sorted, vn_sorted = k_norm.contiguous(), v_norm.contiguous()
+                ck_sorted, cv_sorted = cache_k.contiguous(), cache_v.contiguous()
+            else:
+                k_sorted = k_comp.index_select(0, perm_cpu.to(k_comp.device)).contiguous()
+                v_sorted = v_comp.index_select(0, perm_cpu.to(v_comp.device)).contiguous()
+                kn_sorted = k_norm.index_select(0, perm_cpu.to(k_norm.device)).contiguous()
+                vn_sorted = v_norm.index_select(0, perm_cpu.to(v_norm.device)).contiguous()
+                ck_sorted = cache_k.index_select(0, perm_cpu.to(cache_k.device)).contiguous()
+                cv_sorted = cache_v.index_select(0, perm_cpu.to(cache_v.device)).contiguous()
+
+            row_start = int(sorted_loc[0].item())
+            row_stop = int(sorted_loc[-1].item()) + 1
+            is_dense = (
+                sorted_loc.numel() == (row_stop - row_start)
+                and torch.equal(
+                    sorted_loc_cpu,
+                    torch.arange(row_start, row_stop, dtype=sorted_loc_cpu.dtype),
+                )
+            )
+
+            if is_dense:
+                self.k_buffer[layer_idx][row_start:row_stop].copy_(k_sorted)
+                self.v_buffer[layer_idx][row_start:row_stop].copy_(v_sorted)
+                self.k_norm_buffer[layer_idx][row_start:row_stop].copy_(kn_sorted)
+                self.v_norm_buffer[layer_idx][row_start:row_stop].copy_(vn_sorted)
+                self._k_deq[layer_idx][row_start:row_stop].copy_(ck_sorted)
+                self._v_deq[layer_idx][row_start:row_stop].copy_(cv_sorted)
+            else:
+                self.k_buffer[layer_idx].index_copy_(0, sorted_loc, k_sorted)
+                self.v_buffer[layer_idx].index_copy_(0, sorted_loc, v_sorted)
+                self.k_norm_buffer[layer_idx].index_copy_(0, sorted_loc, kn_sorted)
+                self.v_norm_buffer[layer_idx].index_copy_(0, sorted_loc, vn_sorted)
+                self._k_deq[layer_idx].index_copy_(0, sorted_loc, ck_sorted)
+                self._v_deq[layer_idx].index_copy_(0, sorted_loc, cv_sorted)
+
+            self._deq_dirty_k[layer_idx] = False
+            self._deq_dirty_v[layer_idx] = False
+        elif loc.numel() > 0:
+            self.k_buffer[layer_idx][loc] = k_comp
+            self.v_buffer[layer_idx][loc] = v_comp
+            self.k_norm_buffer[layer_idx][loc] = k_norm
+            self.v_norm_buffer[layer_idx][loc] = v_norm
+            self._k_deq[layer_idx][loc] = cache_k
+            self._v_deq[layer_idx][loc] = cache_v
+            self._deq_dirty_k[layer_idx] = False
+            self._deq_dirty_v[layer_idx] = False
+
+        if loc.numel() > 0:
+            max_loc = loc.max().item() + 1
+            if max_loc > self._rq_active[layer_idx]:
+                self._rq_active[layer_idx] = max_loc
+
+    def get_kv_size_bytes(self):
+        k_size_bytes, v_size_bytes = super().get_kv_size_bytes()
+        for k_norm_cache in self.k_norm_buffer:
+            k_size_bytes += get_tensor_size_bytes(k_norm_cache)
+        for v_norm_cache in self.v_norm_buffer:
+            v_size_bytes += get_tensor_size_bytes(v_norm_cache)
+        return k_size_bytes, v_size_bytes
+
+    def get_cpu_copy(self, indices):
+        torch.cuda.synchronize()
+        kv_cache_cpu = []
+        chunk_size = self.cpu_offloading_chunk_size
+        for layer_id in range(self.layer_num):
+            kv_cache_cpu.append([])
+            for i in range(0, len(indices), chunk_size):
+                chunk_indices = indices[i : i + chunk_size]
+                entry = [
+                    self.k_buffer[layer_id][chunk_indices].to("cpu", non_blocking=True),
+                    self.v_buffer[layer_id][chunk_indices].to("cpu", non_blocking=True),
+                    self.k_norm_buffer[layer_id][chunk_indices].to("cpu", non_blocking=True),
+                    self.v_norm_buffer[layer_id][chunk_indices].to("cpu", non_blocking=True),
+                ]
+                kv_cache_cpu[-1].append(entry)
+        torch.cuda.synchronize()
+        return kv_cache_cpu
+
+    def load_cpu_copy(self, kv_cache_cpu, indices):
+        torch.cuda.synchronize()
+        chunk_size = self.cpu_offloading_chunk_size
+        for layer_id in range(self.layer_num):
+            for i in range(0, len(indices), chunk_size):
+                chunk_indices = indices[i : i + chunk_size]
+                entry = kv_cache_cpu[layer_id][i // chunk_size]
+                self.k_buffer[layer_id][chunk_indices] = entry[0].to(
+                    self.k_buffer[0].device, non_blocking=True
+                )
+                self.v_buffer[layer_id][chunk_indices] = entry[1].to(
+                    self.v_buffer[0].device, non_blocking=True
+                )
+                self.k_norm_buffer[layer_id][chunk_indices] = entry[2].to(
+                    self.k_norm_buffer[0].device, non_blocking=True
+                )
+                self.v_norm_buffer[layer_id][chunk_indices] = entry[3].to(
+                    self.v_norm_buffer[0].device, non_blocking=True
+                )
+        for layer_id in range(self.layer_num):
+            self._deq_dirty_k[layer_id] = True
+            self._deq_dirty_v[layer_id] = True
+        torch.cuda.synchronize()
+
+    def move_kv_cache(self, tgt_loc: torch.Tensor, src_loc: torch.Tensor):
+        if tgt_loc.numel() == 0:
+            return
+
+        sorted_tgt, perm = torch.sort(tgt_loc.to(device=self.device, dtype=torch.long))
+        sorted_src = src_loc.to(device=self.device, dtype=torch.long).index_select(0, perm)
+        for layer_idx in range(self.layer_num):
+            self.k_buffer[layer_idx].index_copy_(
+                0, sorted_tgt, self.k_buffer[layer_idx].index_select(0, sorted_src)
+            )
+            self.v_buffer[layer_idx].index_copy_(
+                0, sorted_tgt, self.v_buffer[layer_idx].index_select(0, sorted_src)
+            )
+            self.k_norm_buffer[layer_idx].index_copy_(
+                0, sorted_tgt, self.k_norm_buffer[layer_idx].index_select(0, sorted_src)
+            )
+            self.v_norm_buffer[layer_idx].index_copy_(
+                0, sorted_tgt, self.v_norm_buffer[layer_idx].index_select(0, sorted_src)
+            )
+            self._k_deq[layer_idx].index_copy_(
+                0, sorted_tgt, self._k_deq[layer_idx].index_select(0, sorted_src)
+            )
+            self._v_deq[layer_idx].index_copy_(
+                0, sorted_tgt, self._v_deq[layer_idx].index_select(0, sorted_src)
+            )

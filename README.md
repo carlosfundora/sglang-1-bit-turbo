@@ -19,6 +19,20 @@ Extreme KV cache quantization modes that dramatically reduce VRAM usage, enablin
 | `--kv-cache-dtype tq3` | 3-bit | ~81% |
 | `--kv-cache-dtype tq2` | 2-bit | ~87% |
 
+### 🌀 RotorQuant KV Cache Compression
+Advanced geometric-rotation-based KV cache quantization from the [RotorQuant](https://github.com/scrya-com/rotorquant) paper. Data-oblivious (no calibration needed), dramatically faster than TurboQuant with comparable quality.
+
+| Mode | Method | Bits | Rotation | Speed | Quality |
+|------|--------|------|----------|-------|---------|
+| `--kv-cache-dtype rq3_planar` | PlanarQuant | 3-bit | 2D Givens | ⚡ Fastest | Good |
+| `--kv-cache-dtype rq4_planar` | PlanarQuant | 4-bit | 2D Givens | ⚡ Fastest | Better |
+| `--kv-cache-dtype rq3_iso` | IsoQuant | 3-bit | 4D Quaternion | Fast | Best at 3-bit |
+| `--kv-cache-dtype rq4_iso` | IsoQuant | 4-bit | 4D Quaternion | Fast | Best overall |
+
+- **PlanarQuant**: 64× fewer FMAs than TQ (256 vs 16,384) — ~28% faster decode
+- **IsoQuant**: 32× fewer FMAs (512 vs 16,384) — better quality than TQ at same bit-width
+- HIP/ROCm compatible via Triton kernels (PlanarQuant) and PyTorch fallback (IsoQuant)
+
 ### 🦅 EAGLE3 + Medusa + 9 Speculative Algorithms on ROCm
 Full speculative decoding suite ported to AMD GPUs:
 - **9 algorithms**: EAGLE3, P_EAGLE, NGRAM (27.8 t/s ✅), MEDUSA, P_CASCADE, CHIMERA, SAGUARO, TQ5_X, STANDALONE

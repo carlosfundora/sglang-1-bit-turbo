@@ -1908,7 +1908,16 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     "TurboQuant KV cache: GPU kernel optimized for AMD MI355X. "
                     "On NVIDIA, Python fallback will be used (functional but slower)."
                 )
-        else:
+        elif self.server_args.kv_cache_dtype.startswith("rq"):
+            self.kv_cache_dtype = self.server_args.kv_cache_dtype
+            # Parse rq{N}_{method} for logging
+            parts = self.server_args.kv_cache_dtype.split("_", 1)
+            rq_bits = parts[0][2]
+            rq_method = parts[1] if len(parts) > 1 else "unknown"
+            logger.info(
+                f"RotorQuant KV cache: {rq_method} {rq_bits}-bit. "
+                f"HIP/ROCm optimized via Triton (PlanarQuant) and PyTorch (IsoQuant) kernels."
+            )        else:
             raise ValueError(
                 f"Unsupported kv_cache_dtype: {self.server_args.kv_cache_dtype}."
             )

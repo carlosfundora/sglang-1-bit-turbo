@@ -72,11 +72,15 @@ _is_npu = is_npu()
 
 class ModelRunnerKVCacheMixin:
     def _kv_element_size(self):
-        """Get element size, handling TQ string dtypes."""
+        """Get element size, handling TQ/RQ string dtypes."""
         if isinstance(self.kv_cache_dtype, str) and self.kv_cache_dtype.startswith(
             "tq"
         ):
             return 1  # TQ stores as uint8, actual size handled by pool
+        if isinstance(self.kv_cache_dtype, str) and self.kv_cache_dtype.startswith(
+            "rq"
+        ):
+            return 1  # RQ stores as uint8, actual size handled by pool
         if isinstance(self.kv_cache_dtype, str) and self.kv_cache_dtype == "fp4_e2m1":
             return 1
         return torch._utils._element_size(self.kv_cache_dtype)
@@ -605,6 +609,12 @@ class ModelRunnerKVCacheMixin:
                     end_layer=self.end_layer,
                     tq_bit_width=tq_bits,
                 )
+            elif self.kv_cache_dtype.startswith("rq"):
+                raise ValueError(
+                    f"RotorQuant KV cache ({self.kv_cache_dtype}) is not supported "
+                    "with MLA (Multi-Latent Attention). Use MHA/GQA models instead, "
+                    "or use tq2/tq3/tq4 for MLA models."
+                )
             else:
                 self.token_to_kv_pool = MLATokenToKVPool(
                     self.max_total_num_tokens,
@@ -733,6 +743,33 @@ class ModelRunnerKVCacheMixin:
                         start_layer=self.start_layer,
                         end_layer=self.end_layer,
                         tq_bit_width=tq_bits,
+                    )
+                elif self.kv_cache_dtype.startswith("rq"):
+                    from sglang.srt.mem_cache.memory_pool import MHATokenToKVPoolRQ
+
+                    # Parse rq{N}_{method} format
+                    # e.g. "rq3_planar" -> bit_width=3, method="planar"
+                    parts = self.kv_cache_dtype.split("_", 1)
+                    rq_bit_width = int(parts[0][2])  # 'rq3' -> 3
+                    rq_method = parts[1]  # 'planar' or 'iso'
+                    logger.info(
+                        f"Using RotorQuant {rq_method} {rq_bit_width}-bit KV cache for MHA/GQA"
+                    )
+                    self.token_to_kv_pool = MHATokenToKVPoolRQ(
+                        self.max_total_num_tokens,
+                        page_size=self.page_size,
+                        dtype=torch.bfloat16,
+                        head_num=self.model_config.get_num_kv_heads(
+                            get_attention_tp_size()
+                        ),
+                        head_dim=self.model_config.head_dim,
+                        layer_num=self.num_effective_layers,
+                        device=self.device,
+                        enable_memory_saver=self.server_args.enable_memory_saver,
+                        start_layer=self.start_layer,
+                        end_layer=self.end_layer,
+                        rq_method=rq_method,
+                        rq_bit_width=rq_bit_width,
                     )
                 else:
                     self.token_to_kv_pool = MHATokenToKVPool(
