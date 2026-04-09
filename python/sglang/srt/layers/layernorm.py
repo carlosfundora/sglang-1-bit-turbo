@@ -91,30 +91,34 @@ if _is_cuda or _is_xpu:
         rmsnorm,
     )
 _has_vllm_rms_norm = False
+_rms_norm_is_inplace = False  # True = vllm 4-arg API, False = aiter/triton 3-arg API
 if _use_aiter:
     from aiter import rmsnorm2d_fwd as rms_norm
     from aiter import rmsnorm2d_fwd_with_add as fused_add_rms_norm
 
     _has_vllm_rms_norm = True  # aiter provides the rms_norm functions
+    _rms_norm_is_inplace = False  # aiter: rms_norm(x, w, eps) -> out
 elif _is_hip:
     try:
         from vllm._custom_ops import fused_add_rms_norm, rms_norm
 
         _has_vllm_rms_norm = True
+        _rms_norm_is_inplace = True  # vllm: rms_norm(out, x, w, eps) -> None
     except ImportError:
         # Fallback: Triton-based RMSNorm for HIP without aiter/vllm
         # This enables RDNA2 (gfx1030) GPUs to run without MI-series dependencies
         try:
-            from sglang.srt.layers.elementwise import rmsnorm_autotune
+            from sglang.srt.layers.elementwise import fused_rmsnorm
 
             def rms_norm(x, weight, epsilon):
-                return rmsnorm_autotune(x, weight, epsilon)
+                return fused_rmsnorm(x, weight, epsilon)
 
             def fused_add_rms_norm(x, residual, weight, epsilon):
                 x = x + residual
                 return rms_norm(x, weight, epsilon), x
 
             _has_vllm_rms_norm = True
+            _rms_norm_is_inplace = False  # triton: rms_norm(x, w, eps) -> out
             logger.info(
                 "Using Triton RMSNorm fallback for HIP (no aiter/vllm available)"
             )
@@ -326,18 +330,30 @@ class RMSNorm(MultiPlatformOp):
 
         if not x.is_contiguous():
             x = x.contiguous()
-        if residual is not None:
+
+        if _rms_norm_is_inplace:
+            # vllm API: rms_norm(out, x, w, eps) -> None (in-place)
+            if residual is not None:
+                out = torch.empty_like(x)
+                residual_out = torch.empty_like(x)
+                if post_residual_addition is not None:
+                    residual = residual + post_residual_addition
+                fused_add_rms_norm(
+                    out, x, residual_out, residual, self.weight.data, self.variance_epsilon
+                )
+                return out, residual_out
             out = torch.empty_like(x)
-            residual_out = torch.empty_like(x)
-            if post_residual_addition is not None:
-                residual = residual + post_residual_addition
-            fused_add_rms_norm(
-                out, x, residual_out, residual, self.weight.data, self.variance_epsilon
-            )
-            return out, residual_out
-        out = torch.empty_like(x)
-        rms_norm(out, x, self.weight.data, self.variance_epsilon)
-        return out
+            rms_norm(out, x, self.weight.data, self.variance_epsilon)
+            return out
+        else:
+            # aiter/triton API: rms_norm(x, w, eps) -> out
+            if residual is not None:
+                if post_residual_addition is not None:
+                    residual = residual + post_residual_addition
+                x = x + residual
+                out = rms_norm(x, self.weight.data, self.variance_epsilon)
+                return out, x
+            return rms_norm(x, self.weight.data, self.variance_epsilon)
 
     def forward_native(
         self,
@@ -616,22 +632,32 @@ class GemmaRMSNorm(MultiPlatformOp):
                 return output, residual_out
             return rms_norm(x, w, self.variance_epsilon)
         else:
-            # vllm API: rms_norm(out, input, weight, eps) -> None (in-place)
-            #           fused_add_rms_norm(out, input, residual_out, residual, weight, eps)
+            # vllm or triton fallback API
             if not x.is_contiguous():
                 x = x.contiguous()
-            if residual is not None:
+            if _rms_norm_is_inplace:
+                # vllm API: rms_norm(out, input, weight, eps) -> None
+                if residual is not None:
+                    out = torch.empty_like(x)
+                    residual_out = torch.empty_like(x)
+                    if post_residual_addition is not None:
+                        residual = residual + post_residual_addition
+                    fused_add_rms_norm(
+                        out, x, residual_out, residual, w, self.variance_epsilon
+                    )
+                    return out, residual_out
                 out = torch.empty_like(x)
-                residual_out = torch.empty_like(x)
-                if post_residual_addition is not None:
-                    residual = residual + post_residual_addition
-                fused_add_rms_norm(
-                    out, x, residual_out, residual, w, self.variance_epsilon
-                )
-                return out, residual_out
-            out = torch.empty_like(x)
-            rms_norm(out, x, w, self.variance_epsilon)
-            return out
+                rms_norm(out, x, w, self.variance_epsilon)
+                return out
+            else:
+                # triton fallback: rms_norm(x, w, eps) -> out
+                if residual is not None:
+                    if post_residual_addition is not None:
+                        residual = residual + post_residual_addition
+                    x = x + residual
+                    out = rms_norm(x, w, self.variance_epsilon)
+                    return out, x
+                return rms_norm(x, w, self.variance_epsilon)
 
     def forward_cpu(
         self,
