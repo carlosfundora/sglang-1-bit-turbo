@@ -367,6 +367,10 @@ class TQ5XWorker:
             # On ROCm, .cuda(non_blocking=True) on pinned memory is zero-copy
             draft_tokens_gpu = self.ghost_buf.gpu_tokens[:bs * K].cuda(non_blocking=True)
             tree_mask_gpu = self.ghost_buf.gpu_mask[:bs * K * K].cuda(non_blocking=True)
+            # CRITICAL: GPU must finish reading pinned memory before we tell
+            # the ghost thread the buffer is free — otherwise the ghost thread
+            # overwrites the buffer mid-DMA, causing HSA memory faults on gfx1030.
+            torch.cuda.synchronize()
             self.ghost_buf.consume()
             self.ghost_hits += 1
         else:
