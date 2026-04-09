@@ -1917,7 +1917,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             logger.info(
                 f"RotorQuant KV cache: {rq_method} {rq_bits}-bit. "
                 f"HIP/ROCm optimized via Triton (PlanarQuant) and PyTorch (IsoQuant) kernels."
-            )        else:
+            )
+        else:
             raise ValueError(
                 f"Unsupported kv_cache_dtype: {self.server_args.kv_cache_dtype}."
             )

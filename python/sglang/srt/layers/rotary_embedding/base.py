@@ -475,7 +475,12 @@ class RotaryEmbedding(MultiPlatformOp):
                         positions = positions + offsets
                     positions = positions.flatten()
                     cos_sin = self.cos_sin_cache.to(query.device, dtype=query.dtype)
+                    # chunk() produces non-contiguous views — the HIP kernel
+                    # indexes with pos * embed_dim assuming contiguous layout,
+                    # so we MUST materialize contiguous copies.
                     cos, sin = cos_sin.chunk(2, dim=-1)
+                    cos = cos.contiguous()
+                    sin = sin.contiguous()
                     num_heads = query.shape[-1] // self.head_size
                     num_kv_heads = key.shape[-1] // self.head_size
                     result = rdna2_ops.apply_rotary_pos_emb(

@@ -48,6 +48,20 @@ _is_cpu = is_cpu()
 _is_xpu = is_xpu()
 _flashinfer_layernorm_available = False
 
+# RDNA detection — AITER CK-based rmsnorm JIT fails on RDNA architectures
+_is_rdna_for_layernorm = False
+if _is_hip and _use_aiter:
+    try:
+        _props = torch.cuda.get_device_properties(0)
+        _arch = getattr(_props, "gcnArchName", "").split(":")[0]
+        _is_rdna_for_layernorm = _arch.startswith("gfx10") or _arch.startswith("gfx11") or _arch.startswith("gfx12")
+        if _is_rdna_for_layernorm:
+            logging.getLogger(__name__).info(
+                f"RDNA GPU ({_arch}): AITER CK-based rmsnorm bypassed, using forward_hip chain"
+            )
+    except Exception:
+        pass
+
 # RDNA2 Wave32 HIP kernel — lazy-init (avoids JIT compile at import time)
 _rdna2_rmsnorm_checked = False
 _rdna2_rmsnorm_ok = False
@@ -64,7 +78,7 @@ def _check_rdna2_rmsnorm():
     try:
         from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
 
-        _rdna2_rmsnorm_ok = rdna2_ops.probe()
+        _rdna2_rmsnorm_ok = rdna2_ops.probe() and os.environ.get("SGLANG_RDNA2_RMSNORM", "1") != "0"
         if _rdna2_rmsnorm_ok:
             logger.info("RDNA2 Wave32 RMSNorm: enabled for forward_hip dispatch")
     except Exception:
@@ -162,8 +176,8 @@ def _forward_with_allreduce_fusion(
             if post_residual_addition is not None:
                 residual = residual + post_residual_addition
 
-            # Prefer AITER fused AR+RMSNorm when enabled on AMD.
-            if _use_aiter:
+            # Prefer AITER fused AR+RMSNorm when enabled on AMD (CDNA only).
+            if _use_aiter and not _is_rdna_for_layernorm:
                 fused_result = tensor_model_parallel_fused_allreduce_rmsnorm(
                     x, residual, weight, norm_module.variance_epsilon
                 )
@@ -181,7 +195,7 @@ def _forward_with_allreduce_fusion(
                     return fused_result
 
             # For AITER route, preserve correctness when fused path is unavailable.
-            if _use_aiter and get_global_server_args().enable_aiter_allreduce_fusion:
+            if _use_aiter and not _is_rdna_for_layernorm and get_global_server_args().enable_aiter_allreduce_fusion:
                 x = tensor_model_parallel_all_reduce(x)
                 return norm_module.forward(x, residual, None)
 
@@ -215,7 +229,11 @@ class RMSNorm(MultiPlatformOp):
             None if var_hidden_size == hidden_size else var_hidden_size
         )
         if _use_aiter:
-            self._forward_method = self.forward_aiter
+            if _is_rdna_for_layernorm:
+                # RDNA: AITER CK rmsnorm JIT fails; use forward_hip (RDNA2 kernel)
+                self._forward_method = self.forward_hip
+            else:
+                self._forward_method = self.forward_aiter
 
     def forward_cuda(
         self,
@@ -618,7 +636,7 @@ class GemmaRMSNorm(MultiPlatformOp):
             return self.forward_native(x, residual, post_residual_addition)
 
         w = self.weight.data + 1.0
-        if _use_aiter:
+        if _use_aiter and not _is_rdna_for_layernorm:
             # aiter API: rms_norm(input, weight, eps) -> output
             #            fused_add_rms_norm(output, input, residual, residual_out, weight, eps)
             if residual is not None:

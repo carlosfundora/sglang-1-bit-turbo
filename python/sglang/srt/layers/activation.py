@@ -75,7 +75,7 @@ def _check_rdna2_activations():
     try:
         from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
 
-        _rdna2_act_ok = rdna2_ops.probe()
+        _rdna2_act_ok = rdna2_ops.probe() and os.environ.get("SGLANG_RDNA2_ACT", "1") != "0"
     except Exception:
         _rdna2_act_ok = False
     return _rdna2_act_ok
