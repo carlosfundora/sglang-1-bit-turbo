@@ -817,12 +817,12 @@ class ServerArgs:
 
         # Set kernel backends.
         self._handle_sampling_backend()
+        self._handle_amd_specifics()
         self._handle_attention_backend_compatibility()
         self._handle_mamba_backend()
         self._handle_linear_attn_backend()
         self._handle_kv4_compatibility()
         self._handle_page_size()
-        self._handle_amd_specifics()
         self._handle_nccl_pre_warm()
         self._handle_grammar_backend()
 

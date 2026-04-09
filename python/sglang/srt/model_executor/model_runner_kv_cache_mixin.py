@@ -744,7 +744,7 @@ class ModelRunnerKVCacheMixin:
                         end_layer=self.end_layer,
                         tq_bit_width=tq_bits,
                     )
-                elif self.kv_cache_dtype.startswith("rq"):
+                elif isinstance(self.kv_cache_dtype, str) and self.kv_cache_dtype.startswith("rq"):
                     from sglang.srt.mem_cache.memory_pool import MHATokenToKVPoolRQ
 
                     # Parse rq{N}_{method} format

@@ -53,6 +53,34 @@ from sglang.srt.layers.attention.utils import (
     launch_reshape_and_cache_flash,
     pad_sequence_with_mask,
 )
+
+# RDNA architecture detection for CK-incompatible GPUs.
+# CK (Composable Kernel) ops only support CDNA (gfx90a/940/941/942/950).
+# RDNA GPUs must use Triton-based paths for all attention operations.
+_RDNA_ARCHS = frozenset({
+    # RDNA2
+    "gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035", "gfx1036",
+    # RDNA3
+    "gfx1100", "gfx1101", "gfx1102", "gfx1103",
+    # RDNA3.5
+    "gfx1150", "gfx1151",
+    # RDNA4
+    "gfx1200", "gfx1201",
+})
+
+
+def _is_rdna_gpu() -> bool:
+    """Check if current GPU is RDNA (requires Triton paths, CK not supported)."""
+    if not torch.cuda.is_available() or not hasattr(torch.version, "hip"):
+        return False
+    try:
+        props = torch.cuda.get_device_properties(0)
+        arch = getattr(props, "gcnArchName", "")
+        # gcnArchName may contain suffixes like "gfx1030:sramecc-:xnack-"
+        base_arch = arch.split(":")[0]
+        return base_arch in _RDNA_ARCHS
+    except Exception:
+        return False
 from sglang.srt.layers.quantization.fp8_kernel import fp8_dtype
 from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
 from sglang.srt.utils import get_bool_env_var
@@ -206,6 +234,16 @@ class AiterAttnBackend(AttentionBackend):
         else:
             self.use_triton_unified_attention = get_bool_env_var(
                 "SGLANG_USE_AITER_UNIFIED_ATTN"
+            )
+
+        # RDNA detection: CK kernels (mha_batch_prefill, paged_attention_ragged)
+        # only work on CDNA (MI-series). Force Triton paths for RDNA GPUs.
+        self.is_rdna = _is_rdna_gpu()
+        if self.is_rdna:
+            self.use_triton_unified_attention = True
+            logger.info(
+                "RDNA GPU detected: using Triton unified_attention (decode) "
+                "and extend_attention_fwd (prefill) — CK kernels bypassed"
             )
 
         # aiter kernel related initialization
@@ -2336,6 +2374,48 @@ class AiterAttnBackend(AttentionBackend):
                     1.0,  # v_scale
                     layer.scaling,
                     logit_cap=layer.logit_cap,
+                )
+                return o.view(-1, layer.tp_q_head_num * layer.v_head_dim)
+
+            # RDNA: Route normal extend through Triton extend_attention_fwd.
+            # CK-based mha_batch_prefill_func is not supported on RDNA GPUs.
+            # Uses the same kernel + metadata format as spec decode extend above.
+            if self.is_rdna and self.kv_cache_dtype != fp8_dtype:
+                if layer.qk_head_dim != layer.v_head_dim:
+                    o = q.new_empty(
+                        (q.shape[0], layer.tp_q_head_num * layer.v_head_dim)
+                    )
+                else:
+                    o = torch.empty_like(q)
+
+                bs0 = forward_batch.batch_size + 1
+                sliding_window = -1
+                if (
+                    layer.sliding_window_size is not None
+                    and layer.sliding_window_size > -1
+                ):
+                    sliding_window = layer.sliding_window_size
+
+                self.extend_attention_fwd(
+                    q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
+                    k.contiguous(),
+                    v.contiguous(),
+                    o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
+                    forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id),
+                    forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id),
+                    self.qo_indptr[:bs0],
+                    self.forward_metadata.kv_indptr[:bs0],
+                    self.forward_metadata.kv_indices,
+                    None,  # custom_mask (normal extend, no spec decode masks)
+                    True,  # causal
+                    None,  # mask_indptr
+                    self.forward_metadata.max_q_len,
+                    1.0,  # k_scale (non-FP8)
+                    1.0,  # v_scale (non-FP8)
+                    layer.scaling,
+                    logit_cap=layer.logit_cap,
+                    sliding_window_size=sliding_window,
+                    sinks=sinks,
                 )
                 return o.view(-1, layer.tp_q_head_num * layer.v_head_dim)
 

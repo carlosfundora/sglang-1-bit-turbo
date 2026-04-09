@@ -26,9 +26,10 @@ def get_gfx1031_server_defaults() -> Dict[str, Any]:
     overrides are provided by the user.
     """
     return {
-        # Attention: triton is the most portable backend for RDNA2
-        # AITER backend requires MI-series specific ASM kernels for paged attention
-        "attention_backend": "triton",
+        # Attention: AITER backend with Triton paths for RDNA2.
+        # CK kernels are bypassed: decode uses unified_attention (Triton),
+        # extend uses extend_attention_fwd (SGLang Triton with Wave32 tuning).
+        "attention_backend": "aiter",
 
         # CUDA graphs work on HIP but need smaller batch sizes for 12GB VRAM
         "disable_cuda_graph": False,
@@ -74,6 +75,10 @@ def apply_gfx1031_env() -> None:
 
         # Disable features that don't work on RDNA2
         "SGLANG_DISABLE_FLASHINFER": "1",  # FlashInfer is CUDA-only
+
+        # AITER: force Triton paths (bypass CK kernels that need CDNA)
+        "SGLANG_USE_AITER": "1",
+        "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
     }
 
     applied = []
