@@ -59,6 +59,27 @@ if is_npu():
 
 logger = logging.getLogger(__name__)
 
+# RDNA2 Wave32 activation kernels — lazy-init
+_rdna2_act_checked = False
+_rdna2_act_ok = False
+
+
+def _check_rdna2_activations():
+    """Lazy one-time check for RDNA2 activation kernel availability."""
+    global _rdna2_act_checked, _rdna2_act_ok
+    if _rdna2_act_checked:
+        return _rdna2_act_ok
+    _rdna2_act_checked = True
+    if not _is_hip:
+        return False
+    try:
+        from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
+
+        _rdna2_act_ok = rdna2_ops.probe()
+    except Exception:
+        _rdna2_act_ok = False
+    return _rdna2_act_ok
+
 
 class SiluAndMul(MultiPlatformOp):
     def __init__(self, *args, **kwargs):
@@ -71,6 +92,24 @@ class SiluAndMul(MultiPlatformOp):
         return F.silu(x[..., :d]) * x[..., d:]
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        output_shape = x.shape[:-1] + (d,)
+        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        silu_and_mul(x, out)
+        return out
+
+    def forward_hip(self, x: torch.Tensor) -> torch.Tensor:
+        # RDNA2 Wave32 fused SiLU-gate kernel
+        if _check_rdna2_activations():
+            try:
+                from sglang.srt.layers.kernels.rdna2.activations import (
+                    silu_and_mul as rdna2_silu_and_mul,
+                )
+
+                return rdna2_silu_and_mul(x)
+            except Exception:
+                pass
+        # Fall back to sgl_kernel (works on all ROCm)
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
@@ -126,6 +165,20 @@ class GeluAndMul(MultiPlatformOp):
             return self.forward_native(x)
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        return self._forward_impl(x)
+
+    def forward_hip(self, x: torch.Tensor) -> torch.Tensor:
+        # RDNA2 Wave32 fused GELU-gate kernel (tanh approximate only)
+        if self.approximate == "tanh" and _check_rdna2_activations():
+            try:
+                from sglang.srt.layers.kernels.rdna2.activations import (
+                    gelu_and_mul as rdna2_gelu_and_mul,
+                )
+
+                return rdna2_gelu_and_mul(x)
+            except Exception:
+                pass
+        # Fall back to sgl_kernel
         return self._forward_impl(x)
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:

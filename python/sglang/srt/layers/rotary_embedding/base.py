@@ -445,8 +445,60 @@ class RotaryEmbedding(MultiPlatformOp):
         offsets: Optional[torch.Tensor] = None,
         fused_set_kv_buffer_arg: Optional[Union[FusedSetKVBufferArg, dict]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # ROCm has been faulting in the CUDA-style rotary kernel path on the
-        # OpenCoder/Llama baseline. Use the native PyTorch path for stability.
+        # ── Fused KV cache path (already handled in forward_cuda's HIP branch) ──
+        if fused_set_kv_buffer_arg is not None and self.use_fallback_kernel:
+            extra_args = fused_set_kv_buffer_arg
+            k_cache_shape = fused_set_kv_buffer_arg["key_cache"].shape
+            qk_head_dim = k_cache_shape[-1]
+            tp_k_head_num = k_cache_shape[-2]
+            key = key.view(-1, tp_k_head_num, qk_head_dim)
+            tokens = key.shape[0]
+            query = query.view(tokens, -1, qk_head_dim)
+            query, key, k_cache, v_cache = fused_qk_rope_reshape_and_cache(
+                q=query, k=key, pos=positions, cos_sin=self.cos_sin_cache,
+                is_neox=self.is_neox_style, flash_layout=True, offs=None,
+                q_out=query, k_out=key, output_zeros=False, **extra_args,
+            )
+            return query, key
+
+        # ── RDNA2 Wave32 RoPE kernel (NeoX-style, full-head rotation only) ──
+        if (
+            self.is_neox_style
+            and self.rotary_dim == self.head_size
+            and offsets is None
+        ):
+            try:
+                from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
+
+                if rdna2_ops.probe():
+                    if offsets is not None:
+                        positions = positions + offsets
+                    positions = positions.flatten()
+                    cos_sin = self.cos_sin_cache.to(query.device, dtype=query.dtype)
+                    cos, sin = cos_sin.chunk(2, dim=-1)
+                    num_heads = query.shape[-1] // self.head_size
+                    num_kv_heads = key.shape[-1] // self.head_size
+                    result = rdna2_ops.apply_rotary_pos_emb(
+                        query, key, cos, sin, positions,
+                        self.head_size, num_heads, num_kv_heads, self.rotary_dim,
+                    )
+                    if result is not None:
+                        return result
+            except Exception:
+                pass
+
+        # ── sgl_kernel fallback (if available) ──
+        if self.use_fallback_kernel and fused_set_kv_buffer_arg is None:
+            self.cos_sin_cache = self.cos_sin_cache.to(
+                query.device, dtype=query.dtype
+            )
+            self.fallback_rotary_embedding(
+                positions, query, key,
+                self.head_size, self.cos_sin_cache, self.is_neox_style,
+            )
+            return query, key
+
+        # ── PyTorch native fallback ──
         return self.forward_native(positions, query, key, offsets, None)
 
     def extra_repr(self) -> str:
