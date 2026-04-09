@@ -76,7 +76,8 @@ def check_pytorch():
         print(f"    HIP version: {torch.version.hip}")
         print(f"    Device: {props.name}")
         print(f"    GCN arch: {props.gcnArchName}")
-        print(f"    VRAM: {props.total_mem / 1024**3:.1f} GB")
+        total_mem = getattr(props, 'total_memory', getattr(props, 'total_mem', 0))
+        print(f"    VRAM: {total_mem / 1024**3:.1f} GB")
         print(f"    Multiprocessors (CUs): {props.multi_processor_count}")
 
         # Check if it's RDNA2

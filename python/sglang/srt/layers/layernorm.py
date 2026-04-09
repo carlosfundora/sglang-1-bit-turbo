@@ -48,6 +48,8 @@ _is_cpu = is_cpu()
 _is_xpu = is_xpu()
 _flashinfer_layernorm_available = False
 
+logger = logging.getLogger(__name__)
+
 if _is_cuda or _is_xpu:
     if _is_flashinfer_available:
         try:
@@ -95,8 +97,6 @@ elif _is_hip:
             )
         except ImportError:
             _has_vllm_rms_norm = False
-
-logger = logging.getLogger(__name__)
 
 if _is_npu:
     import torch_npu
