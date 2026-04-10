@@ -3533,6 +3533,14 @@ class MHATokenToKVPoolRQ(MHATokenToKVPool):
         self._deq_dirty_v = [True] * self.layer_num
         self._rq_active = [0] * self.layer_num
 
+        # Per-position packed-buffer dirty tracking for lazy compression.
+        # During decode, we skip compression and only store FP16 to deq buffers.
+        # Packed buffers are lazily compressed before eviction/transfer/checkpoint.
+        self._packed_dirty = [
+            torch.zeros(m, dtype=torch.bool, device=self.device)
+            for _ in range(self.layer_num)
+        ]
+
         # data_ptrs / data_strides for kv copy kernels
         self.k_data_ptrs = torch.tensor(
             [x.data_ptr() for x in self._k_deq], dtype=torch.uint64, device=self.device
@@ -3695,6 +3703,47 @@ class MHATokenToKVPoolRQ(MHATokenToKVPool):
         del self.k_norm_buffer
         del self.v_norm_buffer
 
+    def _ensure_packed(self, layer_idx: int, indices: torch.Tensor = None):
+        """Lazily compress dirty positions in packed buffers.
+
+        Called before eviction, CPU offload, or transfer operations that
+        read from packed/norm buffers. During decode, set_kv_buffer skips
+        compression for small batches and marks positions dirty here.
+
+        Args:
+            layer_idx: layer index (0-based, relative to start_layer)
+            indices: optional specific positions to compress. If None,
+                     compresses ALL dirty positions for the layer.
+        """
+        dirty = self._packed_dirty[layer_idx]
+        if indices is not None:
+            mask = dirty[indices]
+            if not mask.any():
+                return
+            dirty_indices = indices[mask]
+        else:
+            dirty_indices = dirty.nonzero(as_tuple=False).squeeze(-1)
+            if dirty_indices.numel() == 0:
+                return
+
+        # Read FP16 from deq buffers and compress
+        k_fp16 = self._k_deq[layer_idx][dirty_indices]  # (N, H, head_dim)
+        v_fp16 = self._v_deq[layer_idx][dirty_indices]   # (N, H, v_head_dim)
+
+        k_comp, k_norm = self._compress_heads(k_fp16, self.head_dim)
+        v_comp, v_norm = self._compress_heads(v_fp16, self.v_head_dim)
+
+        self.k_buffer[layer_idx].index_copy_(0, dirty_indices, k_comp.contiguous())
+        self.v_buffer[layer_idx].index_copy_(0, dirty_indices, v_comp.contiguous())
+        self.k_norm_buffer[layer_idx].index_copy_(0, dirty_indices, k_norm.contiguous())
+        self.v_norm_buffer[layer_idx].index_copy_(0, dirty_indices, v_norm.contiguous())
+
+        # Clear dirty flags
+        if indices is not None:
+            dirty[indices] = False
+        else:
+            dirty.zero_()
+
     def get_key_buffer(self, layer_id: int):
         if self.layer_transfer_counter is not None:
             self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
@@ -3743,15 +3792,34 @@ class MHATokenToKVPoolRQ(MHATokenToKVPool):
         if cache_k.dtype != self.dtype:
             cache_k = cache_k.to(self.dtype)
             cache_v = cache_v.to(self.dtype)
+
+        loc = loc.to(device=self.k_buffer[layer_idx].device, dtype=torch.long)
+        n_tokens = loc.numel()
+        if n_tokens == 0:
+            return
+
         cache_k = cache_k.contiguous()
         cache_v = cache_v.contiguous()
 
+        # Fast path for small token counts (decode): skip compression entirely.
+        # Store FP16 to deq buffers (what attention reads) and mark packed dirty.
+        # Packed buffers are lazily compressed before eviction/transfer/checkpoint.
+        if n_tokens <= 8:
+            self._k_deq[layer_idx].index_copy_(0, loc, cache_k)
+            self._v_deq[layer_idx].index_copy_(0, loc, cache_v)
+            self._deq_dirty_k[layer_idx] = False
+            self._deq_dirty_v[layer_idx] = False
+            self._packed_dirty[layer_idx][loc] = True
+            max_loc = loc.max().item() + 1
+            if max_loc > self._rq_active[layer_idx]:
+                self._rq_active[layer_idx] = max_loc
+            return
+
+        # Compress K and V (only for prefill / large batches)
         k_comp, k_norm = self._compress_heads(cache_k, self.head_dim)
         v_comp, v_norm = self._compress_heads(cache_v, self.v_head_dim)
 
-        loc = loc.to(device=self.k_buffer[layer_idx].device, dtype=torch.long).contiguous()
-
-        if _is_hip and loc.numel() > 0:
+        if _is_hip:
             loc_cpu = loc.detach().to("cpu", dtype=torch.long)
             perm_cpu = torch.argsort(loc_cpu)
             sorted_loc_cpu = loc_cpu.index_select(0, perm_cpu)
@@ -3797,7 +3865,7 @@ class MHATokenToKVPoolRQ(MHATokenToKVPool):
 
             self._deq_dirty_k[layer_idx] = False
             self._deq_dirty_v[layer_idx] = False
-        elif loc.numel() > 0:
+        else:
             self.k_buffer[layer_idx][loc] = k_comp
             self.v_buffer[layer_idx][loc] = v_comp
             self.k_norm_buffer[layer_idx][loc] = k_norm
@@ -3807,10 +3875,11 @@ class MHATokenToKVPoolRQ(MHATokenToKVPool):
             self._deq_dirty_k[layer_idx] = False
             self._deq_dirty_v[layer_idx] = False
 
-        if loc.numel() > 0:
-            max_loc = loc.max().item() + 1
-            if max_loc > self._rq_active[layer_idx]:
-                self._rq_active[layer_idx] = max_loc
+        # Packed buffers are fresh for prefill paths (compression done above)
+        self._packed_dirty[layer_idx][loc] = False
+        max_loc = loc.max().item() + 1
+        if max_loc > self._rq_active[layer_idx]:
+            self._rq_active[layer_idx] = max_loc
 
     def get_kv_size_bytes(self):
         k_size_bytes, v_size_bytes = super().get_kv_size_bytes()
@@ -3821,6 +3890,10 @@ class MHATokenToKVPoolRQ(MHATokenToKVPool):
         return k_size_bytes, v_size_bytes
 
     def get_cpu_copy(self, indices):
+        # Ensure packed buffers are up-to-date for positions being offloaded
+        indices_t = torch.as_tensor(indices, device=self.device, dtype=torch.long)
+        for layer_id in range(self.layer_num):
+            self._ensure_packed(layer_id, indices_t)
         torch.cuda.synchronize()
         kv_cache_cpu = []
         chunk_size = self.cpu_offloading_chunk_size
@@ -3869,6 +3942,8 @@ class MHATokenToKVPoolRQ(MHATokenToKVPool):
         sorted_tgt, perm = torch.sort(tgt_loc.to(device=self.device, dtype=torch.long))
         sorted_src = src_loc.to(device=self.device, dtype=torch.long).index_select(0, perm)
         for layer_idx in range(self.layer_num):
+            # Ensure packed buffers are fresh for source positions
+            self._ensure_packed(layer_idx, sorted_src)
             self.k_buffer[layer_idx].index_copy_(
                 0, sorted_tgt, self.k_buffer[layer_idx].index_select(0, sorted_src)
             )
@@ -3887,3 +3962,5 @@ class MHATokenToKVPoolRQ(MHATokenToKVPool):
             self._v_deq[layer_idx].index_copy_(
                 0, sorted_tgt, self._v_deq[layer_idx].index_select(0, sorted_src)
             )
+            # Target positions now have fresh packed+deq data
+            self._packed_dirty[layer_idx][sorted_tgt] = False
