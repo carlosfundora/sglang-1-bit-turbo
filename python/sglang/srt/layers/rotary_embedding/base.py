@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
+try:
+    from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
+except ImportError:
+    pass
+
 import torch
 
 from sglang.srt.layers.rotary_embedding.utils import apply_rotary_emb
@@ -468,7 +473,6 @@ class RotaryEmbedding(MultiPlatformOp):
             and offsets is None
         ):
             try:
-                from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
 
                 if rdna2_ops.probe():
                     if offsets is not None:

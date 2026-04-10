@@ -599,7 +599,7 @@ class ModelRunnerKVCacheMixin:
                 self.token_to_kv_pool = MLATokenToKVPoolTQ(
                     self.max_total_num_tokens,
                     page_size=self.page_size,
-                    dtype=torch.bfloat16,
+                    dtype=self.dtype,
                     kv_lora_rank=self.model_config.kv_lora_rank,
                     qk_rope_head_dim=self.model_config.qk_rope_head_dim,
                     layer_num=self.num_effective_layers,
@@ -732,7 +732,7 @@ class ModelRunnerKVCacheMixin:
                     self.token_to_kv_pool = MHATokenToKVPoolTQ(
                         self.max_total_num_tokens,
                         page_size=self.page_size,
-                        dtype=torch.bfloat16,
+                        dtype=self.dtype,
                         head_num=self.model_config.get_num_kv_heads(
                             get_attention_tp_size()
                         ),
@@ -758,7 +758,7 @@ class ModelRunnerKVCacheMixin:
                     self.token_to_kv_pool = MHATokenToKVPoolRQ(
                         self.max_total_num_tokens,
                         page_size=self.page_size,
-                        dtype=torch.bfloat16,
+                        dtype=self.dtype,
                         head_num=self.model_config.get_num_kv_heads(
                             get_attention_tp_size()
                         ),

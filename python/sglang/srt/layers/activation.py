@@ -15,12 +15,24 @@
 
 import logging
 import math
+import os
 from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
+
+try:
+    from sglang.srt.layers.kernels.rdna2.activations import (
+        gelu_and_mul as rdna2_gelu_and_mul,
+    )
+    from sglang.srt.layers.kernels.rdna2.activations import (
+        silu_and_mul as rdna2_silu_and_mul,
+    )
+    from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
+except ImportError:
+    pass
 
 from sglang.srt.distributed import (
     divide,
@@ -73,9 +85,10 @@ def _check_rdna2_activations():
     if not _is_hip:
         return False
     try:
-        from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
 
-        _rdna2_act_ok = rdna2_ops.probe() and os.environ.get("SGLANG_RDNA2_ACT", "1") != "0"
+        _rdna2_act_ok = (
+            rdna2_ops.probe() and os.environ.get("SGLANG_RDNA2_ACT", "1") != "0"
+        )
     except Exception:
         _rdna2_act_ok = False
     return _rdna2_act_ok
@@ -102,9 +115,6 @@ class SiluAndMul(MultiPlatformOp):
         # RDNA2 Wave32 fused SiLU-gate kernel
         if _check_rdna2_activations():
             try:
-                from sglang.srt.layers.kernels.rdna2.activations import (
-                    silu_and_mul as rdna2_silu_and_mul,
-                )
 
                 return rdna2_silu_and_mul(x)
             except Exception:
@@ -171,9 +181,6 @@ class GeluAndMul(MultiPlatformOp):
         # RDNA2 Wave32 fused GELU-gate kernel (tanh approximate only)
         if self.approximate == "tanh" and _check_rdna2_activations():
             try:
-                from sglang.srt.layers.kernels.rdna2.activations import (
-                    gelu_and_mul as rdna2_gelu_and_mul,
-                )
 
                 return rdna2_gelu_and_mul(x)
             except Exception:

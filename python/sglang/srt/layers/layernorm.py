@@ -13,6 +13,15 @@
 # ==============================================================================
 """Fused operators for normalization layers."""
 
+try:
+    from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
+    from sglang.srt.layers.kernels.rdna2.rmsnorm import (
+        fused_add_rms_norm as rdna2_fused_add_rms_norm,
+    )
+    from sglang.srt.layers.kernels.rdna2.rmsnorm import rms_norm as rdna2_rms_norm
+except ImportError:
+    pass
+
 import logging
 import os
 from typing import Optional, Tuple, Union
@@ -77,8 +86,6 @@ def _check_rdna2_rmsnorm():
     if not _is_hip:
         return False
     try:
-        from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
-
         _rdna2_rmsnorm_ok = rdna2_ops.probe() and os.environ.get("SGLANG_RDNA2_RMSNORM", "1") != "0"
         if _rdna2_rmsnorm_ok:
             logger.info("RDNA2 Wave32 RMSNorm: enabled for forward_hip dispatch")
@@ -385,11 +392,6 @@ class RMSNorm(MultiPlatformOp):
         # ── RDNA2 Wave32 HIP kernel (7.78x faster than native) ──
         if _check_rdna2_rmsnorm():
             try:
-                from sglang.srt.layers.kernels.rdna2.rmsnorm import (
-                    fused_add_rms_norm as rdna2_fused_add_rms_norm,
-                    rms_norm as rdna2_rms_norm,
-                )
-
                 if not x.is_contiguous():
                     x = x.contiguous()
                 if residual is not None:
@@ -759,11 +761,6 @@ class GemmaRMSNorm(MultiPlatformOp):
         # ── RDNA2 Wave32 HIP kernel path ──
         if _check_rdna2_rmsnorm():
             try:
-                from sglang.srt.layers.kernels.rdna2.rmsnorm import (
-                    fused_add_rms_norm as rdna2_fused_add_rms_norm,
-                    rms_norm as rdna2_rms_norm,
-                )
-
                 w = self.weight.data + 1.0
                 if not x.is_contiguous():
                     x = x.contiguous()
