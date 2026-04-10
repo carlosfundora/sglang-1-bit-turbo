@@ -2629,6 +2629,17 @@ class ServerArgs:
                     if not self.disable_cuda_graph:
                         self.cuda_graph_bs = defaults.get("cuda_graph_bs")
 
+                    # RDNA2 bf16 crash: Triton kernels emit fdot2.bf16.bf16
+                    # intrinsic which does not exist on gfx1030. This causes
+                    # an LLVM crash during CUDA graph capture. Force fp16.
+                    if self.dtype in ("auto", "bfloat16"):
+                        prev = self.dtype
+                        self.dtype = "float16"
+                        logger.warning(
+                            f"RDNA2: overriding dtype {prev!r} → 'float16' "
+                            f"(bf16 GEMM crashes on gfx1030: missing fdot2.bf16.bf16)"
+                        )
+
                     # Wave32 tuning for triton attention
                     wave_size = get_wave_size()
                     if wave_size == 32:
@@ -2637,7 +2648,8 @@ class ServerArgs:
 
                     logger.info(
                         f"RDNA2 config: attention={self.attention_backend}, "
-                        f"wave_size={wave_size}, fp8_hw={is_fp8_hw_available()}"
+                        f"dtype={self.dtype}, wave_size={wave_size}, "
+                        f"fp8_hw={is_fp8_hw_available()}"
                     )
             except ImportError:
                 pass  # ROCm backend module not available

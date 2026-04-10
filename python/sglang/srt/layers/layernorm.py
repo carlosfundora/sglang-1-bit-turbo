@@ -662,6 +662,19 @@ class LayerNorm(MultiPlatformOp):
             return layer_norm(x, self.weight, self.bias, self.variance_epsilon).view(
                 orig_shape
             )
+        # Fast path: avoid casting large input tensors when only weights need
+        # dtype alignment.  Cache weight/bias in the input dtype so F.layer_norm
+        # runs entirely in bf16/fp16 (~2.6x faster than casting input to f32).
+        if x.dtype != self.dtype and x.dtype in (torch.bfloat16, torch.float16):
+            if not hasattr(self, "_cached_weight_dtype") or self._cached_weight_dtype != x.dtype:
+                self._cached_weight = self.weight.data.to(x.dtype) if self.elementwise_affine else None
+                self._cached_bias = self.bias.data.to(x.dtype) if self.use_bias else None
+                self._cached_weight_dtype = x.dtype
+            return F.layer_norm(
+                x, (self.hidden_size,),
+                weight=self._cached_weight, bias=self._cached_bias,
+                eps=self.variance_epsilon,
+            )
         return self.forward_native(x)
 
     def forward_npu(
