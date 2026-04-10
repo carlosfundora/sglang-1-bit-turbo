@@ -836,12 +836,24 @@ class Engine(EngineBase):
         internal_states = self.loop.run_until_complete(
             self.tokenizer_manager.get_internal_state()
         )
-        return {
+        info = {
             **dataclasses.asdict(self.tokenizer_manager.server_args),
             **self._scheduler_init_result.scheduler_infos[0],
             "internal_states": internal_states,
             "version": __version__,
         }
+        # gfxGRAPH observability — expose graph capture/replay/fallback counters
+        try:
+            import gfxgraph
+
+            if gfxgraph.is_enabled():
+                info["gfxgraph"] = {
+                    "version": gfxgraph.__version__,
+                    "stats": gfxgraph.stats(),
+                }
+        except Exception:
+            pass
+        return info
 
     def init_weights_update_group(
         self,

@@ -88,6 +88,61 @@ except ImportError:
 
 _is_hip = is_hip()
 
+# gfxGRAPH: transparent CUDA Graph parity layer for RDNA2 (gfx1030/1031).
+# Patches torch.cuda.CUDAGraph → BridgedCUDAGraph with eager fallback,
+# VRAM safety, shape bucketing, validation mode, and observability.
+# Disable with SGLANG_DISABLE_GFXGRAPH=1.  Activate validation mode with
+# GFXGRAPH=validate, debug logging with GFXGRAPH=debug.
+if (
+    _is_hip
+    and get_bool_env_var("SGLANG_RDNA2_KERNELS")
+    and not get_bool_env_var("SGLANG_DISABLE_GFXGRAPH")
+):
+    try:
+        import gfxgraph
+
+        _gfx_env = os.environ.get("GFXGRAPH", "").lower()
+        _gfx_validate = _gfx_env == "validate"
+        _gfx_debug = _gfx_env == "debug"
+
+        # Coordinate VRAM cap — leave headroom beyond SGLang's static alloc.
+        # Default 90% of total VRAM; SGLang's --mem-fraction-static controls
+        # tensor/KV cache, gfxGRAPH cap covers graph-capture scratch memory.
+        os.environ.setdefault("GFXGRAPH_VRAM_CAP", "0.90")
+
+        gfxgraph.enable(validate=_gfx_validate, debug=_gfx_debug)
+
+        _gfx_mode = "validate" if _gfx_validate else ("debug" if _gfx_debug else "normal")
+        _gfx_log = logging.getLogger(__name__)
+        _gfx_log.info(
+            "gfxGRAPH v%s enabled (mode=%s, vram_cap=%s)",
+            gfxgraph.__version__,
+            _gfx_mode,
+            os.environ.get("GFXGRAPH_VRAM_CAP", "0.90"),
+        )
+
+        # Quick health check — verify trivial graph capture works on this GPU.
+        _gfx_health = gfxgraph.health_check()
+        if _gfx_health.get("ok"):
+            _gfx_log.info(
+                "gfxGRAPH health check passed: %s (%s), VRAM %dMB free / %dMB total",
+                _gfx_health.get("gpu", "?"),
+                _gfx_health.get("rocm", "?"),
+                _gfx_health.get("vram_free_mb", 0),
+                _gfx_health.get("vram_total_mb", 0),
+            )
+        else:
+            _gfx_log.warning(
+                "gfxGRAPH health check failed: %s — graphs may not capture correctly",
+                _gfx_health.get("details", "unknown"),
+            )
+
+        del _gfx_env, _gfx_validate, _gfx_debug, _gfx_mode, _gfx_log, _gfx_health
+    except ImportError:
+        pass
+    except Exception as _e:
+        logging.getLogger(__name__).warning("gfxGRAPH enable failed: %s", _e)
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:

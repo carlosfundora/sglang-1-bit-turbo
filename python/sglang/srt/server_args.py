@@ -120,6 +120,7 @@ QUANTIZATION_CHOICES = [
     "gemlite",
     "gemlite_awq",
     "gemlite_gptq",
+    "turboquant",
 ]
 
 
