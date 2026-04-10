@@ -51,6 +51,31 @@ _is_sm100_supported = is_sm100_supported()
 _is_sm120_supported = is_sm120_supported()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
+# RDNA2 Wave32 FP8 kernel — lazy init to avoid JIT compile at import time
+_rdna2_fp8_checked = False
+_rdna2_fp8_ok = False
+
+
+def _check_rdna2_fp8():
+    """Lazy one-time probe for RDNA2 FP8 kernel availability."""
+    global _rdna2_fp8_checked, _rdna2_fp8_ok
+    if _rdna2_fp8_checked:
+        return _rdna2_fp8_ok
+    _rdna2_fp8_checked = True
+    if not _is_hip:
+        return False
+    try:
+        from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
+
+        _rdna2_fp8_ok = rdna2_ops.probe()
+        if _rdna2_fp8_ok:
+            logging.getLogger(__name__).info(
+                "RDNA2 Wave32 FP8 kernels: available for scaled_fp8_quant dispatch"
+            )
+    except Exception:
+        _rdna2_fp8_ok = False
+    return _rdna2_fp8_ok
+
 if _is_cuda:
     from sgl_kernel import sgl_per_token_quant_fp8
 
@@ -1616,6 +1641,52 @@ if _is_hip:
         output_data = torch.clamp(input / scale, fp8_min, fp8_max).to(fp8_dtype)
         output.copy_(output_data)
 
+    def _rdna2_dynamic_per_tensor_quant_fp8(output, input, scale):
+        """RDNA2 Wave32 FP8 quantize with dynamic per-tensor scaling.
+
+        Computes scale on-device, then dispatches to HIP E4M3 quant kernel.
+        Returns True on success, False to fall through to native PyTorch.
+        """
+        if not _check_rdna2_fp8():
+            return False
+        try:
+            from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
+
+            inp = input.contiguous() if not input.is_contiguous() else input
+            eps = 1e-12
+            absmax = inp.abs().max()
+            absmax = torch.clamp(absmax, min=eps)
+            scale_val = absmax / fp8_max
+            scale.view(-1).copy_(scale_val.view(-1))
+            # .item() sync acceptable — this path only fires without AITER/vLLM
+            result = rdna2_ops.fp8_quantize(inp, scale_val.item())
+            if result is not None:
+                output[:input.shape[0]].copy_(result.view(fp8_dtype))
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _rdna2_static_quant_fp8(output, input, scale):
+        """RDNA2 Wave32 FP8 quantize with static scaling.
+
+        Returns True on success, False to fall through to native PyTorch.
+        """
+        if not _check_rdna2_fp8():
+            return False
+        try:
+            from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
+
+            inp = input.contiguous() if not input.is_contiguous() else input
+            # .item() sync acceptable — this path only fires without AITER/vLLM
+            result = rdna2_ops.fp8_quantize(inp, scale.item())
+            if result is not None:
+                output[:input.shape[0]].copy_(result.view(fp8_dtype))
+                return True
+        except Exception:
+            pass
+        return False
+
     def scaled_fp8_quant(
         input: torch.Tensor,
         scale: Optional[torch.Tensor] = None,
@@ -1648,7 +1719,7 @@ if _is_hip:
                     dynamic_per_tensor_quant(output, input, scale)
                 elif _has_vllm:
                     torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
-                else:
+                elif not _rdna2_dynamic_per_tensor_quant_fp8(output, input, scale):
                     _native_dynamic_per_tensor_quant_fp8(output, input, scale)
         else:
             # Static scaling
@@ -1659,7 +1730,7 @@ if _is_hip:
                 static_per_tensor_quant(output, input, scale)
             elif _has_vllm:
                 torch.ops._C.static_scaled_fp8_quant(output, input, scale)
-            else:
+            elif not _rdna2_static_quant_fp8(output, input, scale):
                 _native_static_quant_fp8(output, input, scale)
 
         return output, scale

@@ -99,6 +99,22 @@ def is_layer_skipped(
 def per_tensor_dequantize(
     tensor: torch.Tensor, inv_scale: Union[float, torch.Tensor]
 ) -> torch.Tensor:
+    # RDNA2 Wave32 FP8 dequant — LUT-based E4M3 decode, faster than cast on RDNA2.
+    # Hot path under tree-based speculative decoding (per-branch per-layer dequant).
+    # Only standard E4M3 — NOT fnuz (MI300 uses different bit encoding).
+    if tensor.is_cuda and tensor.dtype == torch.float8_e4m3fn:
+        try:
+            from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
+
+            t = tensor.contiguous() if not tensor.is_contiguous() else tensor
+            result = rdna2_ops.fp8_dequantize(
+                t.view(torch.uint8),
+                float(inv_scale) if isinstance(inv_scale, (int, float)) else inv_scale.item(),
+            )
+            if result is not None:
+                return result
+        except Exception:
+            pass
     fake_qweight = tensor.to(torch.float16)
     dq_weight = fake_qweight * inv_scale
     return dq_weight

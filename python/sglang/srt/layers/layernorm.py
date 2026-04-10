@@ -14,6 +14,7 @@
 """Fused operators for normalization layers."""
 
 import logging
+import os
 from typing import Optional, Tuple, Union
 
 import torch
@@ -84,6 +85,30 @@ def _check_rdna2_rmsnorm():
     except Exception:
         _rdna2_rmsnorm_ok = False
     return _rdna2_rmsnorm_ok
+
+
+# TransformerEngine norm — opt-in for MI300+ GPUs without AITER/vLLM
+_te_norm_checked = False
+_te_norm_available = False
+_te_norms_enabled = get_bool_env_var("SGLANG_USE_TE_NORMS") and _is_hip
+
+
+def _check_te_norm():
+    """Lazy check for TransformerEngine norm availability (opt-in via SGLANG_USE_TE_NORMS=1)."""
+    global _te_norm_checked, _te_norm_available
+    if _te_norm_checked:
+        return _te_norm_available
+    _te_norm_checked = True
+    if not _te_norms_enabled:
+        return False
+    try:
+        import transformer_engine.pytorch as te  # noqa: F401
+
+        _te_norm_available = True
+        logger.info("TransformerEngine norms: available (SGLANG_USE_TE_NORMS=1)")
+    except ImportError:
+        _te_norm_available = False
+    return _te_norm_available
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +261,42 @@ class RMSNorm(MultiPlatformOp):
                 self._forward_method = self.forward_hip
             else:
                 self._forward_method = self.forward_aiter
+        # TE adapter: lazily created on first forward_hip call (None=unchecked, False=failed)
+        self._te_norm = None
+
+    def _get_te_norm(self):
+        """Get or create cached TransformerEngine RMSNorm with shared weight.
+
+        Returns the TE module on success, None on failure. Uses False sentinel
+        to avoid retrying after a failed init.
+        """
+        if self._te_norm is not None:
+            return self._te_norm if self._te_norm is not False else None
+        if not _check_te_norm() or not self.has_weight:
+            self._te_norm = False
+            return None
+        try:
+            import transformer_engine.pytorch as te
+
+            te_mod = te.RMSNorm(
+                self.hidden_size, eps=self.variance_epsilon
+            ).to(device=self.weight.device, dtype=self.weight.dtype)
+            # Share weight: TE uses our parameter directly, no duplication.
+            # Note: TE's PyTorch forward accesses self.weight at call time (standard
+            # nn.Module attribute lookup), so this post-init assignment is safe.
+            # If a future TE version caches the pointer at __init__, switch to
+            # te.functional.rmsnorm_fwd() which accepts weight as an argument.
+            te_mod.weight = self.weight
+            self._te_norm = te_mod
+            logger.info(
+                f"TE RMSNorm adapter created (hidden={self.hidden_size}, "
+                f"device={self.weight.device})"
+            )
+            return self._te_norm
+        except Exception as e:
+            logger.debug(f"TE RMSNorm init failed: {e}")
+            self._te_norm = False
+            return None
 
     def forward_cuda(
         self,
@@ -345,6 +406,19 @@ class RMSNorm(MultiPlatformOp):
                 logger.debug(f"RDNA2 RMSNorm dispatch failed, falling back: {e}")
 
         # ── Existing vllm/aiter/triton chain ──
+        # When TE norms explicitly opted in, try TE first (non-residual only).
+        # Otherwise TE falls through to vLLM/aiter/triton which always succeed
+        # on functional ROCm installs, making the TE path unreachable.
+        if _te_norms_enabled and residual is None:
+            te_norm = self._get_te_norm()
+            if te_norm is not None:
+                try:
+                    if not x.is_contiguous():
+                        x = x.contiguous()
+                    return te_norm(x)
+                except Exception as e:
+                    logger.debug(f"TE RMSNorm forward failed, falling through: {e}")
+
         if not _has_vllm_rms_norm:
             return self.forward_native(x, residual, post_residual_addition)
 
@@ -492,6 +566,43 @@ class LayerNorm(MultiPlatformOp):
 
         self.bias = nn.Parameter(torch.zeros(hidden_size, dtype=self.dtype))
         self.weight = nn.Parameter(torch.ones(hidden_size, dtype=self.dtype))
+        # TE adapter: lazily created on first forward_hip call (None=unchecked, False=failed)
+        self._te_norm = None
+
+    def _get_te_norm(self):
+        """Get or create cached TransformerEngine LayerNorm with shared weight/bias.
+
+        Returns the TE module on success, None on failure. Uses False sentinel
+        to avoid retrying after a failed init.
+        """
+        if self._te_norm is not None:
+            return self._te_norm if self._te_norm is not False else None
+        if not _check_te_norm():
+            self._te_norm = False
+            return None
+        try:
+            import transformer_engine.pytorch as te
+
+            te_mod = te.LayerNorm(
+                self.hidden_size, eps=self.variance_epsilon
+            ).to(device=self.weight.device, dtype=self.weight.dtype)
+            # Share parameters: TE uses ours directly, no duplication.
+            # Note: TE's PyTorch forward accesses self.weight at call time (standard
+            # nn.Module attribute lookup), so post-init assignment is safe.
+            if self.elementwise_affine:
+                te_mod.weight = self.weight
+            if self.use_bias:
+                te_mod.bias = self.bias
+            self._te_norm = te_mod
+            logger.info(
+                f"TE LayerNorm adapter created (hidden={self.hidden_size}, "
+                f"device={self.weight.device})"
+            )
+            return self._te_norm
+        except Exception as e:
+            logger.debug(f"TE LayerNorm init failed: {e}")
+            self._te_norm = False
+            return None
 
     def forward_cuda(
         self,
@@ -526,6 +637,17 @@ class LayerNorm(MultiPlatformOp):
         self,
         x: torch.Tensor,
     ) -> torch.Tensor:
+        # TE fused LayerNorm for MI300+ (opt-in via SGLANG_USE_TE_NORMS=1).
+        # Checked first when explicitly enabled; falls through on failure.
+        if _te_norms_enabled:
+            te_norm = self._get_te_norm()
+            if te_norm is not None:
+                try:
+                    if not x.is_contiguous():
+                        x = x.contiguous()
+                    return te_norm(x)
+                except Exception as e:
+                    logger.debug(f"TE LayerNorm forward failed, using native: {e}")
         return self.forward_native(x)
 
     def forward_npu(

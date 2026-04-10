@@ -50,6 +50,7 @@ __device__ __constant__ float e4m3_lut[256];
 // E4M3: 1 sign + 4 exponent + 3 mantissa, bias=7, no inf/nan
 static float host_e4m3_lut[256];
 static bool lut_initialized = false;
+static bool lut_uploaded = false;
 
 void init_e4m3_lut() {
     if (lut_initialized) return;
@@ -72,6 +73,15 @@ void init_e4m3_lut() {
         host_e4m3_lut[i] = sign ? -val : val;
     }
     lut_initialized = true;
+}
+
+// Upload LUT to device constant memory once (avoids null-stream sync on every call)
+void ensure_lut_uploaded() {
+    init_e4m3_lut();
+    if (lut_uploaded) return;
+    (void)hipMemcpyToSymbol(HIP_SYMBOL(rdna2::e4m3_lut), rdna2::host_e4m3_lut,
+                      sizeof(float) * 256);
+    lut_uploaded = true;
 }
 
 // ──── Per-tensor dequant: int8 → fp16 ────
@@ -166,10 +176,8 @@ void rdna2_fp8_dequant(
     dim3 block(rdna2::BLOCK_DIM);
     auto stream = at::hip::getCurrentHIPStream();
 
-    // Upload LUT to device constant memory
-    rdna2::init_e4m3_lut();
-    (void)hipMemcpyToSymbol(HIP_SYMBOL(rdna2::e4m3_lut), rdna2::host_e4m3_lut,
-                      sizeof(float) * 256);
+    // Upload LUT to device constant memory (once)
+    rdna2::ensure_lut_uploaded();
 
     if (output.scalar_type() == at::ScalarType::Half) {
         rdna2::fp8_dequant_per_tensor<<<grid, block, 0, stream>>>(
@@ -195,9 +203,8 @@ void rdna2_fp8_dequant_blocked(
     dim3 block(rdna2::BLOCK_DIM);
     auto stream = at::hip::getCurrentHIPStream();
 
-    rdna2::init_e4m3_lut();
-    (void)hipMemcpyToSymbol(HIP_SYMBOL(rdna2::e4m3_lut), rdna2::host_e4m3_lut,
-                      sizeof(float) * 256);
+    // Upload LUT to device constant memory (once)
+    rdna2::ensure_lut_uploaded();
 
     if (output.scalar_type() == at::ScalarType::Half) {
         rdna2::fp8_dequant_per_block<<<grid, block, 0, stream>>>(
