@@ -22,7 +22,7 @@ from sglang.srt.layers.dp_attention import (
     is_dp_attention_enabled,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
-from sglang.srt.utils import is_gfx95_supported
+from sglang.srt.utils import is_gfx95_supported, is_hip
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
@@ -2379,7 +2379,6 @@ class AiterAttnBackend(AttentionBackend):
 
             # RDNA: Route normal extend through Triton extend_attention_fwd.
             # CK-based mha_batch_prefill_func is not supported on RDNA GPUs.
-            # Uses the same kernel + metadata format as spec decode extend above.
             if self.is_rdna and self.kv_cache_dtype != fp8_dtype:
                 if layer.qk_head_dim != layer.v_head_dim:
                     o = q.new_empty(
@@ -2388,13 +2387,54 @@ class AiterAttnBackend(AttentionBackend):
                 else:
                     o = torch.empty_like(q)
 
-                bs0 = forward_batch.batch_size + 1
+                bs = forward_batch.batch_size
+                bs0 = bs + 1
                 sliding_window = -1
                 if (
                     layer.sliding_window_size is not None
                     and layer.sliding_window_size > -1
                 ):
                     sliding_window = layer.sliding_window_size
+
+                # Build qo_indptr from extend_seq_lens (NEW query tokens per
+                # request), matching the Triton backend.
+                qo_indptr = self.qo_indptr
+                qo_indptr[1 : bs0] = torch.cumsum(
+                    forward_batch.extend_seq_lens, dim=0
+                )
+                qo_indptr = qo_indptr[:bs0]
+
+                # Build kv_indptr and kv_indices from extend_PREFIX_lens.
+                # extend_attention_fwd treats kv_indptr as the PREFIX portion
+                # only (cached KV from prior extends); new tokens' K,V come
+                # from the k,v parameters.  The AITER indices_updater_prefill
+                # stores TOTAL seq lens in kv_indptr — passing those caused
+                # the kernel to read garbage "prefix" tokens from the cache.
+                extend_prefix_lens = forward_batch.extend_prefix_lens
+                if is_hip():
+                    extend_prefix_lens = torch.tensor(
+                        forward_batch.extend_prefix_lens_cpu,
+                        dtype=torch.int32,
+                        device="cpu",
+                    )
+                kv_indptr = self.kv_indptr
+                kv_indptr[1 : bs0] = torch.cumsum(extend_prefix_lens, dim=0)
+                kv_indptr = kv_indptr[:bs0]
+
+                total_prefix = sum(forward_batch.extend_prefix_lens_cpu)
+                kv_indices = torch.empty(
+                    total_prefix, dtype=torch.int64, device=self.device
+                )
+                if total_prefix > 0:
+                    create_flashinfer_kv_indices_triton[(bs,)](
+                        self.req_to_token,
+                        forward_batch.req_pool_indices,
+                        extend_prefix_lens,
+                        kv_indptr,
+                        None,
+                        kv_indices,
+                        self.req_to_token.stride(0),
+                    )
 
                 self.extend_attention_fwd(
                     q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
@@ -2403,13 +2443,13 @@ class AiterAttnBackend(AttentionBackend):
                     o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
                     forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id),
                     forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id),
-                    self.qo_indptr[:bs0],
-                    self.forward_metadata.kv_indptr[:bs0],
-                    self.forward_metadata.kv_indices,
-                    None,  # custom_mask (normal extend, no spec decode masks)
+                    qo_indptr,
+                    kv_indptr,
+                    kv_indices,
+                    None,  # custom_mask
                     True,  # causal
                     None,  # mask_indptr
-                    self.forward_metadata.max_q_len,
+                    max(forward_batch.extend_seq_lens_cpu),
                     1.0,  # k_scale (non-FP8)
                     1.0,  # v_scale (non-FP8)
                     layer.scaling,
