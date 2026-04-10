@@ -106,12 +106,14 @@ if _is_cuda or _is_xpu:
     )
 _has_vllm_rms_norm = False
 _rms_norm_is_inplace = False  # True = vllm 4-arg API, False = aiter/triton 3-arg API
-if _use_aiter:
+if _use_aiter and not _is_rdna_for_layernorm:
+    # RDNA GPUs: skip AITER CK-based rmsnorm import — JIT compilation fails on gfx10xx.
+    # RDNA path uses forward_hip (RDNA2 HIP kernels) or Triton fallback instead.
     from aiter import rmsnorm2d_fwd as rms_norm
     from aiter import rmsnorm2d_fwd_with_add as fused_add_rms_norm
 
-    _has_vllm_rms_norm = True  # aiter provides the rms_norm functions
-    _rms_norm_is_inplace = False  # aiter: rms_norm(x, w, eps) -> out
+    _has_vllm_rms_norm = True
+    _rms_norm_is_inplace = False
 elif _is_hip:
     try:
         from vllm._custom_ops import fused_add_rms_norm, rms_norm

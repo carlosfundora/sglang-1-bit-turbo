@@ -329,42 +329,40 @@ def _fwd_grouped_kernel_stage1(
     e_sum = tl.zeros([BLOCK_H], dtype=tl.float32)
     acc = tl.zeros([BLOCK_H, BLOCK_DV], dtype=tl.float32)
 
+    # Hoist loop-invariant base offsets
+    base_offs_k = cur_kv_head * stride_buf_kh + offs_d[:, None]
+    if BLOCK_DPE > 0:
+        base_offs_kpe = cur_kv_head * stride_buf_kh + offs_dpe[:, None]
+    base_offs_v = cur_kv_head * stride_buf_vh + offs_dv[None, :]
+
     if split_kv_end > split_kv_start:
         q = tl.load(Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0)
         if BLOCK_DPE > 0:
             qpe = tl.load(
                 Q + off_qpe, mask=(mask_h[:, None]) & (mask_dpe[None, :]), other=0.0
             )
-        for start_n in range(split_kv_start, split_kv_end, BLOCK_N):
+        for start_n in tl.range(split_kv_start, split_kv_end, BLOCK_N):
             offs_n = start_n + tl.arange(0, BLOCK_N)
             kv_loc = tl.load(
                 kv_indices + cur_batch_kv_start_idx + offs_n,
                 mask=offs_n < split_kv_end,
                 other=0,
             )
-            offs_buf_k = (
-                kv_loc[None, :] * stride_buf_kbs
-                + cur_kv_head * stride_buf_kh
-                + offs_d[:, None]
-            )
+            offs_buf_k = kv_loc[None, :] * stride_buf_kbs + base_offs_k
             k = tl.load(
                 K_Buffer + offs_buf_k,
                 mask=(offs_n[None, :] < split_kv_end) & (mask_d[:, None]),
                 other=0.0,
             )
-            qk = tl.dot(q, k.to(q.dtype))
+            qk = tl.dot(q.to(k.dtype), k)
             if BLOCK_DPE > 0:
-                offs_buf_kpe = (
-                    kv_loc[None, :] * stride_buf_kbs
-                    + cur_kv_head * stride_buf_kh
-                    + offs_dpe[:, None]
-                )
+                offs_buf_kpe = kv_loc[None, :] * stride_buf_kbs + base_offs_kpe
                 kpe = tl.load(
                     K_Buffer + offs_buf_kpe,
                     mask=(offs_n[None, :] < split_kv_end) & (mask_dpe[:, None]),
                     other=0.0,
                 )
-                qk += tl.dot(qpe, kpe.to(qpe.dtype))
+                qk += tl.dot(qpe.to(kpe.dtype), kpe)
             qk *= sm_scale_withk
 
             if logit_cap > 0:
@@ -377,11 +375,7 @@ def _fwd_grouped_kernel_stage1(
                 mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf")
             )
 
-            offs_buf_v = (
-                kv_loc[:, None] * stride_buf_vbs
-                + cur_kv_head * stride_buf_vh
-                + offs_dv[None, :]
-            )
+            offs_buf_v = kv_loc[:, None] * stride_buf_vbs + base_offs_v
             v = tl.load(
                 V_Buffer + offs_buf_v,
                 mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
@@ -479,8 +473,8 @@ def _decode_grouped_att_m_fwd(
             pass
         if "gfx103" in _gcn:
             # RDNA2 (gfx1030): Wave32, no matrix instructions
-            extra_kargs = {"waves_per_eu": 2}
-            _decode_num_warps = 2
+            # Keep same warps/block config as CDNA; only exclude unsupported matrix hints
+            extra_kargs = {"waves_per_eu": 1}
         else:
             # CDNA (MI-series): Wave64, matrix instructions available
             extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
@@ -624,7 +618,6 @@ def _decode_softmax_reducev_fwd(
         if "gfx103" in _gcn2:
             # RDNA2 (gfx1030): Wave32, no matrix instructions
             extra_kargs = {"waves_per_eu": 4}
-            _stage2_warps = 2
         else:
             extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
@@ -25,6 +26,7 @@ from sglang.srt.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
 _hip_diag = is_hip() and os.environ.get("HIP_DIAG_ENABLE", "0") == "1"
 
 if TYPE_CHECKING:
@@ -270,7 +272,6 @@ class TritonAttnBackend(AttentionBackend):
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         """Init auxiliary variables for triton attention backend."""
-
         bs = forward_batch.batch_size
         kv_indptr = self.kv_indptr
         window_kv_indptr = self.window_kv_indptr
@@ -411,12 +412,6 @@ class TritonAttnBackend(AttentionBackend):
             attn_lse = None
         else:
             extend_prefix_lens = forward_batch.extend_prefix_lens
-            if is_hip():
-                extend_prefix_lens = torch.tensor(
-                    forward_batch.extend_prefix_lens_cpu,
-                    dtype=torch.int32,
-                    device="cpu",
-                )
             kv_indptr = _fill_prefix_sum_buffer(kv_indptr, extend_prefix_lens, bs)
             kv_indices = torch.empty(
                 sum(forward_batch.extend_prefix_lens_cpu),

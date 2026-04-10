@@ -204,8 +204,10 @@ class _CreateFlashinferKvIndicesLauncher:
         else:
             bs = int(grid)
 
-        if is_hip():
-
+        if is_hip() and os.getenv("SGLANG_HIP_KV_CPU_FALLBACK", "0") == "1":
+            # CPU fallback: copies req_to_token to CPU, loops in Python, copies
+            # back.  Extremely slow (~240 ms per decode step) — only use for
+            # debugging correctness.  The Triton kernel works fine on HIP/ROCm.
             def launch(
                 req_to_token_ptr,
                 req_pool_indices_ptr,

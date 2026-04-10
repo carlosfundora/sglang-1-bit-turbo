@@ -61,29 +61,8 @@ def _get_block_sizes_for_extend_attention(Lq: int, Lv: int):
 
     # Determine BLOCK_M, BLOCK_N, and num_warps based on hardware
     if _is_hip:
-        # Detect RDNA2 (gfx1030 family) — Wave32, smaller LDS, no matrix cores
-        _gcn_name = ""
-        try:
-            _gcn_name = torch.cuda.get_device_properties(0).gcnArchName
-        except Exception:
-            pass
-
-        if "gfx103" in _gcn_name:
-            # RDNA2 (gfx1030): Wave32 = half threads per warp
-            # Smaller blocks to fit in 64KB LDS, fewer warps for Wave32
-            if Lq <= 128:
-                BLOCK_M, BLOCK_N = (32, 64)
-                num_warps = 2  # Wave32: 2 warps = 64 threads
-            elif Lq <= 256:
-                BLOCK_M, BLOCK_N = (32, 32)
-                num_warps = 2
-            else:
-                BLOCK_M, BLOCK_N = (16, 32)
-                num_warps = 2
-        else:
-            # CDNA (MI-series): Wave64, large LDS, matrix cores
-            BLOCK_M, BLOCK_N = (64, 64)
-            num_warps = 4
+        BLOCK_M, BLOCK_N = (64, 64)
+        num_warps = 4
     else:
         if _is_cuda and CUDA_CAPABILITY[0] == 12:
             # sm120 workstation Blackwell architecture (RTX Pro 6000) has a much smaller shared memory size (100K)

@@ -2411,12 +2411,6 @@ class AiterAttnBackend(AttentionBackend):
                 # stores TOTAL seq lens in kv_indptr — passing those caused
                 # the kernel to read garbage "prefix" tokens from the cache.
                 extend_prefix_lens = forward_batch.extend_prefix_lens
-                if is_hip():
-                    extend_prefix_lens = torch.tensor(
-                        forward_batch.extend_prefix_lens_cpu,
-                        dtype=torch.int32,
-                        device="cpu",
-                    )
                 kv_indptr = self.kv_indptr
                 kv_indptr[1 : bs0] = torch.cumsum(extend_prefix_lens, dim=0)
                 kv_indptr = kv_indptr[:bs0]
