@@ -474,18 +474,22 @@ class RotaryEmbedding(MultiPlatformOp):
                     if offsets is not None:
                         positions = positions + offsets
                     positions = positions.flatten()
-                    cos_sin = self.cos_sin_cache.to(query.device, dtype=query.dtype)
-                    # chunk() produces non-contiguous views — the HIP kernel
-                    # indexes with pos * embed_dim assuming contiguous layout,
-                    # so we MUST materialize contiguous copies.
-                    cos, sin = cos_sin.chunk(2, dim=-1)
-                    cos = cos.contiguous()
-                    sin = sin.contiguous()
+                    # Cache contiguous cos/sin to avoid per-step allocation.
+                    # cos_sin_cache is [max_seq, rotary_dim] and doesn't change
+                    # between calls — only `positions` selects different rows.
+                    _key = (query.device, query.dtype)
+                    if not hasattr(self, "_rdna2_cos_cache") or getattr(self, "_rdna2_cache_key", None) != _key:
+                        cos_sin = self.cos_sin_cache.to(query.device, dtype=query.dtype)
+                        cos, sin = cos_sin.chunk(2, dim=-1)
+                        self._rdna2_cos_cache = cos.contiguous()
+                        self._rdna2_sin_cache = sin.contiguous()
+                        self._rdna2_cache_key = _key
                     num_heads = query.shape[-1] // self.head_size
                     num_kv_heads = key.shape[-1] // self.head_size
                     result = rdna2_ops.apply_rotary_pos_emb(
-                        query, key, cos, sin, positions,
-                        self.head_size, num_heads, num_kv_heads, self.rotary_dim,
+                        query, key, self._rdna2_cos_cache, self._rdna2_sin_cache,
+                        positions, self.head_size, num_heads, num_kv_heads,
+                        self.rotary_dim,
                     )
                     if result is not None:
                         return result
