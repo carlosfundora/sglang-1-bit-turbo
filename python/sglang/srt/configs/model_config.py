@@ -917,6 +917,9 @@ class ModelConfig:
             "mxfp4",
             "auto-round",
             "quark_int4fp8_moe",
+            "gemlite",
+            "gemlite_awq",
+            "gemlite_gptq",
         ]
         optimized_quantization_methods = [
             "fp8",

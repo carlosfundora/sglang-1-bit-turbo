@@ -36,6 +36,17 @@ from sglang.srt.layers.quantization.petit import PetitNvFp4Config
 from sglang.srt.layers.quantization.qoq import QoQConfig
 from sglang.srt.layers.quantization.quark.quark import QuarkConfig
 from sglang.srt.layers.quantization.turboquant import TurboquantConfig
+
+try:
+    from sglang.srt.layers.quantization.gemlite_quant import (
+        GemLiteConfig,
+        GemLiteAWQConfig,
+        GemLiteGPTQConfig,
+    )
+except ImportError:
+    GemLiteConfig = None
+    GemLiteAWQConfig = None
+    GemLiteGPTQConfig = None
 from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config
 from sglang.srt.layers.quantization.w8a8_fp8 import W8A8Fp8Config
 from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8Config
@@ -89,6 +100,13 @@ BASE_QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "auto-round": AutoRoundConfig,
     "turboquant": TurboquantConfig,
 }
+
+if GemLiteConfig is not None:
+    BASE_QUANTIZATION_METHODS["gemlite"] = GemLiteConfig
+    BASE_QUANTIZATION_METHODS["gemlite_awq"] = GemLiteAWQConfig
+    BASE_QUANTIZATION_METHODS["gemlite_gptq"] = GemLiteGPTQConfig
+    from sglang.srt.server_args import add_quantization_method_choices
+    add_quantization_method_choices(["gemlite", "gemlite_awq", "gemlite_gptq"])
 
 if CompressedTensorsConfig is not None:
     BASE_QUANTIZATION_METHODS["compressed-tensors"] = CompressedTensorsConfig

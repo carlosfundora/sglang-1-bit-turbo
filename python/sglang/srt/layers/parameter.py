@@ -464,6 +464,11 @@ class PackedColumnParameter(_ColumnvLLMParameter):
         return self._packed_factor
 
     @property
+    def pack_factor(self):
+        """Alias — linear.py v1 weight_loader uses this name."""
+        return self._packed_factor
+
+    @property
     def marlin_tile_size(self):
         return self._marlin_tile_size
 
@@ -505,6 +510,11 @@ class PackedvLLMParameter(ModelWeightParameter):
 
     @property
     def packed_factor(self):
+        return self._packed_factor
+
+    @property
+    def pack_factor(self):
+        """Alias — linear.py v1 weight_loader uses this name."""
         return self._packed_factor
 
     @property

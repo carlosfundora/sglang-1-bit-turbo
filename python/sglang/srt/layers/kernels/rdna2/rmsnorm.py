@@ -66,6 +66,13 @@ struct __align__(16) vec8_t {
         return float(x)+float(y)+float(z)+float(w)+
                float(u)+float(v)+float(s)+float(t);
     }
+    // sum of squares in float32 to avoid half-precision overflow
+    // (half max 65504; squaring values >255 overflows to inf)
+    __device__ float sum_sq() const {
+        float fx=float(x), fy=float(y), fz=float(z), fw=float(w);
+        float fu=float(u), fv=float(v), fs=float(s), ft=float(t);
+        return fx*fx + fy*fy + fz*fz + fw*fw + fu*fu + fv*fv + fs*fs + ft*ft;
+    }
 };
 
 // ──── Wave32-tuned RMSNorm ────
@@ -93,7 +100,7 @@ __global__ void rms_norm_wave32(
     float local_ss = 0.0f;
     for (int i = threadIdx.x; i < vec_hidden; i += BLOCK_DIM) {
         vec8_t<scalar_t> v = vec_in[blockIdx.x * vec_hidden + i];
-        local_ss += (v * v).sum();
+        local_ss += v.sum_sq();
     }
 
     // Phase 2: Wave32-efficient block reduce
@@ -151,7 +158,7 @@ __global__ void fused_add_rms_norm_wave32(
         vec8_t<scalar_t> res_v = vec_res[idx];
         vec8_t<scalar_t> sum_v = inp_v + res_v;
         vec_res[idx] = sum_v;  // write residual
-        local_ss += (sum_v * sum_v).sum();
+        local_ss += sum_v.sum_sq();
     }
 
     // Phase 2: Wave32 reduce (same as above)
