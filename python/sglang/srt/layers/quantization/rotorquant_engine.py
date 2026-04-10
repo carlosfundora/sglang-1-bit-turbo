@@ -528,6 +528,443 @@ try:
             f1, mask=g_mask & ((d0 + 1) < emb_dim),
         )
 
+    # -------------------------------------------------------------------
+    # Fused PlanarQuant 4-bit: rotate → quantize → pack in one kernel
+    # -------------------------------------------------------------------
+
+    @triton.jit
+    def _fused_planar4_quant_pack_kernel(
+        input_ptr, packed_ptr,
+        rot2_ptr, centroids_ptr,
+        batch_size, emb_dim,
+        n_groups: tl.constexpr,
+        n_levels: tl.constexpr,
+        stride_in_b, stride_in_d,
+        stride_pack_b, stride_pack_g,
+        BLOCK_G: tl.constexpr,
+    ):
+        """Fused: Givens rotate → nearest centroid → 4-bit pack.
+        Each Givens group (2 dims) → 1 packed byte (lo|hi<<4)."""
+        pid_b = tl.program_id(0)
+        pid_g = tl.program_id(1)
+
+        g_offs = pid_g * BLOCK_G + tl.arange(0, BLOCK_G)
+        g_mask = g_offs < n_groups
+
+        cos_t = tl.load(rot2_ptr + g_offs * 2 + 0, mask=g_mask, other=1.0)
+        sin_t = tl.load(rot2_ptr + g_offs * 2 + 1, mask=g_mask, other=0.0)
+
+        d0 = g_offs * 2
+        v0 = tl.load(input_ptr + pid_b * stride_in_b + d0 * stride_in_d,
+                      mask=g_mask & (d0 < emb_dim), other=0.0)
+        v1 = tl.load(input_ptr + pid_b * stride_in_b + (d0 + 1) * stride_in_d,
+                      mask=g_mask & ((d0 + 1) < emb_dim), other=0.0)
+
+        r0 = cos_t * v0 - sin_t * v1
+        r1 = sin_t * v0 + cos_t * v1
+
+        best_idx0 = tl.zeros_like(r0).to(tl.int32)
+        best_dist0 = tl.abs(r0 - tl.load(centroids_ptr))
+        for i in tl.static_range(1, n_levels):
+            c = tl.load(centroids_ptr + i)
+            dd = tl.abs(r0 - c)
+            mask = dd < best_dist0
+            best_dist0 = tl.where(mask, dd, best_dist0)
+            best_idx0 = tl.where(mask, i, best_idx0)
+
+        best_idx1 = tl.zeros_like(r1).to(tl.int32)
+        best_dist1 = tl.abs(r1 - tl.load(centroids_ptr))
+        for i in tl.static_range(1, n_levels):
+            c = tl.load(centroids_ptr + i)
+            dd = tl.abs(r1 - c)
+            mask = dd < best_dist1
+            best_dist1 = tl.where(mask, dd, best_dist1)
+            best_idx1 = tl.where(mask, i, best_idx1)
+
+        packed_byte = (best_idx0 & 0x0F) | ((best_idx1 & 0x0F) << 4)
+
+        tl.store(packed_ptr + pid_b * stride_pack_b + g_offs * stride_pack_g,
+                 packed_byte.to(tl.int8), mask=g_mask)
+
+    # -------------------------------------------------------------------
+    # Fused PlanarQuant 4-bit: unpack → dequant → inverse rotate → rescale
+    # -------------------------------------------------------------------
+
+    @triton.jit
+    def _fused_planar4_unpack_dequant_kernel(
+        packed_ptr, output_ptr,
+        rot2_ptr, centroids_ptr, norms_ptr,
+        batch_size, emb_dim,
+        n_groups: tl.constexpr,
+        stride_pack_b, stride_pack_g,
+        stride_out_b, stride_out_d,
+        BLOCK_G: tl.constexpr,
+    ):
+        """Fused: unpack 4-bit → centroid lookup → inv Givens → rescale → fp16."""
+        pid_b = tl.program_id(0)
+        pid_g = tl.program_id(1)
+
+        g_offs = pid_g * BLOCK_G + tl.arange(0, BLOCK_G)
+        g_mask = g_offs < n_groups
+
+        packed = tl.load(packed_ptr + pid_b * stride_pack_b + g_offs * stride_pack_g,
+                         mask=g_mask, other=0).to(tl.int32)
+        idx0 = packed & 0x0F
+        idx1 = (packed >> 4) & 0x0F
+
+        q0 = tl.load(centroids_ptr + idx0, mask=g_mask, other=0.0)
+        q1 = tl.load(centroids_ptr + idx1, mask=g_mask, other=0.0)
+
+        cos_t = tl.load(rot2_ptr + g_offs * 2 + 0, mask=g_mask, other=1.0)
+        sin_t = tl.load(rot2_ptr + g_offs * 2 + 1, mask=g_mask, other=0.0)
+
+        f0 = cos_t * q0 + sin_t * q1
+        f1 = -sin_t * q0 + cos_t * q1
+
+        norm = tl.load(norms_ptr + pid_b).to(tl.float32)
+        f0 = f0 * norm
+        f1 = f1 * norm
+
+        d0 = g_offs * 2
+        tl.store(output_ptr + pid_b * stride_out_b + d0 * stride_out_d,
+                 f0.to(tl.float16), mask=g_mask & (d0 < emb_dim))
+        tl.store(output_ptr + pid_b * stride_out_b + (d0 + 1) * stride_out_d,
+                 f1.to(tl.float16), mask=g_mask & ((d0 + 1) < emb_dim))
+
+    # -------------------------------------------------------------------
+    # IsoQuant: quaternion sandwich → quantize (non-fused, for 3-bit path)
+    # -------------------------------------------------------------------
+
+    @triton.jit
+    def _iso_quantize_kernel(
+        input_ptr, indices_ptr,
+        qL_ptr, qR_ptr, centroids_ptr,
+        batch_size, d_padded,
+        n_groups: tl.constexpr,
+        n_levels: tl.constexpr,
+        stride_in_b, stride_in_d,
+        stride_idx_b, stride_idx_d,
+        BLOCK_G: tl.constexpr,
+    ):
+        """Quaternion sandwich q_L * v * conj(q_R) → nearest centroid."""
+        pid_b = tl.program_id(0)
+        pid_g = tl.program_id(1)
+
+        g_offs = pid_g * BLOCK_G + tl.arange(0, BLOCK_G)
+        g_mask = g_offs < n_groups
+
+        d0 = g_offs * 4
+        v0 = tl.load(input_ptr + pid_b * stride_in_b + d0 * stride_in_d,
+                      mask=g_mask, other=0.0)
+        v1 = tl.load(input_ptr + pid_b * stride_in_b + (d0 + 1) * stride_in_d,
+                      mask=g_mask, other=0.0)
+        v2 = tl.load(input_ptr + pid_b * stride_in_b + (d0 + 2) * stride_in_d,
+                      mask=g_mask, other=0.0)
+        v3 = tl.load(input_ptr + pid_b * stride_in_b + (d0 + 3) * stride_in_d,
+                      mask=g_mask, other=0.0)
+
+        aw = tl.load(qL_ptr + g_offs * 4 + 0, mask=g_mask, other=1.0)
+        ax = tl.load(qL_ptr + g_offs * 4 + 1, mask=g_mask, other=0.0)
+        ay = tl.load(qL_ptr + g_offs * 4 + 2, mask=g_mask, other=0.0)
+        az = tl.load(qL_ptr + g_offs * 4 + 3, mask=g_mask, other=0.0)
+
+        bw = tl.load(qR_ptr + g_offs * 4 + 0, mask=g_mask, other=1.0)
+        bx = tl.load(qR_ptr + g_offs * 4 + 1, mask=g_mask, other=0.0)
+        by = tl.load(qR_ptr + g_offs * 4 + 2, mask=g_mask, other=0.0)
+        bz = tl.load(qR_ptr + g_offs * 4 + 3, mask=g_mask, other=0.0)
+
+        # Hamilton product: temp = q_L * v
+        tw = aw * v0 - ax * v1 - ay * v2 - az * v3
+        tx = aw * v1 + ax * v0 + ay * v3 - az * v2
+        ty = aw * v2 - ax * v3 + ay * v0 + az * v1
+        tz = aw * v3 + ax * v2 - ay * v1 + az * v0
+
+        # Hamilton product: result = temp * conj(q_R)
+        rw = tw * bw + tx * bx + ty * by + tz * bz
+        rx = -tw * bx + tx * bw - ty * bz + tz * by
+        ry = -tw * by + tx * bz + ty * bw - tz * bx
+        rz = -tw * bz - tx * by + ty * bx + tz * bw
+
+        # Nearest centroid for each of the 4 components
+        best_iw = tl.zeros_like(rw).to(tl.int32)
+        best_dw = tl.abs(rw - tl.load(centroids_ptr))
+        for i in tl.static_range(1, n_levels):
+            c = tl.load(centroids_ptr + i)
+            dd = tl.abs(rw - c)
+            m = dd < best_dw
+            best_dw = tl.where(m, dd, best_dw)
+            best_iw = tl.where(m, i, best_iw)
+
+        best_ix = tl.zeros_like(rx).to(tl.int32)
+        best_dx = tl.abs(rx - tl.load(centroids_ptr))
+        for i in tl.static_range(1, n_levels):
+            c = tl.load(centroids_ptr + i)
+            dd = tl.abs(rx - c)
+            m = dd < best_dx
+            best_dx = tl.where(m, dd, best_dx)
+            best_ix = tl.where(m, i, best_ix)
+
+        best_iy = tl.zeros_like(ry).to(tl.int32)
+        best_dy = tl.abs(ry - tl.load(centroids_ptr))
+        for i in tl.static_range(1, n_levels):
+            c = tl.load(centroids_ptr + i)
+            dd = tl.abs(ry - c)
+            m = dd < best_dy
+            best_dy = tl.where(m, dd, best_dy)
+            best_iy = tl.where(m, i, best_iy)
+
+        best_iz = tl.zeros_like(rz).to(tl.int32)
+        best_dz = tl.abs(rz - tl.load(centroids_ptr))
+        for i in tl.static_range(1, n_levels):
+            c = tl.load(centroids_ptr + i)
+            dd = tl.abs(rz - c)
+            m = dd < best_dz
+            best_dz = tl.where(m, dd, best_dz)
+            best_iz = tl.where(m, i, best_iz)
+
+        tl.store(indices_ptr + pid_b * stride_idx_b + d0 * stride_idx_d,
+                 best_iw.to(tl.int8), mask=g_mask)
+        tl.store(indices_ptr + pid_b * stride_idx_b + (d0 + 1) * stride_idx_d,
+                 best_ix.to(tl.int8), mask=g_mask)
+        tl.store(indices_ptr + pid_b * stride_idx_b + (d0 + 2) * stride_idx_d,
+                 best_iy.to(tl.int8), mask=g_mask)
+        tl.store(indices_ptr + pid_b * stride_idx_b + (d0 + 3) * stride_idx_d,
+                 best_iz.to(tl.int8), mask=g_mask)
+
+    # -------------------------------------------------------------------
+    # IsoQuant: dequantize → inverse quaternion sandwich (non-fused)
+    # -------------------------------------------------------------------
+
+    @triton.jit
+    def _iso_dequantize_kernel(
+        indices_ptr, output_ptr,
+        qL_ptr, qR_ptr, centroids_ptr,
+        batch_size, d_padded,
+        n_groups: tl.constexpr,
+        stride_idx_b, stride_idx_d,
+        stride_out_b, stride_out_d,
+        BLOCK_G: tl.constexpr,
+    ):
+        """Centroid lookup → conj(q_L) * v * q_R (inverse sandwich)."""
+        pid_b = tl.program_id(0)
+        pid_g = tl.program_id(1)
+
+        g_offs = pid_g * BLOCK_G + tl.arange(0, BLOCK_G)
+        g_mask = g_offs < n_groups
+
+        d0 = g_offs * 4
+        iw = tl.load(indices_ptr + pid_b * stride_idx_b + d0 * stride_idx_d,
+                      mask=g_mask, other=0).to(tl.int32)
+        ix = tl.load(indices_ptr + pid_b * stride_idx_b + (d0 + 1) * stride_idx_d,
+                      mask=g_mask, other=0).to(tl.int32)
+        iy = tl.load(indices_ptr + pid_b * stride_idx_b + (d0 + 2) * stride_idx_d,
+                      mask=g_mask, other=0).to(tl.int32)
+        iz = tl.load(indices_ptr + pid_b * stride_idx_b + (d0 + 3) * stride_idx_d,
+                      mask=g_mask, other=0).to(tl.int32)
+
+        v0 = tl.load(centroids_ptr + iw, mask=g_mask, other=0.0)
+        v1 = tl.load(centroids_ptr + ix, mask=g_mask, other=0.0)
+        v2 = tl.load(centroids_ptr + iy, mask=g_mask, other=0.0)
+        v3 = tl.load(centroids_ptr + iz, mask=g_mask, other=0.0)
+
+        aw = tl.load(qL_ptr + g_offs * 4 + 0, mask=g_mask, other=1.0)
+        ax = tl.load(qL_ptr + g_offs * 4 + 1, mask=g_mask, other=0.0)
+        ay = tl.load(qL_ptr + g_offs * 4 + 2, mask=g_mask, other=0.0)
+        az = tl.load(qL_ptr + g_offs * 4 + 3, mask=g_mask, other=0.0)
+
+        bw = tl.load(qR_ptr + g_offs * 4 + 0, mask=g_mask, other=1.0)
+        bx = tl.load(qR_ptr + g_offs * 4 + 1, mask=g_mask, other=0.0)
+        by = tl.load(qR_ptr + g_offs * 4 + 2, mask=g_mask, other=0.0)
+        bz = tl.load(qR_ptr + g_offs * 4 + 3, mask=g_mask, other=0.0)
+
+        # Hamilton product: temp = conj(q_L) * v
+        tw = aw * v0 + ax * v1 + ay * v2 + az * v3
+        tx = aw * v1 - ax * v0 - ay * v3 + az * v2
+        ty = aw * v2 + ax * v3 - ay * v0 - az * v1
+        tz = aw * v3 - ax * v2 + ay * v1 - az * v0
+
+        # Hamilton product: result = temp * q_R
+        rw = tw * bw - tx * bx - ty * by - tz * bz
+        rx = tw * bx + tx * bw + ty * bz - tz * by
+        ry = tw * by - tx * bz + ty * bw + tz * bx
+        rz = tw * bz + tx * by - ty * bx + tz * bw
+
+        tl.store(output_ptr + pid_b * stride_out_b + d0 * stride_out_d,
+                 rw, mask=g_mask)
+        tl.store(output_ptr + pid_b * stride_out_b + (d0 + 1) * stride_out_d,
+                 rx, mask=g_mask)
+        tl.store(output_ptr + pid_b * stride_out_b + (d0 + 2) * stride_out_d,
+                 ry, mask=g_mask)
+        tl.store(output_ptr + pid_b * stride_out_b + (d0 + 3) * stride_out_d,
+                 rz, mask=g_mask)
+
+    # -------------------------------------------------------------------
+    # Fused IsoQuant 4-bit: quat sandwich → quantize → pack 2 bytes/group
+    # -------------------------------------------------------------------
+
+    @triton.jit
+    def _fused_iso4_quant_pack_kernel(
+        input_ptr, packed_ptr,
+        qL_ptr, qR_ptr, centroids_ptr,
+        batch_size, d_padded,
+        n_groups: tl.constexpr,
+        n_levels: tl.constexpr,
+        stride_in_b, stride_in_d,
+        stride_pack_b, stride_pack_e,
+        BLOCK_G: tl.constexpr,
+    ):
+        """Fused: quat sandwich → nearest centroid → 4-bit pack (2 bytes/group)."""
+        pid_b = tl.program_id(0)
+        pid_g = tl.program_id(1)
+
+        g_offs = pid_g * BLOCK_G + tl.arange(0, BLOCK_G)
+        g_mask = g_offs < n_groups
+
+        d0 = g_offs * 4
+        v0 = tl.load(input_ptr + pid_b * stride_in_b + d0 * stride_in_d,
+                      mask=g_mask, other=0.0)
+        v1 = tl.load(input_ptr + pid_b * stride_in_b + (d0 + 1) * stride_in_d,
+                      mask=g_mask, other=0.0)
+        v2 = tl.load(input_ptr + pid_b * stride_in_b + (d0 + 2) * stride_in_d,
+                      mask=g_mask, other=0.0)
+        v3 = tl.load(input_ptr + pid_b * stride_in_b + (d0 + 3) * stride_in_d,
+                      mask=g_mask, other=0.0)
+
+        aw = tl.load(qL_ptr + g_offs * 4 + 0, mask=g_mask, other=1.0)
+        ax = tl.load(qL_ptr + g_offs * 4 + 1, mask=g_mask, other=0.0)
+        ay = tl.load(qL_ptr + g_offs * 4 + 2, mask=g_mask, other=0.0)
+        az = tl.load(qL_ptr + g_offs * 4 + 3, mask=g_mask, other=0.0)
+
+        bw = tl.load(qR_ptr + g_offs * 4 + 0, mask=g_mask, other=1.0)
+        bx = tl.load(qR_ptr + g_offs * 4 + 1, mask=g_mask, other=0.0)
+        by = tl.load(qR_ptr + g_offs * 4 + 2, mask=g_mask, other=0.0)
+        bz = tl.load(qR_ptr + g_offs * 4 + 3, mask=g_mask, other=0.0)
+
+        tw = aw * v0 - ax * v1 - ay * v2 - az * v3
+        tx = aw * v1 + ax * v0 + ay * v3 - az * v2
+        ty = aw * v2 - ax * v3 + ay * v0 + az * v1
+        tz = aw * v3 + ax * v2 - ay * v1 + az * v0
+
+        rw = tw * bw + tx * bx + ty * by + tz * bz
+        rx = -tw * bx + tx * bw - ty * bz + tz * by
+        ry = -tw * by + tx * bz + ty * bw - tz * bx
+        rz = -tw * bz - tx * by + ty * bx + tz * bw
+
+        # Nearest centroid × 4 components
+        best_iw = tl.zeros_like(rw).to(tl.int32)
+        best_dw = tl.abs(rw - tl.load(centroids_ptr))
+        for i in tl.static_range(1, n_levels):
+            c = tl.load(centroids_ptr + i)
+            m = tl.abs(rw - c) < best_dw
+            best_dw = tl.where(m, tl.abs(rw - c), best_dw)
+            best_iw = tl.where(m, i, best_iw)
+
+        best_ix = tl.zeros_like(rx).to(tl.int32)
+        best_dx = tl.abs(rx - tl.load(centroids_ptr))
+        for i in tl.static_range(1, n_levels):
+            c = tl.load(centroids_ptr + i)
+            m = tl.abs(rx - c) < best_dx
+            best_dx = tl.where(m, tl.abs(rx - c), best_dx)
+            best_ix = tl.where(m, i, best_ix)
+
+        best_iy = tl.zeros_like(ry).to(tl.int32)
+        best_dy = tl.abs(ry - tl.load(centroids_ptr))
+        for i in tl.static_range(1, n_levels):
+            c = tl.load(centroids_ptr + i)
+            m = tl.abs(ry - c) < best_dy
+            best_dy = tl.where(m, tl.abs(ry - c), best_dy)
+            best_iy = tl.where(m, i, best_iy)
+
+        best_iz = tl.zeros_like(rz).to(tl.int32)
+        best_dz = tl.abs(rz - tl.load(centroids_ptr))
+        for i in tl.static_range(1, n_levels):
+            c = tl.load(centroids_ptr + i)
+            m = tl.abs(rz - c) < best_dz
+            best_dz = tl.where(m, tl.abs(rz - c), best_dz)
+            best_iz = tl.where(m, i, best_iz)
+
+        # Pack: 4 indices → 2 bytes (byte0 = iw|ix<<4, byte1 = iy|iz<<4)
+        byte0 = (best_iw & 0x0F) | ((best_ix & 0x0F) << 4)
+        byte1 = (best_iy & 0x0F) | ((best_iz & 0x0F) << 4)
+
+        tl.store(packed_ptr + pid_b * stride_pack_b + (g_offs * 2) * stride_pack_e,
+                 byte0.to(tl.int8), mask=g_mask)
+        tl.store(packed_ptr + pid_b * stride_pack_b + (g_offs * 2 + 1) * stride_pack_e,
+                 byte1.to(tl.int8), mask=g_mask)
+
+    # -------------------------------------------------------------------
+    # Fused IsoQuant 4-bit: unpack → dequant → inv quat sandwich → rescale
+    # -------------------------------------------------------------------
+
+    @triton.jit
+    def _fused_iso4_unpack_dequant_kernel(
+        packed_ptr, output_ptr,
+        qL_ptr, qR_ptr, centroids_ptr, norms_ptr,
+        batch_size, d_padded, head_dim,
+        n_groups: tl.constexpr,
+        stride_pack_b, stride_pack_e,
+        stride_out_b, stride_out_d,
+        BLOCK_G: tl.constexpr,
+    ):
+        """Fused: unpack 4-bit → centroid → inv quat sandwich → rescale → fp16."""
+        pid_b = tl.program_id(0)
+        pid_g = tl.program_id(1)
+
+        g_offs = pid_g * BLOCK_G + tl.arange(0, BLOCK_G)
+        g_mask = g_offs < n_groups
+
+        byte0 = tl.load(packed_ptr + pid_b * stride_pack_b + (g_offs * 2) * stride_pack_e,
+                         mask=g_mask, other=0).to(tl.int32)
+        byte1 = tl.load(packed_ptr + pid_b * stride_pack_b + (g_offs * 2 + 1) * stride_pack_e,
+                         mask=g_mask, other=0).to(tl.int32)
+
+        iw = byte0 & 0x0F
+        ix = (byte0 >> 4) & 0x0F
+        iy = byte1 & 0x0F
+        iz = (byte1 >> 4) & 0x0F
+
+        v0 = tl.load(centroids_ptr + iw, mask=g_mask, other=0.0)
+        v1 = tl.load(centroids_ptr + ix, mask=g_mask, other=0.0)
+        v2 = tl.load(centroids_ptr + iy, mask=g_mask, other=0.0)
+        v3 = tl.load(centroids_ptr + iz, mask=g_mask, other=0.0)
+
+        aw = tl.load(qL_ptr + g_offs * 4 + 0, mask=g_mask, other=1.0)
+        ax = tl.load(qL_ptr + g_offs * 4 + 1, mask=g_mask, other=0.0)
+        ay = tl.load(qL_ptr + g_offs * 4 + 2, mask=g_mask, other=0.0)
+        az = tl.load(qL_ptr + g_offs * 4 + 3, mask=g_mask, other=0.0)
+
+        bw = tl.load(qR_ptr + g_offs * 4 + 0, mask=g_mask, other=1.0)
+        bx = tl.load(qR_ptr + g_offs * 4 + 1, mask=g_mask, other=0.0)
+        by = tl.load(qR_ptr + g_offs * 4 + 2, mask=g_mask, other=0.0)
+        bz = tl.load(qR_ptr + g_offs * 4 + 3, mask=g_mask, other=0.0)
+
+        # Inverse sandwich: conj(q_L) * v * q_R
+        tw = aw * v0 + ax * v1 + ay * v2 + az * v3
+        tx = aw * v1 - ax * v0 - ay * v3 + az * v2
+        ty = aw * v2 + ax * v3 - ay * v0 - az * v1
+        tz = aw * v3 - ax * v2 + ay * v1 - az * v0
+
+        rw = tw * bw - tx * bx - ty * by - tz * bz
+        rx = tw * bx + tx * bw + ty * bz - tz * by
+        ry = tw * by - tx * bz + ty * bw + tz * bx
+        rz = tw * bz + tx * by - ty * bx + tz * bw
+
+        norm = tl.load(norms_ptr + pid_b).to(tl.float32)
+        rw = rw * norm
+        rx = rx * norm
+        ry = ry * norm
+        rz = rz * norm
+
+        d0 = g_offs * 4
+        tl.store(output_ptr + pid_b * stride_out_b + d0 * stride_out_d,
+                 rw.to(tl.float16), mask=g_mask & (d0 < head_dim))
+        tl.store(output_ptr + pid_b * stride_out_b + (d0 + 1) * stride_out_d,
+                 rx.to(tl.float16), mask=g_mask & ((d0 + 1) < head_dim))
+        tl.store(output_ptr + pid_b * stride_out_b + (d0 + 2) * stride_out_d,
+                 ry.to(tl.float16), mask=g_mask & ((d0 + 2) < head_dim))
+        tl.store(output_ptr + pid_b * stride_out_b + (d0 + 3) * stride_out_d,
+                 rz.to(tl.float16), mask=g_mask & ((d0 + 3) < head_dim))
+
     _triton_available = True
 except ImportError:
     _triton_available = False
@@ -597,6 +1034,233 @@ def triton_planar_dequantize(
     return output.to(torch.float16)
 
 
+def triton_fused_planar4_quant_pack(
+    x: torch.Tensor,
+    rot2: torch.Tensor,
+    centroids: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Fused Triton PlanarQuant 4-bit: rotate+quantize+pack → (uint8 packed, norms)."""
+    batch_size, emb_dim = x.shape
+    n_groups = emb_dim // 2
+    n_levels = centroids.shape[0]
+
+    x_f32 = x.float()
+    norms = x_f32.norm(dim=-1).clamp(min=1e-8)
+    x_f32 = (x_f32 / norms.unsqueeze(-1)).contiguous()
+
+    rot2_f32 = rot2.float().contiguous()
+    c_f32 = centroids.float().contiguous()
+
+    packed = torch.empty(batch_size, n_groups, dtype=torch.uint8, device=x.device)
+
+    BLOCK_G = min(triton.next_power_of_2(n_groups), 256)
+    grid = (batch_size, triton.cdiv(n_groups, BLOCK_G))
+
+    _fused_planar4_quant_pack_kernel[grid](
+        x_f32, packed, rot2_f32, c_f32,
+        batch_size, emb_dim, n_groups, n_levels,
+        x_f32.stride(0), x_f32.stride(1),
+        packed.stride(0), packed.stride(1),
+        BLOCK_G=BLOCK_G,
+    )
+    return packed, norms
+
+
+def triton_fused_planar4_unpack_dequant(
+    packed: torch.Tensor,
+    norms: torch.Tensor,
+    rot2: torch.Tensor,
+    centroids: torch.Tensor,
+    emb_dim: int,
+) -> torch.Tensor:
+    """Fused Triton PlanarQuant 4-bit: unpack+dequant+rescale → FP16."""
+    batch_size = packed.shape[0]
+    n_groups = emb_dim // 2
+
+    rot2_f32 = rot2.float().contiguous()
+    c_f32 = centroids.float().contiguous()
+    norms_f32 = norms.float().contiguous()
+
+    output = torch.empty(batch_size, emb_dim, dtype=torch.float16, device=packed.device)
+
+    BLOCK_G = min(triton.next_power_of_2(n_groups), 256)
+    grid = (batch_size, triton.cdiv(n_groups, BLOCK_G))
+
+    _fused_planar4_unpack_dequant_kernel[grid](
+        packed.contiguous(), output, rot2_f32, c_f32, norms_f32,
+        batch_size, emb_dim, n_groups,
+        packed.stride(0), packed.stride(1),
+        output.stride(0), output.stride(1),
+        BLOCK_G=BLOCK_G,
+    )
+    return output
+
+
+def triton_iso_quantize(
+    x: torch.Tensor,
+    q_L: torch.Tensor,
+    q_R: torch.Tensor,
+    centroids: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Triton IsoQuant: quaternion sandwich → quantize. Returns (int8 indices, norms)."""
+    shape = x.shape
+    head_dim = shape[-1]
+    n_groups = (head_dim + 3) // 4
+    d_padded = n_groups * 4
+    n_levels = centroids.shape[0]
+
+    flat = x.reshape(-1, head_dim).float()
+    batch_size = flat.shape[0]
+    norms = flat.norm(dim=-1).clamp(min=1e-8)
+    flat_norm = flat / norms.unsqueeze(-1)
+
+    if d_padded > head_dim:
+        flat_norm = torch.nn.functional.pad(flat_norm, (0, d_padded - head_dim))
+    flat_norm = flat_norm.contiguous()
+
+    qL_f32 = q_L.float().contiguous()
+    qR_f32 = q_R.float().contiguous()
+    c_f32 = centroids.float().contiguous()
+
+    indices = torch.empty(batch_size, d_padded, dtype=torch.int8, device=x.device)
+
+    BLOCK_G = min(triton.next_power_of_2(n_groups), 128)
+    grid = (batch_size, triton.cdiv(n_groups, BLOCK_G))
+
+    _iso_quantize_kernel[grid](
+        flat_norm, indices, qL_f32, qR_f32, c_f32,
+        batch_size, d_padded, n_groups, n_levels,
+        flat_norm.stride(0), flat_norm.stride(1),
+        indices.stride(0), indices.stride(1),
+        BLOCK_G=BLOCK_G,
+    )
+
+    norms_out = norms.reshape(shape[:-1])
+    indices_out = indices.reshape(*shape[:-1], d_padded)
+    return indices_out, norms_out
+
+
+def triton_iso_dequantize(
+    indices: torch.Tensor,
+    norms: torch.Tensor,
+    q_L: torch.Tensor,
+    q_R: torch.Tensor,
+    centroids: torch.Tensor,
+    head_dim: int,
+) -> torch.Tensor:
+    """Triton IsoQuant dequantize: inv quaternion sandwich → rescale → FP16."""
+    shape = indices.shape
+    d_padded = shape[-1]
+    n_groups = d_padded // 4
+
+    flat_idx = indices.reshape(-1, d_padded).contiguous()
+    batch_size = flat_idx.shape[0]
+
+    qL_f32 = q_L.float().contiguous()
+    qR_f32 = q_R.float().contiguous()
+    c_f32 = centroids.float().contiguous()
+
+    output = torch.empty(batch_size, d_padded, dtype=torch.float32, device=indices.device)
+
+    BLOCK_G = min(triton.next_power_of_2(n_groups), 128)
+    grid = (batch_size, triton.cdiv(n_groups, BLOCK_G))
+
+    _iso_dequantize_kernel[grid](
+        flat_idx, output, qL_f32, qR_f32, c_f32,
+        batch_size, d_padded, n_groups,
+        flat_idx.stride(0), flat_idx.stride(1),
+        output.stride(0), output.stride(1),
+        BLOCK_G=BLOCK_G,
+    )
+
+    result = output[:, :head_dim]
+    norms_flat = norms.reshape(-1).float().unsqueeze(-1)
+    result = result * norms_flat
+    return result.reshape(*shape[:-1], head_dim).to(torch.float16)
+
+
+def triton_fused_iso4_quant_pack(
+    x: torch.Tensor,
+    q_L: torch.Tensor,
+    q_R: torch.Tensor,
+    centroids: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Fused Triton IsoQuant 4-bit: quat sandwich+quantize+pack → (uint8, norms)."""
+    shape = x.shape
+    head_dim = shape[-1]
+    n_groups = (head_dim + 3) // 4
+    d_padded = n_groups * 4
+    n_levels = centroids.shape[0]
+
+    flat = x.reshape(-1, head_dim).float()
+    batch_size = flat.shape[0]
+    norms = flat.norm(dim=-1).clamp(min=1e-8)
+    flat_norm = flat / norms.unsqueeze(-1)
+
+    if d_padded > head_dim:
+        flat_norm = torch.nn.functional.pad(flat_norm, (0, d_padded - head_dim))
+    flat_norm = flat_norm.contiguous()
+
+    qL_f32 = q_L.float().contiguous()
+    qR_f32 = q_R.float().contiguous()
+    c_f32 = centroids.float().contiguous()
+
+    packed = torch.empty(batch_size, n_groups * 2, dtype=torch.uint8, device=x.device)
+
+    BLOCK_G = min(triton.next_power_of_2(n_groups), 128)
+    grid = (batch_size, triton.cdiv(n_groups, BLOCK_G))
+
+    _fused_iso4_quant_pack_kernel[grid](
+        flat_norm, packed, qL_f32, qR_f32, c_f32,
+        batch_size, d_padded, n_groups, n_levels,
+        flat_norm.stride(0), flat_norm.stride(1),
+        packed.stride(0), packed.stride(1),
+        BLOCK_G=BLOCK_G,
+    )
+
+    norms_out = norms.reshape(shape[:-1])
+    packed_out = packed.reshape(*shape[:-1], n_groups * 2)
+    return packed_out, norms_out
+
+
+def triton_fused_iso4_unpack_dequant(
+    packed: torch.Tensor,
+    norms: torch.Tensor,
+    q_L: torch.Tensor,
+    q_R: torch.Tensor,
+    centroids: torch.Tensor,
+    head_dim: int,
+) -> torch.Tensor:
+    """Fused Triton IsoQuant 4-bit: unpack+dequant+inv quat+rescale → FP16."""
+    shape = packed.shape
+    n_packed = shape[-1]
+    n_groups = n_packed // 2
+    d_padded = n_groups * 4
+
+    flat_pack = packed.reshape(-1, n_packed).contiguous()
+    batch_size = flat_pack.shape[0]
+
+    qL_f32 = q_L.float().contiguous()
+    qR_f32 = q_R.float().contiguous()
+    c_f32 = centroids.float().contiguous()
+    norms_f32 = norms.reshape(-1).float().contiguous()
+
+    output = torch.empty(batch_size, head_dim, dtype=torch.float16, device=packed.device)
+
+    BLOCK_G = min(triton.next_power_of_2(n_groups), 128)
+    grid = (batch_size, triton.cdiv(n_groups, BLOCK_G))
+
+    _fused_iso4_unpack_dequant_kernel[grid](
+        flat_pack, output, qL_f32, qR_f32, c_f32, norms_f32,
+        batch_size, d_padded, head_dim, n_groups,
+        flat_pack.stride(0), flat_pack.stride(1),
+        output.stride(0), output.stride(1),
+        BLOCK_G=BLOCK_G,
+    )
+
+    return output.reshape(*shape[:-1], head_dim)
+
+
 # ---------------------------------------------------------------------------
 # Unified compress/decompress API for SGLang KV cache pool
 # ---------------------------------------------------------------------------
@@ -632,6 +1296,10 @@ def compress_kv_head(
 
     if method == "planar":
         rot2 = rotations["rot2"]
+        if use_triton and _triton_available and x.is_cuda and bit_width == 4:
+            # Fused: rotate → quantize → pack in one kernel (no intermediate indices)
+            packed, norms = triton_fused_planar4_quant_pack(x, rot2, centroids)
+            return packed, norms.to(torch.float16)
         if use_triton and _triton_available and x.is_cuda:
             indices, norms = triton_planar_quantize(x, rot2, centroids)
         else:
@@ -646,7 +1314,14 @@ def compress_kv_head(
     elif method == "iso":
         q_L = rotations["q_L"]
         q_R = rotations["q_R"]
-        indices, norms = iso_quantize(x, q_L, q_R, centroids, boundaries)
+        if use_triton and _triton_available and x.is_cuda and bit_width == 4:
+            # Fused: quat sandwich → quantize → pack in one kernel
+            packed, norms = triton_fused_iso4_quant_pack(x, q_L, q_R, centroids)
+            return packed, norms.to(torch.float16)
+        if use_triton and _triton_available and x.is_cuda:
+            indices, norms = triton_iso_quantize(x, q_L, q_R, centroids)
+        else:
+            indices, norms = iso_quantize(x, q_L, q_R, centroids, boundaries)
         # indices shape: (T, d_padded) int8
         d_padded = indices.shape[-1]
         d_pack = pad_for_packing(d_padded, bit_width)
@@ -692,28 +1367,41 @@ def decompress_kv_head(
 
     if method == "planar":
         rot2 = rotations["rot2"]
-        d_pack = pad_for_packing(head_dim, bit_width)
-        indices = unpack_indices(packed, d_pack, bit_width)[:, :head_dim]
-
-        if use_triton and _triton_available and packed.is_cuda:
-            # Triton dequant expects int8 contiguous indices
-            x_hat = triton_planar_dequantize(
-                indices.to(torch.int8).contiguous(),
-                norms,
-                rot2,
-                centroids,
-                head_dim,
+        if use_triton and _triton_available and packed.is_cuda and bit_width == 4:
+            # Fused: unpack → dequant → inv rotate → rescale in one kernel
+            x_hat = triton_fused_planar4_unpack_dequant(
+                packed, norms, rot2, centroids, head_dim,
             )
         else:
-            x_hat = planar_dequantize(indices.to(torch.int8), norms, rot2, centroids, head_dim)
+            d_pack = pad_for_packing(head_dim, bit_width)
+            indices = unpack_indices(packed, d_pack, bit_width)[:, :head_dim]
+            if use_triton and _triton_available and packed.is_cuda:
+                x_hat = triton_planar_dequantize(
+                    indices.to(torch.int8).contiguous(),
+                    norms, rot2, centroids, head_dim,
+                )
+            else:
+                x_hat = planar_dequantize(indices.to(torch.int8), norms, rot2, centroids, head_dim)
     elif method == "iso":
         q_L = rotations["q_L"]
         q_R = rotations["q_R"]
-        n_groups = (head_dim + 3) // 4
-        d_padded = n_groups * 4
-        d_pack = pad_for_packing(d_padded, bit_width)
-        indices = unpack_indices(packed, d_pack, bit_width)[:, :d_padded]
-        x_hat = iso_dequantize(indices.to(torch.int8), norms, q_L, q_R, centroids, head_dim)
+        if use_triton and _triton_available and packed.is_cuda and bit_width == 4:
+            # Fused: unpack → dequant → inv quat sandwich → rescale in one kernel
+            x_hat = triton_fused_iso4_unpack_dequant(
+                packed, norms, q_L, q_R, centroids, head_dim,
+            )
+        else:
+            n_groups = (head_dim + 3) // 4
+            d_padded = n_groups * 4
+            d_pack = pad_for_packing(d_padded, bit_width)
+            indices = unpack_indices(packed, d_pack, bit_width)[:, :d_padded]
+            if use_triton and _triton_available and packed.is_cuda:
+                x_hat = triton_iso_dequantize(
+                    indices.to(torch.int8).contiguous(),
+                    norms, q_L, q_R, centroids, head_dim,
+                )
+            else:
+                x_hat = iso_dequantize(indices.to(torch.int8), norms, q_L, q_R, centroids, head_dim)
     else:
         raise ValueError(f"Unknown RotorQuant method: {method}")
 

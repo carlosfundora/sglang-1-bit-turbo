@@ -3562,13 +3562,15 @@ class MHATokenToKVPoolRQ(MHATokenToKVPool):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compress (T, head_num, dim) -> packed (T, H, packed_per_head) + norms (T, H, 1).
 
-        On HIP/ROCm: uses CPU path to avoid gfx1030 segfaults.
+        Uses GPU Triton kernels when available (including HIP/ROCm with validated fused kernels).
+        Falls back to CPU only when Triton is not available.
         """
-        from sglang.srt.layers.quantization.rotorquant_engine import compress_kv_head
+        from sglang.srt.layers.quantization.rotorquant_engine import compress_kv_head, _triton_available
 
         T = data.shape[0]
         H = self.head_num
-        use_cpu = _is_hip
+        # Use GPU path when Triton kernels are available and validated
+        use_cpu = _is_hip and not _triton_available
         dev = data.device
 
         if use_cpu:
@@ -3584,8 +3586,20 @@ class MHATokenToKVPoolRQ(MHATokenToKVPool):
 
         all_packed = []
         all_norms = []
+        if not use_cpu and self._rq_bit_width == 4:
+            # Batched GPU path: reshape (T, H, dim) → (T*H, dim), one kernel call
+            flat = data[:, :, :dim].reshape(T * H, dim)
+            packed_flat, norms_flat = compress_kv_head(
+                flat, self._rq_method, self._rq_bit_width,
+                rotations, codebook, dev, use_triton=True,
+            )
+            packed_per_head = packed_flat.shape[-1]
+            packed = packed_flat.reshape(T, H, packed_per_head)
+            norms = norms_flat.reshape(T, H).unsqueeze(-1)
+            return packed, norms.to(torch.float16)
+
         for h in range(H):
-            head_data = data_cpu[:, h, :dim] if not use_cpu else data_cpu[:, h, :dim]
+            head_data = data_cpu[:, h, :dim]
             packed_h, norms_h = compress_kv_head(
                 head_data.to(target_dev),
                 self._rq_method,
@@ -3619,11 +3633,12 @@ class MHATokenToKVPoolRQ(MHATokenToKVPool):
         if n_active <= 0:
             return
 
-        from sglang.srt.layers.quantization.rotorquant_engine import decompress_kv_head
+        from sglang.srt.layers.quantization.rotorquant_engine import decompress_kv_head, _triton_available
 
         T = n_active
         H = self.head_num
-        use_cpu = _is_hip
+        # Use GPU path when Triton kernels are available and validated
+        use_cpu = _is_hip and not _triton_available
         dev = out.device
 
         p = packed[:T]  # (T, H, packed_per_head)
@@ -3642,6 +3657,19 @@ class MHATokenToKVPoolRQ(MHATokenToKVPool):
             target_dev = dev
 
         heads = []
+        if not use_cpu and self._rq_bit_width == 4:
+            # Batched GPU path: reshape (T, H, packed) → (T*H, packed), one kernel call
+            packed_flat = p.reshape(T * H, -1).contiguous()
+            norms_flat = n_flat.reshape(T * H).contiguous()
+            x_hat_flat = decompress_kv_head(
+                packed_flat, norms_flat,
+                self._rq_method, self._rq_bit_width, dim,
+                rotations, codebook, dev, use_triton=True,
+            )
+            restored = x_hat_flat.reshape(T, H, dim)
+            out[:T, :, :dim].copy_(restored.to(out.dtype))
+            return
+
         for h in range(H):
             x_hat = decompress_kv_head(
                 p[:, h, :].contiguous().to(target_dev),
