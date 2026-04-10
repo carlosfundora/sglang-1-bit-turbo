@@ -13,6 +13,17 @@
 # ==============================================================================
 """Fused operators for activation layers."""
 
+try:
+    from sglang.srt.layers.kernels.rdna2.activations import (
+        gelu_and_mul as rdna2_gelu_and_mul,
+    )
+    from sglang.srt.layers.kernels.rdna2.activations import (
+        silu_and_mul as rdna2_silu_and_mul,
+    )
+    from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
+except ImportError:
+    pass
+
 import logging
 import math
 from typing import Optional
@@ -73,9 +84,10 @@ def _check_rdna2_activations():
     if not _is_hip:
         return False
     try:
-        from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
 
-        _rdna2_act_ok = rdna2_ops.probe() and os.environ.get("SGLANG_RDNA2_ACT", "1") != "0"
+        _rdna2_act_ok = (
+            rdna2_ops.probe() and os.environ.get("SGLANG_RDNA2_ACT", "1") != "0"
+        )
     except Exception:
         _rdna2_act_ok = False
     return _rdna2_act_ok
@@ -102,9 +114,6 @@ class SiluAndMul(MultiPlatformOp):
         # RDNA2 Wave32 fused SiLU-gate kernel
         if _check_rdna2_activations():
             try:
-                from sglang.srt.layers.kernels.rdna2.activations import (
-                    silu_and_mul as rdna2_silu_and_mul,
-                )
 
                 return rdna2_silu_and_mul(x)
             except Exception:
@@ -171,9 +180,6 @@ class GeluAndMul(MultiPlatformOp):
         # RDNA2 Wave32 fused GELU-gate kernel (tanh approximate only)
         if self.approximate == "tanh" and _check_rdna2_activations():
             try:
-                from sglang.srt.layers.kernels.rdna2.activations import (
-                    gelu_and_mul as rdna2_gelu_and_mul,
-                )
 
                 return rdna2_gelu_and_mul(x)
             except Exception:

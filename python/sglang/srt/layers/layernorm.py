@@ -13,6 +13,15 @@
 # ==============================================================================
 """Fused operators for normalization layers."""
 
+try:
+    from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
+    from sglang.srt.layers.kernels.rdna2.rmsnorm import (
+        fused_add_rms_norm as rdna2_fused_add_rms_norm,
+    )
+    from sglang.srt.layers.kernels.rdna2.rmsnorm import rms_norm as rdna2_rms_norm
+except ImportError:
+    pass
+
 import logging
 import os
 from typing import Optional, Tuple, Union
@@ -55,7 +64,11 @@ if _is_hip and _use_aiter:
     try:
         _props = torch.cuda.get_device_properties(0)
         _arch = getattr(_props, "gcnArchName", "").split(":")[0]
-        _is_rdna_for_layernorm = _arch.startswith("gfx10") or _arch.startswith("gfx11") or _arch.startswith("gfx12")
+        _is_rdna_for_layernorm = (
+            _arch.startswith("gfx10")
+            or _arch.startswith("gfx11")
+            or _arch.startswith("gfx12")
+        )
         if _is_rdna_for_layernorm:
             logging.getLogger(__name__).info(
                 f"RDNA GPU ({_arch}): AITER CK-based rmsnorm bypassed, using forward_hip chain"
@@ -77,9 +90,10 @@ def _check_rdna2_rmsnorm():
     if not _is_hip:
         return False
     try:
-        from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
 
-        _rdna2_rmsnorm_ok = rdna2_ops.probe() and os.environ.get("SGLANG_RDNA2_RMSNORM", "1") != "0"
+        _rdna2_rmsnorm_ok = (
+            rdna2_ops.probe() and os.environ.get("SGLANG_RDNA2_RMSNORM", "1") != "0"
+        )
         if _rdna2_rmsnorm_ok:
             logger.info("RDNA2 Wave32 RMSNorm: enabled for forward_hip dispatch")
     except Exception:
@@ -109,6 +123,7 @@ def _check_te_norm():
     except ImportError:
         _te_norm_available = False
     return _te_norm_available
+
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +237,11 @@ def _forward_with_allreduce_fusion(
                     return fused_result
 
             # For AITER route, preserve correctness when fused path is unavailable.
-            if _use_aiter and not _is_rdna_for_layernorm and get_global_server_args().enable_aiter_allreduce_fusion:
+            if (
+                _use_aiter
+                and not _is_rdna_for_layernorm
+                and get_global_server_args().enable_aiter_allreduce_fusion
+            ):
                 x = tensor_model_parallel_all_reduce(x)
                 return norm_module.forward(x, residual, None)
 
@@ -278,9 +297,9 @@ class RMSNorm(MultiPlatformOp):
         try:
             import transformer_engine.pytorch as te
 
-            te_mod = te.RMSNorm(
-                self.hidden_size, eps=self.variance_epsilon
-            ).to(device=self.weight.device, dtype=self.weight.dtype)
+            te_mod = te.RMSNorm(self.hidden_size, eps=self.variance_epsilon).to(
+                device=self.weight.device, dtype=self.weight.dtype
+            )
             # Share weight: TE uses our parameter directly, no duplication.
             # Note: TE's PyTorch forward accesses self.weight at call time (standard
             # nn.Module attribute lookup), so this post-init assignment is safe.
@@ -382,10 +401,6 @@ class RMSNorm(MultiPlatformOp):
         # ── RDNA2 Wave32 HIP kernel (7.78x faster than native) ──
         if _check_rdna2_rmsnorm():
             try:
-                from sglang.srt.layers.kernels.rdna2.rmsnorm import (
-                    fused_add_rms_norm as rdna2_fused_add_rms_norm,
-                    rms_norm as rdna2_rms_norm,
-                )
 
                 if not x.is_contiguous():
                     x = x.contiguous()
@@ -433,7 +448,12 @@ class RMSNorm(MultiPlatformOp):
                 if post_residual_addition is not None:
                     residual = residual + post_residual_addition
                 fused_add_rms_norm(
-                    out, x, residual_out, residual, self.weight.data, self.variance_epsilon
+                    out,
+                    x,
+                    residual_out,
+                    residual,
+                    self.weight.data,
+                    self.variance_epsilon,
                 )
                 return out, residual_out
             out = torch.empty_like(x)
@@ -583,9 +603,9 @@ class LayerNorm(MultiPlatformOp):
         try:
             import transformer_engine.pytorch as te
 
-            te_mod = te.LayerNorm(
-                self.hidden_size, eps=self.variance_epsilon
-            ).to(device=self.weight.device, dtype=self.weight.dtype)
+            te_mod = te.LayerNorm(self.hidden_size, eps=self.variance_epsilon).to(
+                device=self.weight.device, dtype=self.weight.dtype
+            )
             # Share parameters: TE uses ours directly, no duplication.
             # Note: TE's PyTorch forward accesses self.weight at call time (standard
             # nn.Module attribute lookup), so post-init assignment is safe.
@@ -732,10 +752,6 @@ class GemmaRMSNorm(MultiPlatformOp):
         # ── RDNA2 Wave32 HIP kernel path ──
         if _check_rdna2_rmsnorm():
             try:
-                from sglang.srt.layers.kernels.rdna2.rmsnorm import (
-                    fused_add_rms_norm as rdna2_fused_add_rms_norm,
-                    rms_norm as rdna2_rms_norm,
-                )
 
                 w = self.weight.data + 1.0
                 if not x.is_contiguous():
