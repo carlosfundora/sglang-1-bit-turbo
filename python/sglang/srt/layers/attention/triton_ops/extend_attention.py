@@ -296,6 +296,9 @@ def _fwd_kernel(
     offs_dv = tl.arange(0, BLOCK_DV)
     offs_m = tl.arange(0, BLOCK_M)
     mask_m = (cur_block_m * BLOCK_M + offs_m) < cur_seq_len_extend
+    # ROCm/RDNA2: even exec-masked flat loads validate the VA; clamp inactive lanes
+    # to index 0 so they access a valid address (discarded by the mask anyway).
+    offs_m_bounded = tl.where(mask_m, offs_m, 0)
 
     mask_d = offs_d < Lq
     mask_dv = offs_dv < Lv
@@ -310,7 +313,7 @@ def _fwd_kernel(
         )
 
     offs_q = (
-        (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
+        (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m_bounded[:, None])
         * stride_qbs
         + cur_head * stride_qh
         + offs_d[None, :]
@@ -322,7 +325,7 @@ def _fwd_kernel(
     if BLOCK_DPE > 0:
         offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
         offs_qpe = (
-            (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
+            (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m_bounded[:, None])
             * stride_qbs
             + cur_head * stride_qh
             + offs_dpe[None, :]
@@ -441,6 +444,8 @@ def _fwd_kernel(
     for start_n in range(0, cur_block_m_end, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         mask_n = (start_n + offs_n) < cur_block_m_end
+        # ROCm/RDNA2: clamp inactive lanes to index 0 (prevents illegal-address fault)
+        offs_n_bounded = tl.where(mask_n, offs_n, 0)
 
         final_mask = mask_m[:, None] & mask_n[None, :]
         if USE_CUSTOM_MASK:
@@ -482,7 +487,7 @@ def _fwd_kernel(
         if not SKIP_TILE:
             # load k in transposed way
             offs_k = (
-                (cur_seq_extend_start_idx + start_n + offs_n[None, :]) * stride_kbs
+                (cur_seq_extend_start_idx + start_n + offs_n_bounded[None, :]) * stride_kbs
                 + cur_kv_head * stride_kh
                 + offs_d[:, None]
             )
@@ -493,7 +498,7 @@ def _fwd_kernel(
             qk = tl.dot(q.to(k.dtype), k, out_dtype=tl.float32)
             if BLOCK_DPE > 0:
                 offs_kpe = (
-                    (cur_seq_extend_start_idx + start_n + offs_n[None, :]) * stride_kbs
+                    (cur_seq_extend_start_idx + start_n + offs_n_bounded[None, :]) * stride_kbs
                     + cur_kv_head * stride_kh
                     + offs_dpe[:, None]
                 )
@@ -523,7 +528,7 @@ def _fwd_kernel(
             deno = deno * re_scale + tl.sum(p, 1)
 
             offs_v = (
-                (cur_seq_extend_start_idx + start_n + offs_n[:, None]) * stride_vbs
+                (cur_seq_extend_start_idx + start_n + offs_n_bounded[:, None]) * stride_vbs
                 + cur_kv_head * stride_vh
                 + offs_dv[None, :]
             )
@@ -540,7 +545,7 @@ def _fwd_kernel(
         deno += tl.exp(cur_sink - e_max)
 
     offs_o = (
-        (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m[:, None])
+        (cur_seq_extend_start_idx + cur_block_m * BLOCK_M + offs_m_bounded[:, None])
         * stride_obs
         + cur_head * stride_oh
         + offs_dv[None, :]
