@@ -64,14 +64,16 @@ def _create_flashinfer_kv_indices_triton_kernel(
         # index into req_to_token_ptr needs to be int64
         offset = tl.arange(0, BLOCK_SIZE).to(tl.int64) + i * BLOCK_SIZE
         mask = offset < kv_end - kv_start
+        # RDNA2: clamp offset for masked lanes to avoid OOB VA validation
+        offset_safe = tl.where(mask, offset, 0)
         data = tl.load(
             req_to_token_ptr
             + req_pool_index * req_to_token_ptr_stride
             + kv_start
-            + offset,
+            + offset_safe,
             mask=mask,
         )
-        tl.store(kv_indices_ptr + kv_indices_offset + offset, data, mask=mask)
+        tl.store(kv_indices_ptr + kv_indices_offset + offset_safe, data, mask=mask)
 
 
 def _create_flashinfer_kv_indices_hip_fallback(

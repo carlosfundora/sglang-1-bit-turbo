@@ -1050,13 +1050,14 @@ class PhantomWorker:
         else:
             tree_mask_final = tree_mask_gpu
 
-        # Set up verification
+        # Set up verification — use None for tree_mask to get causal attention
+        # instead of custom mask (avoids RDNA2 masked-lane OOB in mask pointer arithmetic)
         original_algo = batch.spec_algorithm
         batch.spec_algorithm = SpeculativeAlgorithm.NGRAM
         batch.forward_mode = ForwardMode.TARGET_VERIFY
         batch.spec_info = NgramVerifyInput(
             draft_tokens_gpu,
-            tree_mask_final,
+            None,
             positions,
             retrive_index,
             retrive_next_token,
@@ -1248,8 +1249,29 @@ class PhantomWorker:
         return draft_tokens_gpu, tree_mask_gpu
 
     def _fallback_target_only(self, batch: ScheduleBatch) -> GenerationBatchResult:
+        """Fall back to a single target-model decode step (no speculation).
+
+        This is called when ghost drafts are unavailable, blocked, or all filtered.
+        Must properly set up the batch for decode since prepare_for_decode() returns
+        early when spec_algorithm is active.
+        """
+        import os
+        diag = os.environ.get("SGLANG_DIAG_SYNC", "")
+
+        # Allocate cache slots for decode
         batch.forward_mode = ForwardMode.DECODE
         batch.spec_info = None
+
+        # Manually prepare what prepare_for_decode would do:
+        # set input_ids from last output token, advance seq_lens
+        for i, req in enumerate(batch.reqs):
+            if req.output_ids:
+                batch.input_ids[i] = req.output_ids[-1]
+
+        if diag:
+            logger.info("_fallback_target_only: bs=%d, input_ids=%s",
+                        len(batch.reqs), batch.input_ids[:len(batch.reqs)].tolist())
+
         return self.target_worker.forward_batch_generation(
             batch.get_model_worker_batch()
         )

@@ -236,9 +236,9 @@ def fused_mul_mat_gguf(
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
 
-    # MMVQ safe batch thresholds — Q1 and imatrix use 8 (llama.cpp MMVQ_MAX_BATCH_SIZE)
+    # MMVQ safe batch thresholds — Q1 must use batch=1 only (RDNA2 MMVQ crash on batch>1)
     if qweight_type in PRISM_Q1_TYPES or qweight_type in IMATRIX_QUANT_TYPES:
-        mmvq_safe = 8
+        mmvq_safe = 1
     else:
         mmvq_safe = 2 if qweight.shape[0] > 5120 else 6
 
