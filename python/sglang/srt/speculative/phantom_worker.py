@@ -1243,13 +1243,37 @@ class PhantomWorker:
             req_drafts = padded
             mask = padded_mask
 
-        draft_tokens_gpu = torch.from_numpy(req_drafts).to(self.device, non_blocking=True)
-        tree_mask_gpu = torch.from_numpy(mask).to(self.device, non_blocking=True)
+        draft_tokens_gpu = torch.from_numpy(req_drafts).to(
+            dtype=torch.int64, device=self.device, non_blocking=True
+        )
+        tree_mask_gpu = torch.from_numpy(mask).to(
+            dtype=torch.bool, device=self.device, non_blocking=True
+        )
         return draft_tokens_gpu, tree_mask_gpu
 
     def _fallback_target_only(self, batch: ScheduleBatch) -> GenerationBatchResult:
+        """Fall back to normal single-token decode (no speculation).
+
+        When spec_algorithm is active, prepare_for_decode() skips input_ids
+        setup (it expects the speculative worker to handle it). We must
+        reconstruct input_ids ourselves before handing to the target worker.
+        """
+        from sglang.srt.mem_cache.common import alloc_for_decode
+
         batch.forward_mode = ForwardMode.DECODE
         batch.spec_info = None
+
+        # Reconstruct input_ids: last generated token per request
+        batch.input_ids = torch.tensor(
+            [
+                req.output_ids[-1] if req.output_ids else req.origin_input_ids[-1]
+                for req in batch.reqs
+            ],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        batch.out_cache_loc = alloc_for_decode(batch, token_per_req=1)
+
         return self.target_worker.forward_batch_generation(
             batch.get_model_worker_batch()
         )

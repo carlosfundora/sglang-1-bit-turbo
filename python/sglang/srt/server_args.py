@@ -3254,6 +3254,32 @@ class ServerArgs:
                     "Currently ngram speculative decoding does not support dp attention."
                 )
 
+        if self.speculative_algorithm == "PHANTOM":
+            if not self.device.startswith("cuda"):
+                raise ValueError(
+                    "PHANTOM speculative decoding only supports CUDA device."
+                )
+
+            if self.max_running_requests is None:
+                self.max_running_requests = 48
+                logger.warning(
+                    "Max running requests is reset to 48 for PHANTOM speculative decoding. "
+                    "You can override this by explicitly setting --max-running-requests."
+                )
+
+            self.disable_overlap_schedule = True
+            self.enable_mixed_chunk = False
+            # PHANTOM uses the same tree verification as NGRAM
+            if self.speculative_num_draft_tokens is None:
+                self.speculative_num_draft_tokens = 8
+                logger.warning(
+                    "speculative_num_draft_tokens is set to 8 by default for PHANTOM. "
+                    "You can override this by explicitly setting --speculative-num-draft-tokens."
+                )
+            # PHANTOM doesn't use eagle_topk but the field must be set for graph init
+            if self.speculative_eagle_topk is None:
+                self.speculative_eagle_topk = 1
+
         if self.speculative_algorithm == "MEDUSA":
             if self.medusa_model_path is None:
                 raise ValueError(
