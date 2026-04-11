@@ -411,6 +411,9 @@ class _QuantTelemetry:
         self._confusion.clear()
         self._pos_accepted[:] = 0
         self._pos_total[:] = 0
+
+
+class _GhostJob:
     """Immutable job descriptor for one ghost-thread round.
 
     Freezes batch_tokens, K, bs, and a monotonic job_id so the ghost thread
@@ -1055,7 +1058,7 @@ class PhantomWorker:
 
             # ── Feed rejected patterns into negative filter ──
             self._update_negative_filter(
-                batch.spec_info.draft_tokens, accept_lens, bs, K
+                batch.spec_info.draft_token, accept_lens, bs, K
             )
 
             # ── Adaptive controller: measure patch outcomes ──
@@ -1065,7 +1068,7 @@ class PhantomWorker:
             self._quant_telem.record(
                 logits=logits_output.next_token_logits,
                 hidden_states=logits_output.hidden_states,
-                draft_tokens=batch.spec_info.draft_tokens,
+                draft_tokens=batch.spec_info.draft_token,
                 verified_ids=next_token_ids,
                 accept_lens=accept_lens,
                 bs=bs, K=K,
@@ -1177,6 +1180,7 @@ class PhantomWorker:
         """Synchronous fallback: build tree on CPU, copy to GPU."""
         bs = batch.batch_size()
         K = self.draft_token_num
+        corpus_K = self._initial_draft_num  # corpus always returns this many
 
         self.corpus._corpus.synchronize()
         batch_tokens = []
@@ -1192,9 +1196,21 @@ class PhantomWorker:
             self._corpus_hit_count += 1
         else:
             self._corpus_miss_count += 1
-        assert len(req_drafts) == bs * K, (
-            f"PHANTOM sync: {len(req_drafts)=} != {bs * K}"
-        )
+
+        # Corpus always returns corpus_K tokens per request; slice to current K
+        if K < corpus_K:
+            req_drafts_reshaped = req_drafts.reshape(bs, corpus_K)[:, :K].reshape(-1)
+            mask_reshaped = mask.reshape(bs, corpus_K, corpus_K)[:, :K, :K].reshape(-1)
+            req_drafts = np.ascontiguousarray(req_drafts_reshaped)
+            mask = np.ascontiguousarray(mask_reshaped)
+        elif K > corpus_K:
+            # Dynamic γ grew beyond corpus K — pad with zeros
+            padded = np.zeros(bs * K, dtype=req_drafts.dtype)
+            padded_mask = np.zeros(bs * K * K, dtype=mask.dtype)
+            for i in range(bs):
+                padded[i * K:i * K + corpus_K] = req_drafts[i * corpus_K:(i + 1) * corpus_K]
+            req_drafts = padded
+            mask = padded_mask
 
         draft_tokens_gpu = torch.from_numpy(req_drafts).to(self.device, non_blocking=True)
         tree_mask_gpu = torch.from_numpy(mask).to(self.device, non_blocking=True)
@@ -1202,6 +1218,7 @@ class PhantomWorker:
 
     def _fallback_target_only(self, batch: ScheduleBatch) -> GenerationBatchResult:
         batch.forward_mode = ForwardMode.DECODE
+        batch.spec_info = None
         return self.target_worker.forward_batch_generation(
             batch.get_model_worker_batch()
         )
