@@ -524,6 +524,9 @@ class ServerArgs:
     speculative_ngram_capacity: int = 10 * 1000 * 1000
     enable_multi_layer_eagle: bool = False
 
+    # Speculative decoding (PHANTOM)
+    phantom_num_buffers: int = 2
+
     # Speculative decoding — Medusa heads
     medusa_model_path: Optional[str] = None
     medusa_num_heads: int = 5
@@ -5096,6 +5099,16 @@ class ServerArgs:
             "--enable-multi-layer-eagle",
             action="store_true",
             help="Enable multi-layer Eagle speculative decoding.",
+        )
+
+        # PHANTOM speculative decoding
+        parser.add_argument(
+            "--phantom-num-buffers",
+            type=int,
+            default=ServerArgs.phantom_num_buffers,
+            choices=[1, 2, 3, 4],
+            help="Number of pinned memory buffers for PHANTOM ghost-draft overlap. "
+                 "1=sync-only (debug), 2=double-buffer (default), 3=lookahead, 4=max decouple.",
         )
 
         # Medusa speculative decoding

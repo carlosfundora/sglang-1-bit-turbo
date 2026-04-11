@@ -22,8 +22,10 @@ Usage: --speculative-algorithm PHANTOM --disable-overlap-schedule
 """
 
 import logging
+import os
 import threading
 import time
+from collections import deque
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -46,59 +48,86 @@ logger = logging.getLogger(__name__)
 
 
 class _GhostBuffer:
-    """Double-buffered pinned memory for zero-copy CPU→GPU draft transfer.
+    """N-buffered pinned memory for zero-copy CPU→GPU draft transfer.
 
-    Two buffers alternate: CPU writes to one while GPU reads from the other.
-    On ROCm/HSA, pinned memory is directly accessible by the GPU via PCIe
-    without any explicit copy or DMA transfer setup.
+    Ring buffer of N slots: CPU writes to the next free slot while GPU reads
+    from the oldest ready slot. On ROCm/HSA, pinned memory is directly
+    accessible by the GPU via PCIe without explicit copy.
+
+    N=1: sync-only (debug mode, no CPU/GPU overlap)
+    N=2: classic double-buffering (default, matches original behavior)
+    N=3: one extra lookahead buffer for slow ghost threads
+    N=4: maximum decoupling
     """
 
-    def __init__(self, max_batch_size: int, draft_token_num: int):
+    def __init__(self, max_batch_size: int, draft_token_num: int, num_buffers: int = 2):
+        assert 1 <= num_buffers <= 4, f"num_buffers must be 1-4, got {num_buffers}"
         K = draft_token_num
-        # Draft tokens: [max_bs * K] int64, pinned
-        self.tokens_a = torch.zeros(max_batch_size * K, dtype=torch.int64, pin_memory=True)
-        self.tokens_b = torch.zeros(max_batch_size * K, dtype=torch.int64, pin_memory=True)
-        # Tree mask: [max_bs * K * K] bool, pinned
-        self.mask_a = torch.zeros(max_batch_size * K * K, dtype=torch.bool, pin_memory=True)
-        self.mask_b = torch.zeros(max_batch_size * K * K, dtype=torch.bool, pin_memory=True)
-        # Which buffer is "ready" for GPU (0=a, 1=b)
-        self._active = 0  # GPU reads from active, CPU writes to inactive
+        self.num_buffers = num_buffers
+
+        # Allocate N pinned buffer pairs
+        self._tokens = [
+            torch.zeros(max_batch_size * K, dtype=torch.int64, pin_memory=True)
+            for _ in range(num_buffers)
+        ]
+        self._masks = [
+            torch.zeros(max_batch_size * K * K, dtype=torch.bool, pin_memory=True)
+            for _ in range(num_buffers)
+        ]
+
+        # Ring buffer indices
+        self._write_idx = 0  # next slot for CPU to write
+        self._read_idx = 0   # next slot for GPU to read
+        self._ready_count = 0  # how many slots have valid data
         self._lock = threading.Lock()
         self._ready = threading.Event()
-        # Metadata about what's in the active buffer
+
+        # Metadata per slot
+        self._slot_bs = [0] * num_buffers
         self.active_bs = 0
         self.active_k = K
 
+    # ── Backward-compatible properties (for 2-buffer callers) ──
+
     @property
     def gpu_tokens(self) -> torch.Tensor:
-        return self.tokens_a if self._active == 0 else self.tokens_b
+        return self._tokens[self._read_idx]
 
     @property
     def gpu_mask(self) -> torch.Tensor:
-        return self.mask_a if self._active == 0 else self.mask_b
+        return self._masks[self._read_idx]
 
     @property
     def cpu_tokens(self) -> torch.Tensor:
-        return self.tokens_b if self._active == 0 else self.tokens_a
+        return self._tokens[self._write_idx]
 
     @property
     def cpu_mask(self) -> torch.Tensor:
-        return self.mask_b if self._active == 0 else self.mask_a
+        return self._masks[self._write_idx]
 
     def swap(self, bs: int):
-        """Swap active/inactive buffers (called after CPU finishes writing)."""
+        """CPU finished writing — mark slot ready, advance write pointer."""
         with self._lock:
-            self._active = 1 - self._active
+            self._slot_bs[self._write_idx] = bs
+            self._write_idx = (self._write_idx + 1) % self.num_buffers
+            self._ready_count = min(self._ready_count + 1, self.num_buffers - 1)
             self.active_bs = bs
             self._ready.set()
 
     def wait_ready(self, timeout: float = 0.001) -> bool:
-        """Wait for CPU to finish writing a ghost tree."""
+        """Wait for at least one ready slot."""
         return self._ready.wait(timeout=timeout)
 
     def consume(self):
-        """Mark the active buffer as consumed (GPU is done reading)."""
-        self._ready.clear()
+        """GPU done reading — release slot, advance read pointer."""
+        with self._lock:
+            self._read_idx = (self._read_idx + 1) % self.num_buffers
+            self._ready_count = max(self._ready_count - 1, 0)
+            if self._ready_count == 0:
+                self._ready.clear()
+            # Update active_bs to next ready slot if available
+            if self._ready_count > 0:
+                self.active_bs = self._slot_bs[self._read_idx]
 
 
 class _FrozenCorpus:
@@ -196,8 +225,9 @@ class PhantomWorker:
             raw_corpus, self.draft_token_num, self.max_match_window_size
         )
 
-        # Double-buffered pinned memory (HSA zero-copy on AMD)
-        self.ghost_buf = _GhostBuffer(self.max_batch_size, self.draft_token_num)
+        # N-buffered pinned memory (HSA zero-copy on AMD)
+        num_buffers = getattr(server_args, 'phantom_num_buffers', 2)
+        self.ghost_buf = _GhostBuffer(self.max_batch_size, self.draft_token_num, num_buffers)
 
         # GPU-side tensors for tree reconstruction (these must be in VRAM)
         K = self.draft_token_num
@@ -221,15 +251,39 @@ class PhantomWorker:
         self.ghost_misses = 0  # ghost tree wasn't ready, built synchronously
         self._log_interval = 50
 
+        # Adaptive metrics (sliding window)
+        self._accept_window = deque(maxlen=20)  # recent acceptance rates
+        self._corpus_hit_count = 0  # non-trivial drafts from corpus
+        self._corpus_miss_count = 0  # all-zero / failed drafts
+        self._corpus_insert_count = 0  # total corpus inserts
+
+        # Auto-fallback state
+        self._fallback_active = False
+        self._fallback_streak = 0  # consecutive low-acceptance rounds
+        self._fallback_probe_counter = 0
+        _FALLBACK_THRESHOLD = 0.4
+        _FALLBACK_STREAK_LIMIT = 10
+        _REENABLE_THRESHOLD = 0.5
+        _PROBE_INTERVAL = 5
+        self._fb_threshold = _FALLBACK_THRESHOLD
+        self._fb_streak_limit = _FALLBACK_STREAK_LIMIT
+        self._fb_reenable = _REENABLE_THRESHOLD
+        self._fb_probe_interval = _PROBE_INTERVAL
+
+        # Dynamic γ state
+        self._initial_draft_num = self.draft_token_num
+        self._min_draft = 2
+        self._max_draft = min(self._initial_draft_num * 2, 16)
+
         # Detect HSA capability
         self._is_hsa = self._detect_hsa()
 
         logger.info(
             "PHANTOM worker: draft_tokens=%d, max_bs=%d, HSA=%s, "
-            "pinned_buf=%.1f KB (tokens) + %.1f KB (mask)",
-            K, max_bs, self._is_hsa,
-            self.ghost_buf.tokens_a.nelement() * 8 / 1024,
-            self.ghost_buf.mask_a.nelement() / 1024,
+            "buffers=%d, pinned_buf=%.1f KB (tokens) + %.1f KB (mask) per slot",
+            K, max_bs, self._is_hsa, self.ghost_buf.num_buffers,
+            self.ghost_buf._tokens[0].nelement() * 8 / 1024,
+            self.ghost_buf._masks[0].nelement() / 1024,
         )
 
     @staticmethod
@@ -260,6 +314,14 @@ class PhantomWorker:
         self.total_rounds = 0
         self.ghost_hits = 0
         self.ghost_misses = 0
+        self._accept_window.clear()
+        self._corpus_hit_count = 0
+        self._corpus_miss_count = 0
+        self._corpus_insert_count = 0
+        self._fallback_active = False
+        self._fallback_streak = 0
+        self._fallback_probe_counter = 0
+        self.draft_token_num = self._initial_draft_num
 
     # ---- Ghost thread management ----
 
@@ -271,7 +333,20 @@ class PhantomWorker:
             target=self._ghost_loop, name="phantom-ghost", daemon=True
         )
         self._ghost_thread.start()
-        logger.info("PHANTOM: ghost thread started")
+
+        # Pin ghost thread to last available CPU core to reduce contention
+        try:
+            available = sorted(os.sched_getaffinity(0))
+            if len(available) > 1:
+                target_core = available[-1]
+                # Must set from within the thread or use its native id
+                self._ghost_affinity_core = target_core
+                os.sched_setaffinity(self._ghost_thread.native_id, {target_core})
+                logger.info("PHANTOM: ghost thread pinned to core %d", target_core)
+            else:
+                logger.info("PHANTOM: ghost thread started (single core, no affinity)")
+        except (OSError, AttributeError):
+            logger.info("PHANTOM: ghost thread started (affinity not available)")
 
     def _stop_ghost_thread(self):
         self._ghost_stop.set()
@@ -360,6 +435,14 @@ class PhantomWorker:
 
         self.total_rounds += 1
         K = self.draft_token_num
+
+        # ── Auto-fallback: skip spec decode when acceptance is consistently low ──
+        if self._fallback_active:
+            self._fallback_probe_counter += 1
+            if self._fallback_probe_counter < self._fb_probe_interval:
+                return self._fallback_target_only(batch)
+            # Probe round: try spec decode, check if acceptance recovered
+            self._fallback_probe_counter = 0
 
         # Try to use the ghost thread's pre-built tree (zero-copy from pinned mem)
         ghost_ready = self.ghost_buf.wait_ready(timeout=0.002)
@@ -452,6 +535,39 @@ class PhantomWorker:
             batch.forward_mode = ForwardMode.DECODE
             batch.spec_algorithm = original_algo
 
+            # ── Track acceptance rate ──
+            accept_rate = num_accepted / max(bs * K, 1)
+            self._accept_window.append(accept_rate)
+
+            # ── Auto-fallback logic ──
+            if accept_rate < self._fb_threshold:
+                self._fallback_streak += 1
+            else:
+                self._fallback_streak = 0
+
+            if self._fallback_streak >= self._fb_streak_limit and not self._fallback_active:
+                self._fallback_active = True
+                self._fallback_probe_counter = 0
+                logger.info("PHANTOM: auto-fallback ENABLED (acceptance=%.2f for %d rounds)",
+                            accept_rate, self._fallback_streak)
+            elif self._fallback_active and accept_rate >= self._fb_reenable:
+                self._fallback_active = False
+                self._fallback_streak = 0
+                logger.info("PHANTOM: auto-fallback DISABLED (acceptance recovered to %.2f)",
+                            accept_rate)
+
+            # ── Dynamic γ: adjust draft length based on acceptance ──
+            if len(self._accept_window) >= 5:
+                avg_accept = sum(self._accept_window) / len(self._accept_window)
+                if avg_accept > 0.7 and self.draft_token_num < self._max_draft:
+                    self.draft_token_num = min(self.draft_token_num + 1, self._max_draft)
+                    logger.debug("PHANTOM: γ increased to %d (avg_accept=%.2f)",
+                                 self.draft_token_num, avg_accept)
+                elif avg_accept < 0.3 and self.draft_token_num > self._min_draft:
+                    self.draft_token_num = max(self.draft_token_num - 1, self._min_draft)
+                    logger.debug("PHANTOM: γ decreased to %d (avg_accept=%.2f)",
+                                 self.draft_token_num, avg_accept)
+
             # Update corpus with accepted tokens (keeps it growing)
             self._update_corpus(batch)
 
@@ -506,16 +622,24 @@ class PhantomWorker:
         corpus relevant as generation continues.  The ghost thread's reads
         and main thread's inserts go through the C++ corpus which handles
         its own internal synchronization via asyncInsert + synchronize.
+
+        Token window is bounded to `max_match_window_size` to limit corpus
+        memory growth. Only the most recent tokens per request are inserted.
         """
+        max_window = min(
+            self.max_match_window_size,
+            self.corpus._corpus.draft_token_num * 3,
+        )
         batch_tokens = []
         for req in batch.reqs:
             put_ids = self._efficient_concat_last_n(
                 req.origin_input_ids,
                 req.output_ids,
-                self.corpus._corpus.draft_token_num * 3,  # trie depth heuristic
+                max_window,
             )
             batch_tokens.append(put_ids)
         self.corpus._corpus.batch_put(batch_tokens)
+        self._corpus_insert_count += 1
 
     def _build_tree_sync(self, batch: ScheduleBatch):
         """Synchronous fallback: build tree on CPU, copy to GPU."""
@@ -531,6 +655,11 @@ class PhantomWorker:
             batch_tokens.append(tokens)
 
         req_drafts, mask = self.corpus.batch_get(batch_tokens)
+        # Track corpus hit rate (non-trivial = at least one non-zero draft token)
+        if np.any(req_drafts != 0):
+            self._corpus_hit_count += 1
+        else:
+            self._corpus_miss_count += 1
         assert len(req_drafts) == bs * K, (
             f"PHANTOM sync: {len(req_drafts)=} != {bs * K}"
         )
@@ -548,11 +677,17 @@ class PhantomWorker:
     def _periodic_log(self):
         if self.total_rounds % self._log_interval == 0 and self.total_rounds > 0:
             total = self.ghost_hits + self.ghost_misses
-            hit_pct = self.ghost_hits / max(total, 1) * 100
+            ghost_pct = self.ghost_hits / max(total, 1) * 100
+            avg_accept = (sum(self._accept_window) / len(self._accept_window)
+                          if self._accept_window else 0.0)
+            corpus_total = self._corpus_hit_count + self._corpus_miss_count
+            corpus_pct = self._corpus_hit_count / max(corpus_total, 1) * 100
             logger.info(
-                "PHANTOM stats: %d rounds, %d ghost hits (%.1f%%), %d sync fallbacks, "
-                "pinned_buf=%s",
-                self.total_rounds, self.ghost_hits, hit_pct, self.ghost_misses,
+                "PHANTOM stats: rounds=%d, ghost=%.1f%% (%d/%d), "
+                "accept=%.2f, γ=%d, corpus_hit=%.1f%%, fallback=%s, buf=%s",
+                self.total_rounds, ghost_pct, self.ghost_hits, total,
+                avg_accept, self.draft_token_num, corpus_pct,
+                "ON" if self._fallback_active else "off",
                 "HSA" if self._is_hsa else "pinned",
             )
 
