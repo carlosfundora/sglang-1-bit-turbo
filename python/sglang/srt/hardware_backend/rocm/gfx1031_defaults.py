@@ -64,6 +64,9 @@ def apply_gfx1031_env() -> None:
         "AMDGPU_TARGETS": "gfx1030",
         "HIP_VISIBLE_DEVICES": "0",
 
+        # RDNA2 kernel dispatch + gfxGRAPH activation gate
+        "SGLANG_RDNA2_KERNELS": "1",
+
         # Triton tuning for RDNA2
         "TRITON_PRINT_AUTOTUNING": "0",
 
