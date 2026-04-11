@@ -55,6 +55,12 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from sglang.srt.model_loader.weight_utils import default_weight_loader
+
+try:
+    from sgl_kernel import dsv3_router_gemm
+except ImportError:
+    dsv3_router_gemm = None
+
 from sglang.srt.models.deepseek_v2 import (
     DeepseekV2AttentionMLA,
     DeepseekV2DecoderLayer,
@@ -183,8 +189,6 @@ class Glm4MoeLiteGate(nn.Module):
             and self.weight.shape[0] == 256
             and _device_sm >= 90
         ):
-            from sgl_kernel import dsv3_router_gemm
-
             logits = dsv3_router_gemm(hidden_states, self.weight).to(
                 hidden_states.dtype
             )

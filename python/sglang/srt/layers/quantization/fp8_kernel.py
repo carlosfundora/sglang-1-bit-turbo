@@ -28,6 +28,23 @@ try:
 except:
     pass
 
+try:
+    from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops as _rdna2_ops
+except ImportError:
+    _rdna2_ops = None
+
+try:
+    from deep_gemm import transform_sf_into_required_layout
+except ImportError:
+    transform_sf_into_required_layout = None
+
+try:
+    from sglang.srt.layers.quantization.int8_kernel import (
+        sglang_per_token_group_quant_int8,
+    )
+except ImportError:
+    sglang_per_token_group_quant_int8 = None
+
 from sglang.srt.layers import deep_gemm_wrapper
 from sglang.srt.utils import (
     ceil_align,
@@ -65,9 +82,7 @@ def _check_rdna2_fp8():
     if not _is_hip:
         return False
     try:
-        from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
-
-        _rdna2_fp8_ok = rdna2_ops.probe()
+        _rdna2_fp8_ok = _rdna2_ops is not None and _rdna2_ops.probe()
         if _rdna2_fp8_ok:
             logging.getLogger(__name__).info(
                 "RDNA2 Wave32 FP8 kernels: available for scaled_fp8_quant dispatch"
@@ -349,8 +364,6 @@ def _per_token_group_quant_8bit_raw(
         )
 
     if scale_ue8m0:
-        from deep_gemm import transform_sf_into_required_layout
-
         assert group_size == 128
         x_s = transform_sf_into_required_layout(
             x_s,
@@ -389,8 +402,8 @@ def _per_token_group_quant_8bit_fuse_silu_and_mul(
     #     scale_ue8m0=scale_ue8m0,
     # )
 
-    from deep_gemm import transform_sf_into_required_layout
-
+    # NOTE: silu_and_mul_masked_post_quant_fwd stays as local import to avoid
+    # circular dependency with ep_moe/kernels.py which imports from fp8_kernel.
     from sglang.srt.layers.moe.ep_moe.kernels import silu_and_mul_masked_post_quant_fwd
 
     assert column_major_scales
@@ -597,10 +610,6 @@ def sglang_per_token_group_quant_8bit(
     masked_m: Optional[torch.Tensor] = None,
     enable_v2: Optional[bool] = None,
 ):
-    from sglang.srt.layers.quantization.int8_kernel import (
-        sglang_per_token_group_quant_int8,
-    )
-
     if dst_dtype == torch.int8:
         assert not column_major_scales
         assert not scale_tma_aligned
@@ -1650,8 +1659,6 @@ if _is_hip:
         if not _check_rdna2_fp8():
             return False
         try:
-            from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
-
             inp = input.contiguous() if not input.is_contiguous() else input
             eps = 1e-12
             absmax = inp.abs().max()
@@ -1659,7 +1666,7 @@ if _is_hip:
             scale_val = absmax / fp8_max
             scale.view(-1).copy_(scale_val.view(-1))
             # .item() sync acceptable — this path only fires without AITER/vLLM
-            result = rdna2_ops.fp8_quantize(inp, scale_val.item())
+            result = _rdna2_ops.fp8_quantize(inp, scale_val.item())
             if result is not None:
                 output[:input.shape[0]].copy_(result.view(fp8_dtype))
                 return True
@@ -1675,11 +1682,9 @@ if _is_hip:
         if not _check_rdna2_fp8():
             return False
         try:
-            from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
-
             inp = input.contiguous() if not input.is_contiguous() else input
             # .item() sync acceptable — this path only fires without AITER/vLLM
-            result = rdna2_ops.fp8_quantize(inp, scale.item())
+            result = _rdna2_ops.fp8_quantize(inp, scale.item())
             if result is not None:
                 output[:input.shape[0]].copy_(result.view(fp8_dtype))
                 return True

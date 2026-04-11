@@ -25,8 +25,7 @@ class SpeculativeAlgorithm(Enum):
     SAGUARO = auto()  # wrapper, not standalone — wraps any other algorithm
     CHIMERA = auto()  # CHIMERA-SD: fused P-EAGLE + Hydra + DyTC + n-gram + SSD
     SELF_SPEC = auto()  # Self-Speculative Decoding via early-exit / hidden reuse
-    PHANTOM_SD = auto()  # NGRAM with CPU-threaded tree pre-building
-    TQ5_X = auto()  # TurboQuant 5 eXtended: HSA zero-copy ghost-draft (AMD gfx103x)
+    PHANTOM = auto()  # PHANTOM: HSA zero-copy ghost-draft speculative decoding (AMD gfx103x)
     NONE = auto()
 
     @classmethod
@@ -76,11 +75,8 @@ class SpeculativeAlgorithm(Enum):
     def is_self_spec(self) -> bool:
         return self == SpeculativeAlgorithm.SELF_SPEC
 
-    def is_phantom_sd(self) -> bool:
-        return self == SpeculativeAlgorithm.PHANTOM_SD
-
-    def is_tq5x(self) -> bool:
-        return self == SpeculativeAlgorithm.TQ5_X
+    def is_phantom(self) -> bool:
+        return self == SpeculativeAlgorithm.PHANTOM
 
     def supports_spec_v2(self) -> bool:
         return self.is_eagle() or self.is_standalone()
@@ -190,25 +186,15 @@ class SpeculativeAlgorithm(Enum):
 
             return SSDWorker
 
-        elif self.is_phantom_sd():
+        elif self.is_phantom():
             if enable_overlap:
                 raise ValueError(
-                    "PHANTOM_SD does not support overlap scheduling yet. "
+                    "PHANTOM does not support overlap scheduling yet. "
                     "Use --disable-overlap-schedule."
                 )
-            from sglang.srt.speculative.phantom_tree_worker import PhantomTreeWorker
+            from sglang.srt.speculative.phantom_worker import PhantomWorker
 
-            return PhantomTreeWorker
-
-        elif self.is_tq5x():
-            if enable_overlap:
-                raise ValueError(
-                    "TQ5_X does not support overlap scheduling yet. "
-                    "Use --disable-overlap-schedule."
-                )
-            from sglang.srt.speculative.tq5x_worker import TQ5XWorker
-
-            return TQ5XWorker
+            return PhantomWorker
 
         raise ValueError("Unreachable code path in create_worker.")
 

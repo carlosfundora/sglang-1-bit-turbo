@@ -76,6 +76,16 @@ from sglang.srt.utils.custom_op import register_custom_op
 if is_flashinfer_available():
     from flashinfer import fp4_quantize
 
+try:
+    from flashinfer.fused_moe import trtllm_bf16_moe
+except ImportError:
+    trtllm_bf16_moe = None
+
+try:
+    from flashinfer.fused_moe import trtllm_fp4_block_scale_moe
+except ImportError:
+    trtllm_fp4_block_scale_moe = None
+
 _is_hip = is_hip()
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_cpu = is_cpu()
@@ -1190,14 +1200,11 @@ class FlashInferFusedMoE(FusedMoE):
         routed_scaling_factor = self.moe_runner_config.routed_scaling_factor
 
         if isinstance(self.quant_method, UnquantizedFusedMoEMethod):
-            # lazy import
-            try:
-                from flashinfer.fused_moe import trtllm_bf16_moe
-            except ImportError as e:
+            if trtllm_bf16_moe is None:
                 raise ImportError(
                     "Can't import trtllm_bf16_moe from flashinfer. "
                     "Please check flashinfer version to use bf16 with flashinfer_trtllm backend."
-                ) from e
+                )
 
             # Allocate output inside symmetric memory context
             with use_symmetric_memory(
@@ -1319,7 +1326,11 @@ class FlashInferFP4MoE(FusedMoE):
             hidden_states: Input tensor
             topk_output: TopKOutput object with Bypassed format
         """
-        from flashinfer.fused_moe import trtllm_fp4_block_scale_moe
+        if trtllm_fp4_block_scale_moe is None:
+            raise ImportError(
+                "Can't import trtllm_fp4_block_scale_moe from flashinfer. "
+                "Please check flashinfer version to use fp4 with flashinfer_trtllm backend."
+            )
 
         assert isinstance(self.quant_method, ModelOptNvFp4FusedMoEMethod)
 

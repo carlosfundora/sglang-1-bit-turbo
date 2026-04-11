@@ -1,8 +1,7 @@
-"""TQ5_X — TurboQuant 5 eXtended: HSA ghost-draft speculative decoding.
+"""PHANTOM — HSA zero-copy ghost-draft speculative decoding.
 
 AMD gfx103x-optimized speculative worker that uses ROCm's HSA shared memory
-for zero-copy CPU→GPU draft token transfer.  The "X" is variable — it adapts
-to available system bandwidth and memory topology.
+for zero-copy CPU→GPU draft token transfer.
 
 Architecture:
   1. At prefill, freezes an n-gram corpus snapshot (constant cache — read-only)
@@ -18,9 +17,8 @@ Benefits on AMD gfx103x:
   - HSA shared memory = zero-copy reads from GPU
   - N-gram corpus scan is pure CPU work → truly overlapped with GPU verify
   - Frozen corpus = no locks, no synchronization on reads
-  - The "X factor" scales with PCIe bandwidth and CPU speed
 
-Usage: --speculative-algorithm TQ5_X --disable-overlap-schedule
+Usage: --speculative-algorithm PHANTOM --disable-overlap-schedule
 """
 
 import logging
@@ -36,7 +34,13 @@ from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.speculative.ngram_info import NgramVerifyInput
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+
+try:
+    from sgl_kernel.speculative import reconstruct_indices_from_tree_mask
+except ImportError:
+    reconstruct_indices_from_tree_mask = None
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +118,7 @@ class _FrozenCorpus:
         """Freeze the corpus (sync any pending inserts, then mark read-only)."""
         self._corpus.synchronize()
         self._frozen = True
-        logger.info("TQ5_X: corpus frozen (%d draft tokens)", self.draft_token_num)
+        logger.info("PHANTOM: corpus frozen (%d draft tokens)", self.draft_token_num)
 
     def batch_get(self, batch_tokens: List[List[int]]) -> Tuple[np.ndarray, np.ndarray]:
         """Read-only lookup — safe to call from any thread after freeze()."""
@@ -127,8 +131,8 @@ class _FrozenCorpus:
             self._corpus.batch_put(batch_tokens)
 
 
-class TQ5XWorker:
-    """TQ5_X: TurboQuant 5 eXtended — HSA zero-copy ghost-draft speculative worker.
+class PhantomWorker:
+    """PHANTOM — HSA zero-copy ghost-draft speculative worker.
 
     Combines:
     - Frozen n-gram corpus (constant cache, no locks)
@@ -221,7 +225,7 @@ class TQ5XWorker:
         self._is_hsa = self._detect_hsa()
 
         logger.info(
-            "TQ5_X worker: draft_tokens=%d, max_bs=%d, HSA=%s, "
+            "PHANTOM worker: draft_tokens=%d, max_bs=%d, HSA=%s, "
             "pinned_buf=%.1f KB (tokens) + %.1f KB (mask)",
             K, max_bs, self._is_hsa,
             self.ghost_buf.tokens_a.nelement() * 8 / 1024,
@@ -264,10 +268,10 @@ class TQ5XWorker:
             return
         self._ghost_stop.clear()
         self._ghost_thread = threading.Thread(
-            target=self._ghost_loop, name="tq5x-ghost", daemon=True
+            target=self._ghost_loop, name="phantom-ghost", daemon=True
         )
         self._ghost_thread.start()
-        logger.info("TQ5_X: ghost thread started")
+        logger.info("PHANTOM: ghost thread started")
 
     def _stop_ghost_thread(self):
         self._ghost_stop.set()
@@ -313,7 +317,7 @@ class TQ5XWorker:
                 self.ghost_buf.swap(bs)
 
             except Exception as e:
-                logger.debug("TQ5_X ghost build error: %s", e)
+                logger.debug("PHANTOM ghost build error: %s", e)
 
     def _submit_ghost_request(self, batch: ScheduleBatch):
         """Ask the ghost thread to pre-build drafts for the predicted next prefix."""
@@ -343,7 +347,6 @@ class TQ5XWorker:
     def forward_batch_generation(
         self, batch: ScheduleBatch
     ) -> GenerationBatchResult:
-        from sglang.srt.speculative.ngram_info import NgramVerifyInput
 
         # On extend/prefill: seed the corpus and freeze it
         if batch.forward_mode.is_extend() or batch.is_extend_in_batch:
@@ -384,7 +387,8 @@ class TQ5XWorker:
         retrive_next_sibling = self.retrive_next_sibling[:bs, :K]
 
         try:
-            from sgl_kernel.speculative import reconstruct_indices_from_tree_mask
+            if reconstruct_indices_from_tree_mask is None:
+                raise ImportError("sgl_kernel.speculative not available")
 
             reconstruct_indices_from_tree_mask(
                 tree_mask_gpu,
@@ -397,7 +401,7 @@ class TQ5XWorker:
                 K,
             )
         except Exception as e:
-            logger.warning("TQ5_X reconstruct_indices failed: %s", e)
+            logger.warning("PHANTOM reconstruct_indices failed: %s", e)
             return self._fallback_target_only(batch)
 
         # Build full attention mask
@@ -528,7 +532,7 @@ class TQ5XWorker:
 
         req_drafts, mask = self.corpus.batch_get(batch_tokens)
         assert len(req_drafts) == bs * K, (
-            f"TQ5_X sync: {len(req_drafts)=} != {bs * K}"
+            f"PHANTOM sync: {len(req_drafts)=} != {bs * K}"
         )
 
         draft_tokens_gpu = torch.from_numpy(req_drafts).to(self.device, non_blocking=True)
@@ -546,7 +550,7 @@ class TQ5XWorker:
             total = self.ghost_hits + self.ghost_misses
             hit_pct = self.ghost_hits / max(total, 1) * 100
             logger.info(
-                "TQ5_X stats: %d rounds, %d ghost hits (%.1f%%), %d sync fallbacks, "
+                "PHANTOM stats: %d rounds, %d ghost hits (%.1f%%), %d sync fallbacks, "
                 "pinned_buf=%s",
                 self.total_rounds, self.ghost_hits, hit_pct, self.ghost_misses,
                 "HSA" if self._is_hsa else "pinned",

@@ -179,6 +179,21 @@ elif _is_hip:
 if _is_npu:
     import torch_npu
 
+from sglang.srt.distributed import (
+    get_attn_tensor_model_parallel_world_size,
+    get_moe_expert_parallel_world_size,
+    get_moe_tensor_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+    tensor_model_parallel_fused_allreduce_rmsnorm,
+)
+
+try:
+    from sglang.srt.layers.flashinfer_comm_fusion import (
+        flashinfer_allreduce_residual_rmsnorm,
+    )
+except ImportError:
+    flashinfer_allreduce_residual_rmsnorm = None
+
 
 def _forward_with_allreduce_fusion(
     norm_module,
@@ -190,16 +205,6 @@ def _forward_with_allreduce_fusion(
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """Shared allreduce-fused RMSNorm logic usable by any norm."""
     if residual is not None:
-        from sglang.srt.distributed import (
-            get_attn_tensor_model_parallel_world_size,
-            get_moe_expert_parallel_world_size,
-            get_moe_tensor_parallel_world_size,
-            tensor_model_parallel_all_reduce,
-            tensor_model_parallel_fused_allreduce_rmsnorm,
-        )
-        from sglang.srt.layers.flashinfer_comm_fusion import (
-            flashinfer_allreduce_residual_rmsnorm,
-        )
 
         if use_attn_tp_group:
             world_size = get_attn_tensor_model_parallel_world_size()
@@ -221,15 +226,16 @@ def _forward_with_allreduce_fusion(
                 if fused_result is not None:
                     return fused_result
             else:
-                fused_result = flashinfer_allreduce_residual_rmsnorm(
-                    input_tensor=x,
-                    residual=residual,
-                    weight=weight,
-                    eps=norm_module.variance_epsilon,
-                    use_attn_tp_group=use_attn_tp_group,
-                )
-                if fused_result[0] is not None:
-                    return fused_result
+                if flashinfer_allreduce_residual_rmsnorm is not None:
+                    fused_result = flashinfer_allreduce_residual_rmsnorm(
+                        input_tensor=x,
+                        residual=residual,
+                        weight=weight,
+                        eps=norm_module.variance_epsilon,
+                        use_attn_tp_group=use_attn_tp_group,
+                    )
+                    if fused_result[0] is not None:
+                        return fused_result
 
             # For AITER route, preserve correctness when fused path is unavailable.
             if _use_aiter and not _is_rdna_for_layernorm and get_global_server_args().enable_aiter_allreduce_fusion:
