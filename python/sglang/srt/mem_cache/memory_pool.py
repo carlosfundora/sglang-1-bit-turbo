@@ -115,7 +115,24 @@ def _set_kv_buffer_impl(
         with device_module.stream(alt_stream):
             v_cache[indices] = v
         current_stream.wait_stream(alt_stream)
+    elif _is_hip and same_kv_dim and os.environ.get("SGLANG_RDNA2_KV_TRITON"):
+        # ROCm/HIP: fused Triton scatter-store; avoids un-fused Python-level scatter.
+        from sglang.srt.mem_cache.store_kv_cache_triton import store_kv_cache_triton
+        store_kv_cache_triton(k, v, k_cache, v_cache, indices, row_dim)
     else:  # fallback to naive implementation
+        # PHANTOM_KV_DEBUG: bounds check for diagnostics (zero cost when unset).
+        import os as _os
+        if _os.getenv("PHANTOM_KV_DEBUG"):
+            import sys as _sys
+            _n = indices.numel()
+            _max_idx = int(indices.max().item()) if _n > 0 else -1
+            _min_idx = int(indices.min().item()) if _n > 0 else -1
+            print(
+                f"[KV_DBG] k.shape={list(k.shape)} k_cache.shape={list(k_cache.shape)} "
+                f"idx.n={_n} idx.max={_max_idx} idx.min={_min_idx} "
+                f"cache_size={k_cache.shape[0]} OOB={_max_idx >= k_cache.shape[0]}",
+                file=_sys.stderr, flush=True,
+            )
         k_cache[indices] = k
         v_cache[indices] = v
 

@@ -370,8 +370,11 @@ def _fwd_kernel(
             SKIP_TILE = tl.max(tl.max(final_mask.to(tl.int32), axis=1), axis=0) == 0
 
         if not SKIP_TILE:
+            # ROCm/RDNA2: even exec-masked flat_load_* validate the VA; clamp inactive
+            # lanes to index 0 (always valid in-bounds) so all lanes have a legal address.
+            offs_n_kv_safe = tl.where(mask_n, offs_n, 0)
             offs_kv_loc = tl.load(
-                kv_indices + cur_seq_kv_start_idx + start_n + offs_n,
+                kv_indices + cur_seq_kv_start_idx + start_n + offs_n_kv_safe,
                 mask=mask_n,
                 other=0,
             )
