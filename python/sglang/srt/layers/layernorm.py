@@ -65,13 +65,34 @@ if _is_hip and _use_aiter:
 # RDNA2 Wave32 HIP kernel — lazy-init (avoids JIT compile at import time)
 _rdna2_rmsnorm_checked = False
 _rdna2_rmsnorm_ok = False
+_rdna2_fused_add_rms_norm_cached = None
+_rdna2_rms_norm_cached = None
 
 
 def _check_rdna2_rmsnorm():
     """Lazy one-time check for RDNA2 RMSNorm kernel availability."""
     global _rdna2_rmsnorm_checked, _rdna2_rmsnorm_ok
+    global _rdna2_fused_add_rms_norm_cached, _rdna2_rms_norm_cached
     if _rdna2_rmsnorm_checked:
         return _rdna2_rmsnorm_ok
+    _rdna2_rmsnorm_checked = True
+    if not _is_hip:
+        return False
+    try:
+        from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
+
+        _rdna2_rmsnorm_ok = rdna2_ops.probe() and os.environ.get("SGLANG_RDNA2_RMSNORM", "1") != "0"
+        if _rdna2_rmsnorm_ok:
+            from sglang.srt.layers.kernels.rdna2.rmsnorm import (
+                fused_add_rms_norm as rdna2_fused_add_rms_norm,
+                rms_norm as rdna2_rms_norm,
+            )
+            _rdna2_fused_add_rms_norm_cached = rdna2_fused_add_rms_norm
+            _rdna2_rms_norm_cached = rdna2_rms_norm
+            logger.info("RDNA2 Wave32 RMSNorm: enabled for forward_hip dispatch")
+    except Exception:
+        _rdna2_rmsnorm_ok = False
+    return _rdna2_rmsnorm_ok
     _rdna2_rmsnorm_checked = True
     if not _is_hip:
         return False
@@ -321,11 +342,6 @@ class RMSNorm(MultiPlatformOp):
         # ── RDNA2 Wave32 HIP kernel (7.78x faster than native) ──
         if _check_rdna2_rmsnorm():
             try:
-                from sglang.srt.layers.kernels.rdna2.rmsnorm import (
-                    fused_add_rms_norm as rdna2_fused_add_rms_norm,
-                    rms_norm as rdna2_rms_norm,
-                )
-
                 if not x.is_contiguous():
                     x = x.contiguous()
                 if residual is not None:
@@ -334,301 +350,12 @@ class RMSNorm(MultiPlatformOp):
                     residual_out = residual.clone()
                     if post_residual_addition is not None:
                         residual_out.add_(post_residual_addition)
-                    rdna2_fused_add_rms_norm(
+                    _rdna2_fused_add_rms_norm_cached(
                         out, residual_out, self.weight.data, self.variance_epsilon
                     )
                     return out, residual_out
                 out = torch.empty_like(x)
-                rdna2_rms_norm(out, x, self.weight.data, self.variance_epsilon)
-                return out
-            except Exception as e:
-                logger.debug(f"RDNA2 RMSNorm dispatch failed, falling back: {e}")
-
-        # ── Existing vllm/aiter/triton chain ──
-        if not _has_vllm_rms_norm:
-            return self.forward_native(x, residual, post_residual_addition)
-
-        if not x.is_contiguous():
-            x = x.contiguous()
-
-        if _rms_norm_is_inplace:
-            # vllm API: rms_norm(out, x, w, eps) -> None (in-place)
-            if residual is not None:
-                out = torch.empty_like(x)
-                residual_out = torch.empty_like(x)
-                if post_residual_addition is not None:
-                    residual = residual + post_residual_addition
-                fused_add_rms_norm(
-                    out, x, residual_out, residual, self.weight.data, self.variance_epsilon
-                )
-                return out, residual_out
-            out = torch.empty_like(x)
-            rms_norm(out, x, self.weight.data, self.variance_epsilon)
-            return out
-        else:
-            # aiter/triton API: rms_norm(x, w, eps) -> out
-            if residual is not None:
-                if post_residual_addition is not None:
-                    residual = residual + post_residual_addition
-                x = x + residual
-                out = rms_norm(x, self.weight.data, self.variance_epsilon)
-                return out, x
-            return rms_norm(x, self.weight.data, self.variance_epsilon)
-
-    def forward_native(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-        post_residual_addition: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        if not x.is_contiguous():
-            x = x.contiguous()
-        orig_dtype = self.override_orig_dtype or x.dtype
-        x = x.to(torch.float32)
-        if residual is not None:
-            x = x + residual.to(torch.float32)
-            if post_residual_addition is not None:
-                x = x + post_residual_addition.to(torch.float32)
-            if self.fp32_residual:
-                residual = x.clone()
-            else:
-                residual = x.to(orig_dtype)
-
-        hidden_size = x.shape[-1]
-        if hidden_size != self.hidden_size:
-            raise ValueError(
-                "Expected hidden_size to be "
-                f"{self.hidden_size}, but found: {hidden_size}"
-            )
-
-        if self.variance_size_override is None:
-            x_var = x
-        else:
-            if hidden_size < self.variance_size_override:
-                raise ValueError(
-                    "Expected hidden_size to be at least "
-                    f"{self.variance_size_override}, but found: {hidden_size}"
-                )
-
-            x_var = x[..., : self.variance_size_override]
-
-        variance = x_var.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
-
-        if self.cast_x_before_out_mul:
-            x = self.weight * x.to(orig_dtype)
-        else:
-            x = (x * self.weight).to(orig_dtype)
-
-        if residual is None:
-            return x
-        else:
-            return x, residual
-
-    def forward_cpu(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-        post_residual_addition: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        if _is_cpu_amx_available:
-            if residual is not None:
-                if post_residual_addition is not None:
-                    residual = residual + post_residual_addition
-                torch.ops.sgl_kernel.fused_add_rmsnorm_cpu(
-                    x, residual, self.weight.data, self.variance_epsilon
-                )
-                return x, residual
-            return torch.ops.sgl_kernel.rmsnorm_cpu(
-                x, self.weight.data, self.variance_epsilon
-            )
-        else:
-            return self.forward_native(x, residual, post_residual_addition)
-
-    def forward_xpu(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-        post_residual_addition: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        if self.variance_size_override is not None:
-            return self.forward_native(x, residual, post_residual_addition)
-        if residual is not None:
-            if post_residual_addition is not None:
-                residual = residual + post_residual_addition
-            fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
-            return x, residual
-        out = rmsnorm(x, self.weight.data, self.variance_epsilon)
-        return out
-
-    def forward_with_allreduce_fusion(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-        post_residual_addition: Optional[torch.Tensor] = None,
-        use_attn_tp_group: bool = True,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """Forward with allreduce fusion, prioritizing flashinfer fused operations."""
-        return _forward_with_allreduce_fusion(
-            self, x, residual, post_residual_addition, self.weight, use_attn_tp_group
-        )
-
-
-class LayerNorm(MultiPlatformOp):
-    def __init__(
-        self,
-        hidden_size: int,
-        eps: float = 1e-6,
-        elementwise_affine: bool = True,
-        bias: bool = True,
-        dtype: torch.dtype = torch.float32,
-    ) -> None:
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.variance_epsilon = eps
-        self.elementwise_affine = elementwise_affine
-        self.use_bias = bias
-        self.dtype = dtype
-
-        self.bias = nn.Parameter(torch.zeros(hidden_size, dtype=self.dtype))
-        self.weight = nn.Parameter(torch.ones(hidden_size, dtype=self.dtype))
-
-    def forward_cuda(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        if (
-            _flashinfer_layernorm_available
-            and x.dtype == torch.bfloat16
-            and self.dtype == torch.float32
-        ):
-            return layernorm(x, self.weight, self.bias, self.variance_epsilon)
-        else:
-            return self.forward_native(x)
-
-    def forward_native(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        weight = self.weight if self.elementwise_affine else None
-        bias = self.bias if self.use_bias else None
-        orig_dtype = x.dtype
-        x = x.to(self.dtype)
-        return F.layer_norm(
-            x,
-            (self.hidden_size,),
-            weight=weight,
-            bias=bias,
-            eps=self.variance_epsilon,
-        ).to(orig_dtype)
-
-    def forward_hip(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        return self.forward_native(x)
-
-    def forward_npu(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        return self.forward_native(x)
-
-    def forward_cpu(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        if _is_cpu_amx_available:
-            bias_data = self.bias.data if self.use_bias else None
-            return torch.ops.sgl_kernel.layernorm_cpu(
-                x, self.weight.data, bias_data, self.variance_epsilon
-            )
-        else:
-            return self.forward_native(x)
-
-
-class GemmaRMSNorm(MultiPlatformOp):
-    def __init__(
-        self,
-        hidden_size: int,
-        eps: float = 1e-6,
-    ) -> None:
-        super().__init__()
-        self.weight = nn.Parameter(torch.zeros(hidden_size))
-        self.variance_epsilon = eps
-
-    def _forward_impl(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-        post_residual_addition: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        if residual is not None:
-            if post_residual_addition is not None:
-                residual = residual + post_residual_addition
-            gemma_fused_add_rmsnorm(
-                x, residual, self.weight.data, self.variance_epsilon
-            )
-            return x, residual
-        out = gemma_rmsnorm(x, self.weight.data, self.variance_epsilon)
-        return out
-
-    def forward_native(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-        post_residual_addition: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        orig_dtype = x.dtype
-        if residual is not None:
-            if post_residual_addition is not None:
-                residual = residual + post_residual_addition
-            x = x + residual
-            residual = x
-
-        x = x.float()
-        variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
-        x = x * (1.0 + self.weight.float())
-        x = x.to(orig_dtype)
-        return x if residual is None else (x, residual)
-
-    def forward_cuda(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-        post_residual_addition: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        return self._forward_impl(x, residual, post_residual_addition)
-
-    def forward_hip(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-        post_residual_addition: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        # ── RDNA2 Wave32 HIP kernel path ──
-        if _check_rdna2_rmsnorm():
-            try:
-                from sglang.srt.layers.kernels.rdna2.rmsnorm import (
-                    fused_add_rms_norm as rdna2_fused_add_rms_norm,
-                    rms_norm as rdna2_rms_norm,
-                )
-
-                w = self.weight.data + 1.0
-                if not x.is_contiguous():
-                    x = x.contiguous()
-                if residual is not None:
-                    out = x.clone()
-                    residual_out = residual.clone()
-                    if post_residual_addition is not None:
-                        residual_out.add_(post_residual_addition)
-                    rdna2_fused_add_rms_norm(
-                        out, residual_out, w, self.variance_epsilon
-                    )
-                    return out, residual_out
-                out = torch.empty_like(x)
-                rdna2_rms_norm(out, x, w, self.variance_epsilon)
+                _rdna2_rms_norm_cached(out, x, self.weight.data, self.variance_epsilon)
                 return out
             except Exception:
                 pass

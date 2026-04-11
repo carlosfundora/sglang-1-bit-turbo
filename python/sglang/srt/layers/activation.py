@@ -62,13 +62,33 @@ logger = logging.getLogger(__name__)
 # RDNA2 Wave32 activation kernels — lazy-init
 _rdna2_act_checked = False
 _rdna2_act_ok = False
+_rdna2_silu_and_mul_cached = None
+_rdna2_gelu_and_mul_cached = None
 
 
 def _check_rdna2_activations():
     """Lazy one-time check for RDNA2 activation kernel availability."""
     global _rdna2_act_checked, _rdna2_act_ok
+    global _rdna2_silu_and_mul_cached, _rdna2_gelu_and_mul_cached
     if _rdna2_act_checked:
         return _rdna2_act_ok
+    _rdna2_act_checked = True
+    if not _is_hip:
+        return False
+    try:
+        from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
+
+        _rdna2_act_ok = rdna2_ops.probe() and os.environ.get("SGLANG_RDNA2_ACT", "1") != "0"
+        if _rdna2_act_ok:
+            from sglang.srt.layers.kernels.rdna2.activations import (
+                silu_and_mul as rdna2_silu_and_mul,
+                gelu_and_mul as rdna2_gelu_and_mul,
+            )
+            _rdna2_silu_and_mul_cached = rdna2_silu_and_mul
+            _rdna2_gelu_and_mul_cached = rdna2_gelu_and_mul
+    except Exception:
+        _rdna2_act_ok = False
+    return _rdna2_act_ok
     _rdna2_act_checked = True
     if not _is_hip:
         return False
@@ -102,11 +122,7 @@ class SiluAndMul(MultiPlatformOp):
         # RDNA2 Wave32 fused SiLU-gate kernel
         if _check_rdna2_activations():
             try:
-                from sglang.srt.layers.kernels.rdna2.activations import (
-                    silu_and_mul as rdna2_silu_and_mul,
-                )
-
-                return rdna2_silu_and_mul(x)
+                return _rdna2_silu_and_mul_cached(x)
             except Exception:
                 pass
         # Fall back to sgl_kernel (works on all ROCm)
@@ -171,11 +187,7 @@ class GeluAndMul(MultiPlatformOp):
         # RDNA2 Wave32 fused GELU-gate kernel (tanh approximate only)
         if self.approximate == "tanh" and _check_rdna2_activations():
             try:
-                from sglang.srt.layers.kernels.rdna2.activations import (
-                    gelu_and_mul as rdna2_gelu_and_mul,
-                )
-
-                return rdna2_gelu_and_mul(x)
+                return _rdna2_gelu_and_mul_cached(x)
             except Exception:
                 pass
         # Fall back to sgl_kernel

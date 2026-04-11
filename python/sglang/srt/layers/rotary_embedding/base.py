@@ -6,6 +6,22 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 
+_rdna2_rope_ops_cached = None
+_rdna2_rope_checked = False
+
+def _get_rdna2_rope_ops():
+    global _rdna2_rope_ops_cached, _rdna2_rope_checked
+    if _rdna2_rope_checked:
+        return _rdna2_rope_ops_cached
+    _rdna2_rope_checked = True
+    try:
+        from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
+        if rdna2_ops.probe():
+            _rdna2_rope_ops_cached = rdna2_ops
+    except ImportError:
+        pass
+    return _rdna2_rope_ops_cached
+
 from sglang.srt.layers.rotary_embedding.utils import apply_rotary_emb
 from sglang.srt.layers.utils import MultiPlatformOp
 from sglang.srt.server_args import get_global_server_args
@@ -468,9 +484,8 @@ class RotaryEmbedding(MultiPlatformOp):
             and offsets is None
         ):
             try:
-                from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
-
-                if rdna2_ops.probe():
+                rdna2_ops = _get_rdna2_rope_ops()
+                if rdna2_ops is not None:
                     if offsets is not None:
                         positions = positions + offsets
                     positions = positions.flatten()
