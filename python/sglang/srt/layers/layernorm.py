@@ -693,7 +693,9 @@ class LayerNorm(MultiPlatformOp):
         if x.dtype != self.dtype and x.dtype in (torch.bfloat16, torch.float16):
             # Use tensor version counter to detect in-place weight updates
             # (copy_, LoRA merge, etc.) that don't change data_ptr.
-            _w_ver = self.weight.data._version if self.elementwise_affine else 0
+            # Note: self.weight._version, NOT self.weight.data._version —
+            # .data creates a fresh view whose _version is always 0.
+            _w_ver = self.weight._version if self.elementwise_affine else 0
             if (
                 not hasattr(self, "_cached_weight_dtype")
                 or self._cached_weight_dtype != x.dtype

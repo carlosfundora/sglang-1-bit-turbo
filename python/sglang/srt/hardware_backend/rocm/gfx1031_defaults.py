@@ -26,10 +26,13 @@ def get_gfx1031_server_defaults() -> Dict[str, Any]:
     overrides are provided by the user.
     """
     return {
-        # Attention: AITER backend with Triton paths for RDNA2.
-        # CK kernels are bypassed: decode uses unified_attention (Triton),
-        # extend uses extend_attention_fwd (SGLang Triton with Wave32 tuning).
-        "attention_backend": "aiter",
+        # Attention: Triton backend for RDNA2.
+        # aiter's decode attention kernel is NOT compatible with HIP graph
+        # capture on gfx1031 — replayed graphs produce garbled output.
+        # Triton unified_attention works correctly under gfxGRAPH and
+        # achieves the same ~63 t/s throughput on Qwen2.5-0.5B.
+        # aiter GEMM paths remain active via SGLANG_USE_AITER env var.
+        "attention_backend": "triton",
 
         # CUDA graphs work on HIP but need smaller batch sizes for 12GB VRAM
         "disable_cuda_graph": False,
