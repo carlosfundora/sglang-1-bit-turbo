@@ -1035,25 +1035,13 @@ class PhantomWorker:
             logger.warning("PHANTOM reconstruct_indices failed: %s", e)
             return self._fallback_target_only(batch)
 
-        # Build full attention mask
-        USE_FULL_MASK = True
-        if USE_FULL_MASK:
-            mask_np = tree_mask_gpu.cpu().numpy().reshape(bs, K, K)
-            tree_mask_parts = []
-            for i, req in enumerate(batch.reqs):
-                seq_len = len(req.origin_input_ids) + len(req.output_ids)
-                # ForwardBatch.init_new bumps seq_lens by K for TARGET_VERIFY, so
-                # triton backend computes seq_mask_len = K*(seq_lens+K) = K*(S+2K).
-                # mask_indptr stride = S+2K per query; kv loop covers S+K entries.
-                # Layout: [S ones | K tree bits | K padding zeros]
-                prefix_mask = torch.ones((K, seq_len), device=self.device)
-                tree_part = torch.from_numpy(mask_np[i]).to(self.device)
-                pad = torch.zeros((K, K), dtype=torch.bool, device=self.device)
-                full_mask = torch.cat((prefix_mask, tree_part, pad), dim=1).to(torch.bool)
-                tree_mask_parts.append(full_mask.flatten())
-            tree_mask_final = torch.cat(tree_mask_parts, dim=0)
-        else:
-            tree_mask_final = tree_mask_gpu
+        # N-gram PHANTOM is a linear spec decode chain (not a tree), so standard causal
+        # extend attention is semantically correct and sufficient — exactly as llama.cpp
+        # uses for n-gram spec decode.  The custom mask path had a stride mismatch
+        # (kernel uses S+K per row; mask was built with S+2K) causing wrong attention
+        # weights for q>0 and a HIP illegal memory access fault.  Passing None causes
+        # extend_attention_fwd to compile with USE_CUSTOM_MASK=False, IS_CAUSAL=True.
+        tree_mask_final = None
 
         # Set up verification
         original_algo = batch.spec_algorithm
@@ -1061,7 +1049,7 @@ class PhantomWorker:
         batch.forward_mode = ForwardMode.TARGET_VERIFY
         batch.spec_info = NgramVerifyInput(
             draft_tokens_gpu,
-            tree_mask_final,
+            tree_mask_final,  # None → IS_CAUSAL=True causal extend attention
             positions,
             retrive_index,
             retrive_next_token,
