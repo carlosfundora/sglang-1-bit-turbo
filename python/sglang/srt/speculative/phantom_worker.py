@@ -47,6 +47,9 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Track one-time warnings to avoid log spam
+_sgl_kernel_warned = False
+
 
 class _GhostBuffer:
     """N-buffered pinned memory for zero-copy CPU→GPU draft transfer.
@@ -107,11 +110,20 @@ class _GhostBuffer:
         return self._masks[self._write_idx]
 
     def swap(self, bs: int):
-        """CPU finished writing — mark slot ready, advance write pointer."""
+        """CPU finished writing — mark slot ready, advance write pointer.
+
+        If the ring is full (all slots have unread data), overwrites the
+        oldest slot rather than blocking — the GPU always wants the freshest
+        data, and a stale slot is worse than a lost slot.
+        """
         with self._lock:
+            if self._ready_count >= self.num_buffers - 1:
+                # Ring full — advance read pointer to drop oldest stale slot
+                self._read_idx = (self._read_idx + 1) % self.num_buffers
+                self._ready_count -= 1
             self._slot_bs[self._write_idx] = bs
             self._write_idx = (self._write_idx + 1) % self.num_buffers
-            self._ready_count = min(self._ready_count + 1, self.num_buffers - 1)
+            self._ready_count += 1
             self.active_bs = bs
             self._ready.set()
 
@@ -526,16 +538,20 @@ class PhantomWorker:
         )
 
         # N-buffered pinned memory (HSA zero-copy on AMD)
+        # Allocate for _max_draft (not draft_token_num) so dynamic γ growth
+        # doesn't exceed buffer bounds at runtime.
+        self._max_draft_alloc = min(self.draft_token_num * 2, 16)
         num_buffers = getattr(server_args, 'phantom_num_buffers', 2)
-        self.ghost_buf = _GhostBuffer(self.max_batch_size, self.draft_token_num, num_buffers)
+        self.ghost_buf = _GhostBuffer(self.max_batch_size, self._max_draft_alloc, num_buffers)
 
         # GPU-side tensors for tree reconstruction (these must be in VRAM)
-        K = self.draft_token_num
+        # Also sized for _max_draft_alloc to support dynamic γ.
+        K_alloc = self._max_draft_alloc
         max_bs = self.max_batch_size
-        self.positions = torch.empty(max_bs * K, dtype=torch.int64, device=self.device)
-        self.retrive_index = torch.empty((max_bs, K), dtype=torch.int64, device=self.device)
-        self.retrive_next_token = torch.empty((max_bs, K), dtype=torch.int64, device=self.device)
-        self.retrive_next_sibling = torch.empty((max_bs, K), dtype=torch.int64, device=self.device)
+        self.positions = torch.empty(max_bs * K_alloc, dtype=torch.int64, device=self.device)
+        self.retrive_index = torch.empty((max_bs, K_alloc), dtype=torch.int64, device=self.device)
+        self.retrive_next_token = torch.empty((max_bs, K_alloc), dtype=torch.int64, device=self.device)
+        self.retrive_next_sibling = torch.empty((max_bs, K_alloc), dtype=torch.int64, device=self.device)
 
         # Ghost thread state — uses immutable _GhostJob for thread safety
         self._ghost_thread: Optional[threading.Thread] = None
@@ -547,7 +563,10 @@ class PhantomWorker:
         self._job_counter = 0  # monotonic job ID
         self._active_job_id = -1  # job ID of data currently in ghost_buf
 
-        # Multi-variant ghost lookups (different context windows)
+        # Multi-variant ghost lookups (different context windows).
+        # Despite the name, this controls the number of alternative corpus
+        # lookups per ghost round, NOT the number of ghost threads (always 1).
+        # When >1, the scan+patch pipeline activates to improve draft quality.
         self._num_ghost_variants = getattr(server_args, 'phantom_num_ghosts', 1)
 
         # Negative filter (bloom filter for rejected bigrams)
@@ -607,18 +626,19 @@ class PhantomWorker:
         self._fb_reenable = _REENABLE_THRESHOLD
         self._fb_probe_interval = _PROBE_INTERVAL
 
-        # Dynamic γ state
+        # Dynamic γ state — cap at buffer allocation size
         self._initial_draft_num = self.draft_token_num
         self._min_draft = 2
-        self._max_draft = min(self._initial_draft_num * 2, 16)
+        self._max_draft = self._max_draft_alloc
 
         # Detect HSA capability
         self._is_hsa = self._detect_hsa()
 
         logger.info(
-            "PHANTOM worker: draft_tokens=%d, max_bs=%d, HSA=%s, "
+            "PHANTOM worker: draft_tokens=%d (max=%d), max_bs=%d, HSA=%s, "
             "buffers=%d, pinned_buf=%.1f KB (tokens) + %.1f KB (mask) per slot",
-            K, max_bs, self._is_hsa, self.ghost_buf.num_buffers,
+            self.draft_token_num, self._max_draft_alloc, max_bs, self._is_hsa,
+            self.ghost_buf.num_buffers,
             self.ghost_buf._tokens[0].nelement() * 8 / 1024,
             self.ghost_buf._masks[0].nelement() / 1024,
         )
@@ -882,21 +902,23 @@ class PhantomWorker:
                                 accept_lens: list, bs: int, K: int):
         """Insert rejected draft bigrams into the negative bloom filter.
 
-        For each request, tokens beyond accept_length are "rejected" — the model
-        disagreed with these drafts. We extract bigrams from the rejected suffix
-        and insert them so future ghost variants can avoid these patterns.
+        Only inserts the bigram AT the rejection boundary (last accepted →
+        first rejected), not the entire rejected suffix. Tokens beyond the
+        boundary weren't verified by the target model, so treating them as
+        "bad" would poison the filter with unverified patterns.
         """
         try:
             draft_cpu = draft_tokens.cpu().numpy() if draft_tokens.is_cuda else draft_tokens.numpy()
             for r in range(bs):
                 acc_len = int(accept_lens[r]) if r < len(accept_lens) else 0
-                start = r * K + acc_len
-                end = (r + 1) * K
-                rejected = draft_cpu[start:end]
-                # Insert bigrams from the rejected suffix
-                for i in range(len(rejected) - 1):
-                    tok_a, tok_b = int(rejected[i]), int(rejected[i + 1])
-                    if tok_a != 0 and tok_b != 0:  # skip padding
+                if acc_len <= 0 or acc_len >= K:
+                    continue
+                # The bigram at the rejection point: token[acc_len-1] → token[acc_len]
+                idx_accepted = r * K + acc_len - 1
+                idx_rejected = r * K + acc_len
+                if idx_rejected < len(draft_cpu):
+                    tok_a, tok_b = int(draft_cpu[idx_accepted]), int(draft_cpu[idx_rejected])
+                    if tok_a != 0 and tok_b != 0:
                         self._neg_filter.insert_bigram(tok_a, tok_b)
         except Exception:
             pass  # non-critical — filter is best-effort
@@ -988,7 +1010,16 @@ class PhantomWorker:
 
         try:
             if reconstruct_indices_from_tree_mask is None:
-                raise ImportError("sgl_kernel.speculative not available")
+                global _sgl_kernel_warned
+                if not _sgl_kernel_warned:
+                    logger.error(
+                        "PHANTOM: sgl_kernel.speculative not installed — "
+                        "tree reconstruction unavailable. PHANTOM speculative "
+                        "decoding is effectively disabled (falling back to "
+                        "target-only decode). Install sgl_kernel to enable."
+                    )
+                    _sgl_kernel_warned = True
+                return self._fallback_target_only(batch)
 
             reconstruct_indices_from_tree_mask(
                 tree_mask_gpu,

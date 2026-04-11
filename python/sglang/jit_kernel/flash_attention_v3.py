@@ -80,7 +80,8 @@ def _is_fa3_supported(device=None) -> bool:
     #  That means if you use A100/A*0/L20/L40/L40s/4090 you can use fa3.
     if torch.version.cuda is None:
         return False
-    return (torch.version.cuda >= "12.3") and (
+    cuda_ver = tuple(int(x) for x in torch.version.cuda.split("."))
+    return (cuda_ver >= (12, 3)) and (
         torch.cuda.get_device_capability(device)[0] == 9
         or torch.cuda.get_device_capability(device)[0] == 8
     )

@@ -136,7 +136,7 @@ class GemLiteConfig(QuantizationConfig):
 
         if isinstance(layer, LinearBase):
             if any(
-                prefix.endswith(m) for m in self.modules_to_not_convert
+                m in prefix for m in self.modules_to_not_convert
             ):
                 from sglang.srt.layers.quantization.base_config import (
                     UnquantizedLinearMethod,
@@ -200,6 +200,22 @@ class GemLiteGPTQConfig(GemLiteConfig):
 
     def get_name(self) -> str:
         return "gemlite_gptq"
+
+    @classmethod
+    def override_quantization_method(
+        cls, hf_quant_cfg: Dict[str, Any], user_quant: Optional[str]
+    ) -> Optional[str]:
+        """Claim GPTQ models when user specifies gemlite_gptq."""
+        model_method = hf_quant_cfg.get("quant_method", "").lower()
+        if model_method == "gptq" and user_quant == "gemlite_gptq":
+            logger.warning(
+                "GemLite: intercepting GPTQ model → routing through "
+                "Triton kernels (gemlite_gptq). NOTE: GPTQ support is "
+                "experimental — desc_act and non-standard group indexing "
+                "may not be handled correctly."
+            )
+            return "gemlite_gptq"
+        return None
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "GemLiteGPTQConfig":
@@ -284,6 +300,17 @@ class GemLiteLinearMethod(LinearMethodBase):
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
         pack_factor = self.quant_config.pack_factor
+
+        # Check each logical output partition (QKV heads, gated MLP, etc.)
+        # for pack_factor alignment — a misaligned partition corrupts packing.
+        for i, part_size in enumerate(output_partition_sizes):
+            if part_size % pack_factor != 0:
+                raise ValueError(
+                    f"Output partition {i} size {part_size} not aligned "
+                    f"with pack_factor {pack_factor}. TP sharding may produce "
+                    f"misaligned partitions for {self.quant_config.weight_bits}-bit "
+                    f"quantization."
+                )
 
         # Use PackedvLLMParameter for proper TP sharding of packed int32 weights
         qweight = PackedvLLMParameter(

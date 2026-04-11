@@ -133,9 +133,11 @@ if (
             )
         else:
             _gfx_log.warning(
-                "gfxGRAPH health check failed: %s — graphs may not capture correctly",
+                "gfxGRAPH health check failed: %s — disabling gfxGRAPH to prevent "
+                "runtime crashes during graph capture",
                 _gfx_health.get("details", "unknown"),
             )
+            gfxgraph.disable()
 
         del _gfx_env, _gfx_validate, _gfx_debug, _gfx_mode, _gfx_log, _gfx_health
     except ImportError:

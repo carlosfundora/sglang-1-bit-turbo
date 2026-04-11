@@ -691,10 +691,18 @@ class LayerNorm(MultiPlatformOp):
         # dtype alignment.  Cache weight/bias in the input dtype so F.layer_norm
         # runs entirely in bf16/fp16 (~2.6x faster than casting input to f32).
         if x.dtype != self.dtype and x.dtype in (torch.bfloat16, torch.float16):
-            if not hasattr(self, "_cached_weight_dtype") or self._cached_weight_dtype != x.dtype:
+            # Use tensor version counter to detect in-place weight updates
+            # (copy_, LoRA merge, etc.) that don't change data_ptr.
+            _w_ver = self.weight.data._version if self.elementwise_affine else 0
+            if (
+                not hasattr(self, "_cached_weight_dtype")
+                or self._cached_weight_dtype != x.dtype
+                or getattr(self, "_cached_weight_ver", None) != _w_ver
+            ):
                 self._cached_weight = self.weight.data.to(x.dtype) if self.elementwise_affine else None
                 self._cached_bias = self.bias.data.to(x.dtype) if self.use_bias else None
                 self._cached_weight_dtype = x.dtype
+                self._cached_weight_ver = _w_ver
             return F.layer_norm(
                 x, (self.hidden_size,),
                 weight=self._cached_weight, bias=self._cached_bias,

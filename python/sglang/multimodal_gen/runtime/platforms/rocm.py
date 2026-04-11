@@ -149,17 +149,22 @@ class RocmPlatform(Platform):
             try:
                 import flash_attn  # noqa: F401
 
-                from sglang.jit_kernel.flash_attention_v3 import _is_fa3_supported
                 from sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn import (  # noqa: F401
                     FlashAttentionBackend,
                 )
 
-                if not _is_fa3_supported():
-                    logger.info(
-                        "FlashAttention backend now dispatches through FA3 "
-                        "(CUDA-only). Using Torch SDPA backend on ROCm."
-                    )
-                    target_backend = AttentionBackendEnum.TORCH_SDPA
+                # FA3 is CUDA-only (requires sm80+). On ROCm, flash_attn provides
+                # FA2 which works directly — skip the FA3 gate.
+                _is_rocm = hasattr(torch.version, "hip") and torch.version.hip is not None
+                if not _is_rocm:
+                    from sglang.jit_kernel.flash_attention_v3 import _is_fa3_supported
+
+                    if not _is_fa3_supported():
+                        logger.info(
+                            "FlashAttention backend now dispatches through FA3 "
+                            "(CUDA-only). Using Torch SDPA backend."
+                        )
+                        target_backend = AttentionBackendEnum.TORCH_SDPA
 
                 if target_backend == AttentionBackendEnum.FA:
                     supported_sizes = FlashAttentionBackend.get_supported_head_sizes()
