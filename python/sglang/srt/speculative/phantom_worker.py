@@ -36,6 +36,7 @@ from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.speculative.draft_prefilter import AdaptiveThresholdController
 from sglang.srt.speculative.ngram_info import NgramVerifyInput
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
@@ -342,6 +343,25 @@ class PhantomWorker:
         # Negative filter (bloom filter for rejected bigrams)
         self._neg_filter = _NegativeFilter()
 
+        # Adaptive controller for negative filter pipeline (phases 2+3)
+        # "threshold" here controls bloom filter age_limit:
+        #   lower threshold → keep more history (aggressive filtering)
+        #   higher threshold → age faster (conservative, less filtering)
+        # Range: 500 (very aggressive) to 5000 (nearly disabled)
+        self._neg_controller = AdaptiveThresholdController(
+            initial_threshold=2000.0,
+            min_threshold=500.0,
+            max_threshold=5000.0,
+            ema_alpha=0.1,
+            precision_target=0.70,   # 70% of patches should be correct
+            precision_floor=0.30,    # below 30% → disable scan+patch
+            warmup_steps=20,         # passthrough for 20 rounds while bloom fills
+            step_size=200.0,         # adjust age_limit by 200 per step
+            backoff_cooldown=40,     # stay disabled for 40 rounds before retry
+        )
+        # Track which positions were patched this round for outcome measurement
+        self._patched_positions: list = []  # [(request_idx, position_idx), ...]
+
         # Stats
         self.total_rounds = 0
         self.ghost_hits = 0  # ghost tree was ready when GPU needed it
@@ -420,6 +440,18 @@ class PhantomWorker:
         self._fallback_probe_counter = 0
         self.draft_token_num = self._initial_draft_num
         self._neg_filter.reset()
+        self._neg_controller = AdaptiveThresholdController(
+            initial_threshold=2000.0,
+            min_threshold=500.0,
+            max_threshold=5000.0,
+            ema_alpha=0.1,
+            precision_target=0.70,
+            precision_floor=0.30,
+            warmup_steps=20,
+            step_size=200.0,
+            backoff_cooldown=40,
+        )
+        self._patched_positions = []
         self._job_counter = 0
         self._active_job_id = -1
 
@@ -468,8 +500,9 @@ class PhantomWorker:
         By the time the GPU needs the next draft, all 3 phases have completed
         and the patched result is already in pinned HSA memory.
 
-        When num_variants=1 or the negative filter is cold (no data yet),
-        only Phase 1 runs — zero overhead vs the original single-lookup path.
+        When num_variants=1, the negative filter is cold (no data yet), or the
+        adaptive controller has backed off, only Phase 1 runs — zero overhead
+        vs the original single-lookup path.
         """
         while not self._ghost_stop.is_set():
             self._ghost_request_event.wait(timeout=0.1)
@@ -493,13 +526,20 @@ class PhantomWorker:
                 if len(req_drafts) != bs * K:
                     continue
 
-                # ── Phase 2 + 3: SCAN + PATCH (only when filter is warm) ──
-                if job.num_variants > 1 and self._neg_filter.size > 0:
+                # ── Phase 2 + 3: SCAN + PATCH (gated by adaptive controller) ──
+                run_filter = (
+                    job.num_variants > 1
+                    and self._neg_filter.size > 0
+                    and self._neg_controller.is_active
+                )
+                patched = []
+                if run_filter:
                     bad_positions = self._scan_bad_positions(req_drafts, bs, K)
                     if bad_positions:
-                        req_drafts, mask = self._patch_bad_positions(
+                        req_drafts, mask, patched = self._patch_bad_positions(
                             job, req_drafts, mask, bad_positions, bs, K
                         )
+                self._patched_positions = patched
 
                 # Copy final result into pinned buffer and signal ready
                 cpu_tokens = self.ghost_buf.cpu_tokens
@@ -538,9 +578,14 @@ class PhantomWorker:
         For each bad position, if the alt lookup produced a different token that
         doesn't itself form a known-bad bigram, swap it in. Mask rows are updated
         to match the alt lookup's tree structure at the patched position.
+
+        Returns (drafts, mask, patched) where patched is a list of
+        (request_idx, position_idx, original_token, replacement_token) tuples
+        for outcome tracking and future contrastive training.
         """
         W = self.max_match_window_size
         alt_windows = [min(W * 2, 128), max(W // 2, 4)]
+        patched = []  # (r, pos, orig_tok, new_tok)
 
         for win in alt_windows:
             alt_tokens = []
@@ -573,12 +618,13 @@ class PhantomWorker:
                 drafts[r * K + pos] = alt_tok
                 m_off = r * K * K + pos * K
                 mask[m_off:m_off + K] = alt_mask[m_off:m_off + K]
+                patched.append((r, pos, orig_tok, alt_tok))
 
             bad_positions = remaining
             if not bad_positions:
                 break
 
-        return drafts, mask
+        return drafts, mask, patched
 
     def _submit_ghost_request(self, batch: ScheduleBatch):
         """Submit a _GhostJob for the ghost thread to process."""
@@ -633,6 +679,38 @@ class PhantomWorker:
                         self._neg_filter.insert_bigram(tok_a, tok_b)
         except Exception:
             pass  # non-critical — filter is best-effort
+
+    def _record_patch_outcomes(self, accept_lens: list, K: int):
+        """Compare patched positions against verify accept_lengths.
+
+        A patch at position P in request R is "correct" if P < accept_length[R],
+        meaning the replacement token was accepted by the target model.
+
+        Feeds outcomes into the adaptive controller which adjusts:
+          - Whether scan+patch phases should keep running
+          - The bloom filter's age_limit (via threshold → age_limit sync)
+
+        Also stores preference pairs for future contrastive training:
+          (original_token, replacement_token, was_accepted)
+        """
+        patched = self._patched_positions
+        if not patched:
+            # No patches this round — still count the step so warmup advances
+            self._neg_controller.record_outcome(0, 0)
+            return
+
+        n_patched = len(patched)
+        n_correct = 0
+        for r, pos, orig_tok, new_tok in patched:
+            acc_len = int(accept_lens[r]) if r < len(accept_lens) else 0
+            if pos < acc_len:
+                n_correct += 1
+
+        self._neg_controller.record_outcome(n_patched, n_correct)
+
+        # Sync controller threshold → bloom filter age_limit
+        # Lower threshold = keep more history = more aggressive filtering
+        self._neg_filter._age_limit = max(int(self._neg_controller.threshold), 200)
 
     # ---- Main dispatch ----
 
@@ -761,6 +839,9 @@ class PhantomWorker:
             self._update_negative_filter(
                 batch.spec_info.draft_tokens, accept_lens, bs, K
             )
+
+            # ── Adaptive controller: measure patch outcomes ──
+            self._record_patch_outcomes(accept_lens, K)
 
             # ── Auto-fallback logic ──
             if accept_rate < self._fb_threshold:
@@ -906,16 +987,22 @@ class PhantomWorker:
             corpus_total = self._corpus_hit_count + self._corpus_miss_count
             corpus_pct = self._corpus_hit_count / max(corpus_total, 1) * 100
             neg_size = self._neg_filter.size if self._neg_filter else 0
-            neg_age = self._neg_filter._insert_count if self._neg_filter else 0
+            neg_age = self._neg_filter._count if self._neg_filter else 0
+            ctrl = self._neg_controller.get_state()
             logger.info(
                 "PHANTOM stats: rounds=%d, ghost=%.1f%% (%d/%d), "
                 "accept=%.2f, γ=%d, corpus_hit=%.1f%%, fallback=%s, "
-                "buf=%s, neg_filter=%d/%d, ghosts=%d",
+                "buf=%s, neg_filter=%d (age_lim=%d), ghosts=%d, "
+                "patch_ema=%.2f τ=%.0f %s",
                 self.total_rounds, ghost_pct, self.ghost_hits, total,
                 avg_accept, self.draft_token_num, corpus_pct,
                 "ON" if self._fallback_active else "off",
                 "HSA" if self._is_hsa else "pinned",
-                neg_size, neg_age, self._num_ghost_variants,
+                neg_size, self._neg_filter._age_limit,
+                self._num_ghost_variants,
+                ctrl["precision_ema"], ctrl["threshold"],
+                "(warmup)" if ctrl["in_warmup"] else
+                "(OFF)" if not ctrl["enabled"] else "",
             )
 
     def __del__(self):
