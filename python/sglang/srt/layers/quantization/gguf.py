@@ -236,8 +236,14 @@ def fused_mul_mat_gguf(
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
 
-    # MMVQ safe batch thresholds — Q1 and imatrix use 8 (llama.cpp MMVQ_MAX_BATCH_SIZE)
-    if qweight_type in PRISM_Q1_TYPES or qweight_type in IMATRIX_QUANT_TYPES:
+    # MMVQ safe batch thresholds.
+    # PRISM_Q1_TYPES: limit to batch=1 (single-token decode only). In llama.cpp, Q1_0_G128
+    # uses the IQK CPU path, not MMVQ; our GPU MMVQ kernel assumes contiguous x layout
+    # which fails for multi-token TARGET_VERIFY passes (non-contiguous hidden state views).
+    # IMATRIX_QUANT_TYPES: 8 matches llama.cpp MMVQ_MAX_BATCH_SIZE; contiguous in all paths.
+    if qweight_type in PRISM_Q1_TYPES:
+        mmvq_safe = 1
+    elif qweight_type in IMATRIX_QUANT_TYPES:
         mmvq_safe = 8
     else:
         mmvq_safe = 2 if qweight.shape[0] > 5120 else 6
