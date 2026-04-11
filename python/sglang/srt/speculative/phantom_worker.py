@@ -203,7 +203,214 @@ class _NegativeFilter:
         return self._count
 
 
-class _GhostJob:
+class _QuantTelemetry:
+    """Lightweight inference telemetry for quantization-aware calibration.
+
+    Accumulates signals during PHANTOM inference that inform which parts
+    of the model are producing bad logits and can be quantized aggressively.
+
+    All signals are collected from data already computed during the verify
+    step — zero additional GPU forward passes required.
+
+    Collected signals:
+      1. Channel importance (running mean of |hidden_states| per dim)
+         → hot channels need precision, cold channels can be crushed
+      2. Logit margin at accept/reject boundaries
+         → small margin = quant noise would flip the decision
+      3. Token confusion pairs (draft vs actual when rejected)
+         → embedding rows that confuse each other need precision
+      4. Position-wise acceptance rate
+         → which tree depths the model struggles with
+
+    Periodic snapshots are written to disk for offline analysis by
+    a quantization calibration tool.
+    """
+
+    def __init__(self, hidden_dim: int = 0, max_confusion_pairs: int = 8192,
+                 snapshot_interval: int = 200, snapshot_dir: Optional[str] = None):
+        self.hidden_dim = hidden_dim
+        self._snapshot_interval = snapshot_interval
+        self._snapshot_dir = snapshot_dir
+        self._step = 0
+
+        # Signal 1: channel importance — EMA of |activation| per hidden dim
+        # Initialized lazily on first call (hidden_dim may not be known yet)
+        self._channel_sum: Optional[np.ndarray] = None
+        self._channel_count: int = 0
+
+        # Signal 2: logit margin at decision boundaries
+        # margin = logit[top1] - logit[top2] for accepted/rejected positions
+        self._margin_accepted = deque(maxlen=5000)   # margins where draft was right
+        self._margin_rejected = deque(maxlen=5000)   # margins where draft was wrong
+
+        # Signal 3: confusion pairs — (draft_tok, actual_tok) frequency
+        self._confusion: dict = {}  # {(draft, actual): count}
+        self._max_confusion = max_confusion_pairs
+
+        # Signal 4: position-wise acceptance histogram
+        self._pos_accepted = np.zeros(32, dtype=np.int64)  # up to 32 draft positions
+        self._pos_total = np.zeros(32, dtype=np.int64)
+
+    def record(self, logits: torch.Tensor, hidden_states: Optional[torch.Tensor],
+               draft_tokens: torch.Tensor, verified_ids: torch.Tensor,
+               accept_lens: torch.Tensor, bs: int, K: int):
+        """Record one round of telemetry from verify outputs.
+
+        Args:
+            logits: [num_tokens, vocab_size] — final logits from verify pass
+            hidden_states: [num_tokens, hidden_dim] or None — last-layer activations
+            draft_tokens: [bs * K] — what PHANTOM proposed
+            verified_ids: [bs] — what the model actually picked
+            accept_lens: [bs] — how many draft tokens were accepted per request
+            bs: batch size
+            K: draft length
+        """
+        self._step += 1
+
+        try:
+            self._record_channel_importance(hidden_states)
+            self._record_logit_margins(logits, accept_lens, bs, K)
+            self._record_confusion(draft_tokens, verified_ids, accept_lens, bs, K)
+            self._record_position_acceptance(accept_lens, K)
+        except Exception:
+            pass  # telemetry is best-effort
+
+        if (self._snapshot_dir and self._snapshot_interval > 0
+                and self._step % self._snapshot_interval == 0):
+            self._write_snapshot()
+
+    def _record_channel_importance(self, hidden_states: Optional[torch.Tensor]):
+        """Signal 1: accumulate |activation| per hidden dimension."""
+        if hidden_states is None:
+            return
+        # Move to CPU, take abs mean across token dimension
+        h = hidden_states.float().abs().mean(dim=0).cpu().numpy()
+        if self._channel_sum is None:
+            self._channel_sum = np.zeros_like(h)
+            self.hidden_dim = len(h)
+        self._channel_sum += h
+        self._channel_count += 1
+
+    def _record_logit_margins(self, logits: torch.Tensor,
+                              accept_lens: torch.Tensor, bs: int, K: int):
+        """Signal 2: top1-top2 logit gap at accept/reject boundaries."""
+        if logits is None or logits.dim() != 2:
+            return
+        # Only sample a few positions per round to keep cost near-zero
+        top2 = logits.topk(2, dim=-1).values  # [num_tokens, 2]
+        margins = (top2[:, 0] - top2[:, 1]).cpu().numpy()
+
+        acc_cpu = accept_lens.cpu().numpy() if accept_lens.is_cuda else accept_lens.numpy()
+        idx = 0
+        for r in range(bs):
+            acc = int(acc_cpu[r])
+            for pos in range(min(K, len(margins) - idx)):
+                m = float(margins[idx + pos])
+                if pos < acc:
+                    self._margin_accepted.append(m)
+                else:
+                    self._margin_rejected.append(m)
+            idx += K
+
+    def _record_confusion(self, draft_tokens: torch.Tensor,
+                          verified_ids: torch.Tensor,
+                          accept_lens: torch.Tensor, bs: int, K: int):
+        """Signal 3: which draft tokens the model overrides (confusion pairs)."""
+        draft_cpu = draft_tokens.cpu()
+        verified_cpu = verified_ids.cpu()
+        acc_cpu = accept_lens.cpu()
+
+        for r in range(bs):
+            acc = int(acc_cpu[r])
+            # The token at position acc is the first rejected draft token;
+            # verified_ids[r] is what the model chose instead
+            reject_pos = r * K + acc
+            if reject_pos < len(draft_cpu) and acc < K:
+                draft_tok = int(draft_cpu[reject_pos])
+                actual_tok = int(verified_cpu[r])
+                if draft_tok != 0 and actual_tok != 0 and draft_tok != actual_tok:
+                    pair = (draft_tok, actual_tok)
+                    self._confusion[pair] = self._confusion.get(pair, 0) + 1
+                    # Prune if too large — keep top-frequency pairs
+                    if len(self._confusion) > self._max_confusion:
+                        threshold = sorted(self._confusion.values())[-self._max_confusion // 2]
+                        self._confusion = {
+                            k: v for k, v in self._confusion.items() if v >= threshold
+                        }
+
+    def _record_position_acceptance(self, accept_lens: torch.Tensor, K: int):
+        """Signal 4: which draft positions succeed/fail."""
+        acc_cpu = accept_lens.cpu().numpy() if accept_lens.is_cuda else accept_lens.numpy()
+        for acc in acc_cpu:
+            acc = int(acc)
+            for pos in range(min(K, len(self._pos_total))):
+                self._pos_total[pos] += 1
+                if pos < acc:
+                    self._pos_accepted[pos] += 1
+
+    def _write_snapshot(self):
+        """Periodic dump to disk for offline quant calibration."""
+        try:
+            os.makedirs(self._snapshot_dir, exist_ok=True)
+            path = os.path.join(self._snapshot_dir, f"quant_telem_{self._step}.npz")
+
+            data = {"step": self._step}
+
+            if self._channel_sum is not None and self._channel_count > 0:
+                data["channel_importance"] = self._channel_sum / self._channel_count
+
+            if self._margin_accepted:
+                data["margin_accepted"] = np.array(list(self._margin_accepted))
+            if self._margin_rejected:
+                data["margin_rejected"] = np.array(list(self._margin_rejected))
+
+            if self._confusion:
+                pairs = sorted(self._confusion.items(), key=lambda x: -x[1])[:1000]
+                data["confusion_pairs"] = np.array(
+                    [(d, a, c) for (d, a), c in pairs], dtype=np.int64
+                )
+
+            data["pos_accepted"] = self._pos_accepted.copy()
+            data["pos_total"] = self._pos_total.copy()
+
+            np.savez_compressed(path, **data)
+            logger.info("PHANTOM quant telemetry snapshot: %s (%d steps)", path, self._step)
+        except Exception as e:
+            logger.debug("PHANTOM quant telemetry write failed: %s", e)
+
+    def get_summary(self) -> dict:
+        """Summary for periodic log."""
+        avg_margin_acc = (
+            sum(self._margin_accepted) / len(self._margin_accepted)
+            if self._margin_accepted else 0.0
+        )
+        avg_margin_rej = (
+            sum(self._margin_rejected) / len(self._margin_rejected)
+            if self._margin_rejected else 0.0
+        )
+        return {
+            "steps": self._step,
+            "channel_samples": self._channel_count,
+            "margin_acc": round(avg_margin_acc, 3),
+            "margin_rej": round(avg_margin_rej, 3),
+            "confusion_pairs": len(self._confusion),
+            "pos_rate": [
+                round(float(self._pos_accepted[i]) / max(float(self._pos_total[i]), 1), 2)
+                for i in range(min(8, len(self._pos_total)))
+                if self._pos_total[i] > 0
+            ],
+        }
+
+    def reset(self):
+        """Clear all accumulated telemetry."""
+        self._step = 0
+        self._channel_sum = None
+        self._channel_count = 0
+        self._margin_accepted.clear()
+        self._margin_rejected.clear()
+        self._confusion.clear()
+        self._pos_accepted[:] = 0
+        self._pos_total[:] = 0
     """Immutable job descriptor for one ghost-thread round.
 
     Freezes batch_tokens, K, bs, and a monotonic job_id so the ghost thread
@@ -362,6 +569,16 @@ class PhantomWorker:
         # Track which positions were patched this round for outcome measurement
         self._patched_positions: list = []  # [(request_idx, position_idx), ...]
 
+        # Quantization telemetry — collects signals for offline calibration
+        # Snapshots written to /tmp/phantom_quant_telem/ by default
+        telem_dir = os.environ.get(
+            "PHANTOM_QUANT_TELEM_DIR", "/tmp/phantom_quant_telem"
+        )
+        self._quant_telem = _QuantTelemetry(
+            snapshot_interval=500,
+            snapshot_dir=telem_dir,
+        )
+
         # Stats
         self.total_rounds = 0
         self.ghost_hits = 0  # ghost tree was ready when GPU needed it
@@ -452,6 +669,7 @@ class PhantomWorker:
             backoff_cooldown=40,
         )
         self._patched_positions = []
+        self._quant_telem.reset()
         self._job_counter = 0
         self._active_job_id = -1
 
@@ -843,6 +1061,16 @@ class PhantomWorker:
             # ── Adaptive controller: measure patch outcomes ──
             self._record_patch_outcomes(accept_lens, K)
 
+            # ── Quantization telemetry: capture free signals ──
+            self._quant_telem.record(
+                logits=logits_output.next_token_logits,
+                hidden_states=logits_output.hidden_states,
+                draft_tokens=batch.spec_info.draft_tokens,
+                verified_ids=next_token_ids,
+                accept_lens=accept_lens,
+                bs=bs, K=K,
+            )
+
             # ── Auto-fallback logic ──
             if accept_rate < self._fb_threshold:
                 self._fallback_streak += 1
@@ -1004,6 +1232,16 @@ class PhantomWorker:
                 "(warmup)" if ctrl["in_warmup"] else
                 "(OFF)" if not ctrl["enabled"] else "",
             )
+            # Quant telemetry summary (every 5th log interval = ~250 rounds)
+            if self.total_rounds % (self._log_interval * 5) == 0:
+                qt = self._quant_telem.get_summary()
+                logger.info(
+                    "PHANTOM quant telem: margin_acc=%.3f margin_rej=%.3f "
+                    "confusion=%d ch_samples=%d pos_rate=%s",
+                    qt["margin_acc"], qt["margin_rej"],
+                    qt["confusion_pairs"], qt["channel_samples"],
+                    qt["pos_rate"],
+                )
 
     def __del__(self):
         try:
