@@ -14,6 +14,12 @@
 
 import functools
 import json
+
+try:
+    from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
+except ImportError:
+    pass
+
 import logging
 import os
 from functools import lru_cache
@@ -90,6 +96,7 @@ def _check_rdna2_fp8():
     except Exception:
         _rdna2_fp8_ok = False
     return _rdna2_fp8_ok
+
 
 if _is_cuda:
     from sgl_kernel import sgl_per_token_quant_fp8
@@ -1659,6 +1666,7 @@ if _is_hip:
         if not _check_rdna2_fp8():
             return False
         try:
+
             inp = input.contiguous() if not input.is_contiguous() else input
             eps = 1e-12
             absmax = inp.abs().max()
@@ -1668,7 +1676,7 @@ if _is_hip:
             # .item() sync acceptable — this path only fires without AITER/vLLM
             result = _rdna2_ops.fp8_quantize(inp, scale_val.item())
             if result is not None:
-                output[:input.shape[0]].copy_(result.view(fp8_dtype))
+                output[: input.shape[0]].copy_(result.view(fp8_dtype))
                 return True
         except Exception:
             pass
@@ -1682,11 +1690,12 @@ if _is_hip:
         if not _check_rdna2_fp8():
             return False
         try:
+
             inp = input.contiguous() if not input.is_contiguous() else input
             # .item() sync acceptable — this path only fires without AITER/vLLM
             result = _rdna2_ops.fp8_quantize(inp, scale.item())
             if result is not None:
-                output[:input.shape[0]].copy_(result.view(fp8_dtype))
+                output[: input.shape[0]].copy_(result.view(fp8_dtype))
                 return True
         except Exception:
             pass

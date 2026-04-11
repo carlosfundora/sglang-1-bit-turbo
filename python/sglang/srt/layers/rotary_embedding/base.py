@@ -223,9 +223,12 @@ class RotaryEmbedding(MultiPlatformOp):
                 hard_limit = max(self.max_position_embeddings, int(cache_len))
                 if pos_min < 0 or pos_max >= hard_limit:
                     import logging
+
                     logging.getLogger(__name__).warning(
                         "Rotary positions out of range: min=%d max=%d limit=%d, clamping",
-                        pos_min, pos_max, hard_limit,
+                        pos_min,
+                        pos_max,
+                        hard_limit,
                     )
                     positions = positions.clamp(min=0, max=hard_limit - 1)
                     pos_max = hard_limit - 1
@@ -461,18 +464,22 @@ class RotaryEmbedding(MultiPlatformOp):
             tokens = key.shape[0]
             query = query.view(tokens, -1, qk_head_dim)
             query, key, k_cache, v_cache = fused_qk_rope_reshape_and_cache(
-                q=query, k=key, pos=positions, cos_sin=self.cos_sin_cache,
-                is_neox=self.is_neox_style, flash_layout=True, offs=None,
-                q_out=query, k_out=key, output_zeros=False, **extra_args,
+                q=query,
+                k=key,
+                pos=positions,
+                cos_sin=self.cos_sin_cache,
+                is_neox=self.is_neox_style,
+                flash_layout=True,
+                offs=None,
+                q_out=query,
+                k_out=key,
+                output_zeros=False,
+                **extra_args,
             )
             return query, key
 
         # ── RDNA2 Wave32 RoPE kernel (NeoX-style, full-head rotation only) ──
-        if (
-            self.is_neox_style
-            and self.rotary_dim == self.head_size
-            and offsets is None
-        ):
+        if self.is_neox_style and self.rotary_dim == self.head_size and offsets is None:
             try:
 
                 if rdna2_ops.probe():
@@ -483,7 +490,10 @@ class RotaryEmbedding(MultiPlatformOp):
                     # cos_sin_cache is [max_seq, rotary_dim] and doesn't change
                     # between calls — only `positions` selects different rows.
                     _key = (query.device, query.dtype)
-                    if not hasattr(self, "_rdna2_cos_cache") or getattr(self, "_rdna2_cache_key", None) != _key:
+                    if (
+                        not hasattr(self, "_rdna2_cos_cache")
+                        or getattr(self, "_rdna2_cache_key", None) != _key
+                    ):
                         cos_sin = self.cos_sin_cache.to(query.device, dtype=query.dtype)
                         cos, sin = cos_sin.chunk(2, dim=-1)
                         self._rdna2_cos_cache = cos.contiguous()
@@ -492,8 +502,14 @@ class RotaryEmbedding(MultiPlatformOp):
                     num_heads = query.shape[-1] // self.head_size
                     num_kv_heads = key.shape[-1] // self.head_size
                     result = rdna2_ops.apply_rotary_pos_emb(
-                        query, key, self._rdna2_cos_cache, self._rdna2_sin_cache,
-                        positions, self.head_size, num_heads, num_kv_heads,
+                        query,
+                        key,
+                        self._rdna2_cos_cache,
+                        self._rdna2_sin_cache,
+                        positions,
+                        self.head_size,
+                        num_heads,
+                        num_kv_heads,
                         self.rotary_dim,
                     )
                     if result is not None:
@@ -503,12 +519,14 @@ class RotaryEmbedding(MultiPlatformOp):
 
         # ── sgl_kernel fallback (if available) ──
         if self.use_fallback_kernel and fused_set_kv_buffer_arg is None:
-            self.cos_sin_cache = self.cos_sin_cache.to(
-                query.device, dtype=query.dtype
-            )
+            self.cos_sin_cache = self.cos_sin_cache.to(query.device, dtype=query.dtype)
             self.fallback_rotary_embedding(
-                positions, query, key,
-                self.head_size, self.cos_sin_cache, self.is_neox_style,
+                positions,
+                query,
+                key,
+                self.head_size,
+                self.cos_sin_cache,
+                self.is_neox_style,
             )
             return query, key
 
