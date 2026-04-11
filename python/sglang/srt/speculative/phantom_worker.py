@@ -1042,9 +1042,14 @@ class PhantomWorker:
             tree_mask_parts = []
             for i, req in enumerate(batch.reqs):
                 seq_len = len(req.origin_input_ids) + len(req.output_ids)
-                prefix_mask = torch.ones((K, seq_len - 1), device=self.device)
+                # ForwardBatch.init_new bumps seq_lens by K for TARGET_VERIFY, so
+                # triton backend computes seq_mask_len = K*(seq_lens+K) = K*(S+2K).
+                # mask_indptr stride = S+2K per query; kv loop covers S+K entries.
+                # Layout: [S ones | K tree bits | K padding zeros]
+                prefix_mask = torch.ones((K, seq_len), device=self.device)
                 tree_part = torch.from_numpy(mask_np[i]).to(self.device)
-                full_mask = torch.cat((prefix_mask, tree_part), dim=1).to(torch.bool)
+                pad = torch.zeros((K, K), dtype=torch.bool, device=self.device)
+                full_mask = torch.cat((prefix_mask, tree_part, pad), dim=1).to(torch.bool)
                 tree_mask_parts.append(full_mask.flatten())
             tree_mask_final = torch.cat(tree_mask_parts, dim=0)
         else:
