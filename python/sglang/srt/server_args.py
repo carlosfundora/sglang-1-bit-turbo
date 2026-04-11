@@ -526,6 +526,7 @@ class ServerArgs:
 
     # Speculative decoding (PHANTOM)
     phantom_num_buffers: int = 2
+    phantom_num_ghosts: int = 1
 
     # Speculative decoding — Medusa heads
     medusa_model_path: Optional[str] = None
@@ -5109,6 +5110,15 @@ class ServerArgs:
             choices=[1, 2, 3, 4],
             help="Number of pinned memory buffers for PHANTOM ghost-draft overlap. "
                  "1=sync-only (debug), 2=double-buffer (default), 3=lookahead, 4=max decouple.",
+        )
+        parser.add_argument(
+            "--phantom-num-ghosts",
+            type=int,
+            default=ServerArgs.phantom_num_ghosts,
+            choices=[1, 2, 3],
+            help="Number of corpus lookup variants per ghost round. "
+                 "1=single lookup (default), 2-3=multi-variant with negative "
+                 "filtering (write→scan→patch pipeline).",
         )
 
         # Medusa speculative decoding

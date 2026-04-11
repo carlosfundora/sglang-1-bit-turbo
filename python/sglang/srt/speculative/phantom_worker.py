@@ -130,6 +130,95 @@ class _GhostBuffer:
                 self.active_bs = self._slot_bs[self._read_idx]
 
 
+class _NegativeFilter:
+    """Bloom filter tracking historically-rejected n-gram draft patterns.
+
+    After each verify step, rejected draft token bigrams are inserted.
+    The ghost thread scores candidate sequences against the filter to
+    prefer drafts with fewer known-bad patterns.
+
+    Uses a compact bytearray-based bloom filter with 2 hash functions.
+    At 64K bits (8KB) and ~1000 patterns, false positive rate is ~1%.
+
+    Aging: resets every `age_limit` insertions to prevent saturation.
+    """
+
+    def __init__(self, num_bits: int = 65536, age_limit: int = 2000):
+        self._bits = bytearray(num_bits // 8)
+        self._num_bits = num_bits
+        self._count = 0
+        self._age_limit = age_limit
+
+    def _hash1(self, val: int) -> int:
+        h = (val ^ 0x811C9DC5) * 0x01000193
+        return h % self._num_bits
+
+    def _hash2(self, val: int) -> int:
+        h = ((val >> 16) ^ val) * 0x45D9F3B
+        h = ((h >> 16) ^ h) * 0x45D9F3B
+        return ((h >> 16) ^ h) % self._num_bits
+
+    def insert_bigram(self, tok_a: int, tok_b: int):
+        """Insert a rejected bigram pattern. Auto-ages when saturated."""
+        if self._count >= self._age_limit:
+            self._bits = bytearray(self._num_bits // 8)
+            self._count = 0
+            logger.debug("PHANTOM: negative filter aged (reset after %d)", self._age_limit)
+        val = tok_a * 131071 + tok_b
+        idx1 = self._hash1(val)
+        idx2 = self._hash2(val)
+        self._bits[idx1 // 8] |= (1 << (idx1 % 8))
+        self._bits[idx2 // 8] |= (1 << (idx2 % 8))
+        self._count += 1
+
+    def query_bigram(self, tok_a: int, tok_b: int) -> bool:
+        """Check if a bigram was previously rejected (may have false positives)."""
+        val = tok_a * 131071 + tok_b
+        idx1 = self._hash1(val)
+        idx2 = self._hash2(val)
+        return (
+            (self._bits[idx1 // 8] & (1 << (idx1 % 8))) != 0
+            and (self._bits[idx2 // 8] & (1 << (idx2 % 8))) != 0
+        )
+
+    def score_sequence(self, tokens: np.ndarray) -> float:
+        """Score a draft sequence: fraction of bigrams NOT in the filter (higher=better)."""
+        if len(tokens) < 2:
+            return 1.0
+        good = 0
+        total = len(tokens) - 1
+        for i in range(total):
+            if not self.query_bigram(int(tokens[i]), int(tokens[i + 1])):
+                good += 1
+        return good / total
+
+    def reset(self):
+        """Clear the filter."""
+        self._bits = bytearray(self._num_bits // 8)
+        self._count = 0
+
+    @property
+    def size(self) -> int:
+        return self._count
+
+
+class _GhostJob:
+    """Immutable job descriptor for one ghost-thread round.
+
+    Freezes batch_tokens, K, bs, and a monotonic job_id so the ghost thread
+    and consumer can detect stale results even when batch size stays the same.
+    """
+    __slots__ = ("job_id", "batch_tokens", "K", "bs", "num_variants")
+
+    def __init__(self, job_id: int, batch_tokens: List[List[int]],
+                 K: int, bs: int, num_variants: int = 1):
+        self.job_id = job_id
+        self.batch_tokens = batch_tokens
+        self.K = K
+        self.bs = bs
+        self.num_variants = num_variants
+
+
 class _FrozenCorpus:
     """Read-only snapshot of an n-gram corpus for lock-free CPU access.
 
@@ -237,13 +326,21 @@ class PhantomWorker:
         self.retrive_next_token = torch.empty((max_bs, K), dtype=torch.int64, device=self.device)
         self.retrive_next_sibling = torch.empty((max_bs, K), dtype=torch.int64, device=self.device)
 
-        # Ghost thread state
+        # Ghost thread state — uses immutable _GhostJob for thread safety
         self._ghost_thread: Optional[threading.Thread] = None
         self._ghost_stop = threading.Event()
-        self._ghost_request: Optional[List[List[int]]] = None
-        self._ghost_request_lock = threading.Lock()
+        self._ghost_job: Optional[_GhostJob] = None
+        self._ghost_job_lock = threading.Lock()
         self._ghost_request_event = threading.Event()
         self._corpus_frozen = False
+        self._job_counter = 0  # monotonic job ID
+        self._active_job_id = -1  # job ID of data currently in ghost_buf
+
+        # Multi-variant ghost lookups (different context windows)
+        self._num_ghost_variants = getattr(server_args, 'phantom_num_ghosts', 1)
+
+        # Negative filter (bloom filter for rejected bigrams)
+        self._neg_filter = _NegativeFilter()
 
         # Stats
         self.total_rounds = 0
@@ -322,6 +419,9 @@ class PhantomWorker:
         self._fallback_streak = 0
         self._fallback_probe_counter = 0
         self.draft_token_num = self._initial_draft_num
+        self._neg_filter.reset()
+        self._job_counter = 0
+        self._active_job_id = -1
 
     # ---- Ghost thread management ----
 
@@ -356,46 +456,132 @@ class PhantomWorker:
             self._ghost_thread = None
 
     def _ghost_loop(self):
-        """Background CPU thread: continuously builds draft trees into pinned memory."""
+        """Background CPU thread: 3-phase write → scan → patch pipeline.
+
+        Runs entirely while the GPU is busy verifying the current batch:
+
+          Phase 1 (WRITE):  corpus lookup → initial draft into numpy arrays
+          Phase 2 (SCAN):   bloom filter identifies bad bigram positions
+          Phase 3 (PATCH):  re-query corpus with alt context windows,
+                            cherry-pick token replacements for bad positions
+
+        By the time the GPU needs the next draft, all 3 phases have completed
+        and the patched result is already in pinned HSA memory.
+
+        When num_variants=1 or the negative filter is cold (no data yet),
+        only Phase 1 runs — zero overhead vs the original single-lookup path.
+        """
         while not self._ghost_stop.is_set():
-            # Wait for a request from the main thread
             self._ghost_request_event.wait(timeout=0.1)
             if self._ghost_stop.is_set():
                 break
             self._ghost_request_event.clear()
 
-            with self._ghost_request_lock:
-                batch_tokens = self._ghost_request
-                self._ghost_request = None
+            with self._ghost_job_lock:
+                job = self._ghost_job
+                self._ghost_job = None
 
-            if batch_tokens is None:
+            if job is None:
                 continue
 
             try:
-                bs = len(batch_tokens)
-                K = self.draft_token_num
+                bs = job.bs
+                K = job.K
 
-                # Lookup from frozen corpus (read-only, no locks needed)
-                req_drafts, mask = self.corpus.batch_get(batch_tokens)
-
+                # ── Phase 1: WRITE — standard corpus lookup ──
+                req_drafts, mask = self.corpus.batch_get(job.batch_tokens)
                 if len(req_drafts) != bs * K:
-                    continue  # corpus returned wrong shape, skip
+                    continue
 
-                # Write into the CPU (inactive) side of the double buffer
+                # ── Phase 2 + 3: SCAN + PATCH (only when filter is warm) ──
+                if job.num_variants > 1 and self._neg_filter.size > 0:
+                    bad_positions = self._scan_bad_positions(req_drafts, bs, K)
+                    if bad_positions:
+                        req_drafts, mask = self._patch_bad_positions(
+                            job, req_drafts, mask, bad_positions, bs, K
+                        )
+
+                # Copy final result into pinned buffer and signal ready
                 cpu_tokens = self.ghost_buf.cpu_tokens
                 cpu_mask = self.ghost_buf.cpu_mask
-
                 cpu_tokens[:bs * K].copy_(torch.from_numpy(req_drafts))
                 cpu_mask[:bs * K * K].copy_(torch.from_numpy(mask))
 
-                # Swap: make this buffer active for GPU reads
+                self._active_job_id = job.job_id
                 self.ghost_buf.swap(bs)
 
             except Exception as e:
                 logger.debug("PHANTOM ghost build error: %s", e)
 
+    def _scan_bad_positions(self, drafts: np.ndarray, bs: int, K: int) -> list:
+        """Phase 2: identify draft positions containing known-bad bigrams.
+
+        Returns list of (request_idx, position_idx) where the negative filter
+        flagged a bad bigram. Position is the index of the second token in the
+        bad pair (the one we'll try to replace).
+        """
+        bad = []
+        for r in range(bs):
+            seq = drafts[r * K: (r + 1) * K]
+            for i in range(len(seq) - 1):
+                tok_a, tok_b = int(seq[i]), int(seq[i + 1])
+                if tok_a != 0 and tok_b != 0 and self._neg_filter.query_bigram(tok_a, tok_b):
+                    bad.append((r, i + 1))
+        return bad
+
+    def _patch_bad_positions(self, job: _GhostJob, drafts: np.ndarray,
+                             mask: np.ndarray, bad_positions: list,
+                             bs: int, K: int):
+        """Phase 3: cherry-pick replacement tokens for flagged positions.
+
+        Re-queries the corpus with alternative context windows (wider, narrower).
+        For each bad position, if the alt lookup produced a different token that
+        doesn't itself form a known-bad bigram, swap it in. Mask rows are updated
+        to match the alt lookup's tree structure at the patched position.
+        """
+        W = self.max_match_window_size
+        alt_windows = [min(W * 2, 128), max(W // 2, 4)]
+
+        for win in alt_windows:
+            alt_tokens = []
+            for tokens in job.batch_tokens:
+                alt_tokens.append(tokens[-win:] if len(tokens) > win else tokens)
+
+            try:
+                alt_drafts, alt_mask = self.corpus.batch_get(alt_tokens)
+            except Exception:
+                continue
+            if len(alt_drafts) != bs * K:
+                continue
+
+            remaining = []
+            for r, pos in bad_positions:
+                alt_tok = int(alt_drafts[r * K + pos])
+                orig_tok = int(drafts[r * K + pos])
+
+                if alt_tok == 0 or alt_tok == orig_tok:
+                    remaining.append((r, pos))
+                    continue
+
+                # Verify replacement doesn't create a new bad bigram
+                prev_tok = int(drafts[r * K + pos - 1]) if pos > 0 else 0
+                if prev_tok != 0 and self._neg_filter.query_bigram(prev_tok, alt_tok):
+                    remaining.append((r, pos))
+                    continue
+
+                # Swap token and its mask row
+                drafts[r * K + pos] = alt_tok
+                m_off = r * K * K + pos * K
+                mask[m_off:m_off + K] = alt_mask[m_off:m_off + K]
+
+            bad_positions = remaining
+            if not bad_positions:
+                break
+
+        return drafts, mask
+
     def _submit_ghost_request(self, batch: ScheduleBatch):
-        """Ask the ghost thread to pre-build drafts for the predicted next prefix."""
+        """Submit a _GhostJob for the ghost thread to process."""
         batch_tokens = []
         for req in batch.reqs:
             tokens = self._efficient_concat_last_n(
@@ -403,8 +589,16 @@ class PhantomWorker:
             )
             batch_tokens.append(tokens)
 
-        with self._ghost_request_lock:
-            self._ghost_request = batch_tokens
+        self._job_counter += 1
+        job = _GhostJob(
+            job_id=self._job_counter,
+            batch_tokens=batch_tokens,
+            K=self.draft_token_num,
+            bs=len(batch_tokens),
+            num_variants=self._num_ghost_variants,
+        )
+        with self._ghost_job_lock:
+            self._ghost_job = job
         self._ghost_request_event.set()
 
     # ---- Helpers ----
@@ -416,6 +610,29 @@ class PhantomWorker:
             return seq2[-n:]
         need_from_seq1 = n - seq2_len
         return seq1[-need_from_seq1:] + seq2
+
+    def _update_negative_filter(self, draft_tokens: torch.Tensor,
+                                accept_lens: list, bs: int, K: int):
+        """Insert rejected draft bigrams into the negative bloom filter.
+
+        For each request, tokens beyond accept_length are "rejected" — the model
+        disagreed with these drafts. We extract bigrams from the rejected suffix
+        and insert them so future ghost variants can avoid these patterns.
+        """
+        try:
+            draft_cpu = draft_tokens.cpu().numpy() if draft_tokens.is_cuda else draft_tokens.numpy()
+            for r in range(bs):
+                acc_len = int(accept_lens[r]) if r < len(accept_lens) else 0
+                start = r * K + acc_len
+                end = (r + 1) * K
+                rejected = draft_cpu[start:end]
+                # Insert bigrams from the rejected suffix
+                for i in range(len(rejected) - 1):
+                    tok_a, tok_b = int(rejected[i]), int(rejected[i + 1])
+                    if tok_a != 0 and tok_b != 0:  # skip padding
+                        self._neg_filter.insert_bigram(tok_a, tok_b)
+        except Exception:
+            pass  # non-critical — filter is best-effort
 
     # ---- Main dispatch ----
 
@@ -447,8 +664,9 @@ class PhantomWorker:
         # Try to use the ghost thread's pre-built tree (zero-copy from pinned mem)
         ghost_ready = self.ghost_buf.wait_ready(timeout=0.002)
 
-        if ghost_ready and self.ghost_buf.active_bs == bs:
-            # Ghost tree is ready — read directly from pinned HSA memory
+        if (ghost_ready and self.ghost_buf.active_bs == bs
+                and self._active_job_id == self._job_counter):
+            # Ghost tree is ready and matches current job — read from pinned HSA memory
             # On ROCm, .cuda(non_blocking=True) on pinned memory is zero-copy
             draft_tokens_gpu = self.ghost_buf.gpu_tokens[:bs * K].cuda(non_blocking=True)
             tree_mask_gpu = self.ghost_buf.gpu_mask[:bs * K * K].cuda(non_blocking=True)
@@ -538,6 +756,11 @@ class PhantomWorker:
             # ── Track acceptance rate ──
             accept_rate = num_accepted / max(bs * K, 1)
             self._accept_window.append(accept_rate)
+
+            # ── Feed rejected patterns into negative filter ──
+            self._update_negative_filter(
+                batch.spec_info.draft_tokens, accept_lens, bs, K
+            )
 
             # ── Auto-fallback logic ──
             if accept_rate < self._fb_threshold:
@@ -682,13 +905,17 @@ class PhantomWorker:
                           if self._accept_window else 0.0)
             corpus_total = self._corpus_hit_count + self._corpus_miss_count
             corpus_pct = self._corpus_hit_count / max(corpus_total, 1) * 100
+            neg_size = self._neg_filter.size if self._neg_filter else 0
+            neg_age = self._neg_filter._insert_count if self._neg_filter else 0
             logger.info(
                 "PHANTOM stats: rounds=%d, ghost=%.1f%% (%d/%d), "
-                "accept=%.2f, γ=%d, corpus_hit=%.1f%%, fallback=%s, buf=%s",
+                "accept=%.2f, γ=%d, corpus_hit=%.1f%%, fallback=%s, "
+                "buf=%s, neg_filter=%d/%d, ghosts=%d",
                 self.total_rounds, ghost_pct, self.ghost_hits, total,
                 avg_accept, self.draft_token_num, corpus_pct,
                 "ON" if self._fallback_active else "off",
                 "HSA" if self._is_hsa else "pinned",
+                neg_size, neg_age, self._num_ghost_variants,
             )
 
     def __del__(self):
