@@ -341,13 +341,25 @@ class TritonAttnBackend(AttentionBackend):
             max_extend_len = None
         elif forward_batch.forward_mode.is_target_verify():
             bs = len(forward_batch.req_pool_indices)
-            qo_indptr = torch.arange(
-                0,
-                (1 + bs) * self.num_draft_tokens,
-                step=self.num_draft_tokens,
-                dtype=torch.int32,
-                device=self.device,
-            )
+            # CRASH9b fix: use actual extend_seq_lens (may be < num_draft_tokens
+            # when PHANTOM dynamic γ reduces draft count).
+            if forward_batch.extend_seq_lens is not None:
+                actual_draft = forward_batch.extend_seq_lens
+                qo_indptr = self.qo_indptr
+                qo_indptr[0] = 0
+                qo_indptr[1 : bs + 1] = torch.cumsum(actual_draft, dim=0)
+                qo_indptr = qo_indptr[: bs + 1]
+                actual_max = int(actual_draft.max().item()) if bs > 0 else self.num_draft_tokens
+            else:
+                qo_indptr = torch.arange(
+                    0,
+                    (1 + bs) * self.num_draft_tokens,
+                    step=self.num_draft_tokens,
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                actual_draft = None
+                actual_max = self.num_draft_tokens
             # Different with flashinfer kv_indptr and kv_indices construction
             kv_indptr = _fill_prefix_sum_buffer(kv_indptr, forward_batch.seq_lens, bs)
             kv_indices = torch.empty(
@@ -382,12 +394,14 @@ class TritonAttnBackend(AttentionBackend):
                 )
 
             custom_mask = spec_info.custom_mask
-            seq_mask_len = self.num_draft_tokens * (
-                forward_batch.seq_lens + self.num_draft_tokens
+            # Use actual_max (respecting dynamic γ) for mask dimensions
+            _draft_for_mask = actual_max
+            seq_mask_len = _draft_for_mask * (
+                forward_batch.seq_lens + _draft_for_mask
             )
             mask_indptr = self.mask_indptr
             mask_indptr = _fill_prefix_sum_buffer(mask_indptr, seq_mask_len, bs)
-            max_extend_len = self.num_draft_tokens
+            max_extend_len = actual_max
             num_kv_splits = None
             attn_logits = None
             attn_lse = None
@@ -991,12 +1005,19 @@ class TritonAttnBackend(AttentionBackend):
         # In speculative decoding, we can infer these from spec_info or compute them
         if forward_batch.extend_seq_lens is None:
             # TARGET_VERIFY mode: infer extend_seq_lens from spec_info
+            # Use actual input token count when available (PHANTOM dynamic γ)
             if forward_batch.spec_info is not None and hasattr(
                 forward_batch.spec_info, "draft_token_num"
             ):
                 draft_token_num = forward_batch.spec_info.draft_token_num
+                # CRASH9b fix: actual tokens may be fewer than draft_token_num
+                if forward_batch.input_ids is not None:
+                    actual_per_seq = forward_batch.input_ids.shape[0] // max(bs, 1)
+                    ext_per_seq = min(actual_per_seq, draft_token_num) if actual_per_seq > 0 else draft_token_num
+                else:
+                    ext_per_seq = draft_token_num
                 extend_seq_lens = torch.full(
-                    (bs,), draft_token_num, dtype=torch.int32, device=self.device
+                    (bs,), ext_per_seq, dtype=torch.int32, device=self.device
                 )
             else:
                 raise RuntimeError(

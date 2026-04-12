@@ -556,19 +556,34 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                 spec = batch.spec_info
                 draft_num = getattr(spec, "draft_token_num", 0)
                 if draft_num > 0:
+                    # CRASH9b fix: use actual input token count, not draft_token_num.
+                    # PHANTOM's dynamic γ may reduce input_ids to fewer than
+                    # draft_token_num tokens; using draft_token_num for ext_len
+                    # causes OOB Q reads in the Triton kernel on RDNA2.
+                    actual_tokens = ret.input_ids.shape[0] if ret.input_ids is not None else draft_num * bs
+                    actual_per_seq = actual_tokens // max(bs, 1)
+                    import os as _os9, sys as _sys9
+                    if _os9.environ.get("PHANTOM_VERIFY_SYNC"):
+                        _sys9.stderr.write(
+                            f"[FWD_BATCH] TARGET_VERIFY synthesis: draft_num={draft_num} "
+                            f"actual_tokens={actual_tokens} actual_per_seq={actual_per_seq} "
+                            f"bs={bs} input_ids={ret.input_ids.shape if ret.input_ids is not None else None}\n"
+                        )
+                        _sys9.stderr.flush()
+                    ext_per_seq = min(actual_per_seq, draft_num) if actual_per_seq > 0 else draft_num
                     # seq_lens is the original pre-draft length. For torch_native
-                    # extend attention, prefix = original seq_lens, extend = draft_num,
-                    # and total KV length = seq_lens + draft_num.
+                    # extend attention, prefix = original seq_lens, extend = ext_per_seq,
+                    # and total KV length = seq_lens + ext_per_seq.
                     # Create tensors directly on GPU to avoid async H2D race.
                     ret.extend_prefix_lens = batch.seq_lens.to(torch.int32)
                     ret.extend_seq_lens = torch.full(
-                        (bs,), draft_num, dtype=torch.int32, device=device
+                        (bs,), ext_per_seq, dtype=torch.int32, device=device
                     )
                     ret.extend_prefix_lens_cpu = ret.extend_prefix_lens.tolist()
-                    ret.extend_seq_lens_cpu = [draft_num] * bs
-                    ret.extend_num_tokens = bs * draft_num
+                    ret.extend_seq_lens_cpu = [ext_per_seq] * bs
+                    ret.extend_num_tokens = bs * ext_per_seq
                     # Update seq_lens to full KV length for attention
-                    ret.seq_lens = ret.seq_lens + draft_num
+                    ret.seq_lens = ret.seq_lens + ext_per_seq
         else:
             assert isinstance(batch.extend_seq_lens, list)
             assert isinstance(batch.extend_prefix_lens, list)

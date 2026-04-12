@@ -109,7 +109,7 @@ class _GhostBuffer:
     def cpu_mask(self) -> torch.Tensor:
         return self._masks[self._write_idx]
 
-    def swap(self, bs: int):
+    def swap(self, bs: int, k: int = 0):
         """CPU finished writing — mark slot ready, advance write pointer.
 
         If the ring is full (all slots have unread data), overwrites the
@@ -125,6 +125,8 @@ class _GhostBuffer:
             self._write_idx = (self._write_idx + 1) % self.num_buffers
             self._ready_count += 1
             self.active_bs = bs
+            if k > 0:
+                self.active_k = k
             self._ready.set()
 
     def wait_ready(self, timeout: float = 0.001) -> bool:
@@ -442,6 +444,381 @@ class _GhostJob:
         self.num_variants = num_variants
 
 
+class _GhostPool:
+    """Pool of ghost CPU workers for parallel diverse corpus lookups.
+
+    Each worker runs in its own thread, performing corpus lookups with
+    different context windows for diversity. Workers share the C++ trie
+    (GIL-free via pybind11 call_guard) and write to independent pinned
+    HSA buffers for zero-copy GPU reads.
+
+    With max_workers=1 (or active_count=1), behavior is identical to the
+    original single-thread ghost system — fully backward compatible.
+
+    Diversity strategy:
+      Worker 0: full context window (standard, highest quality)
+      Worker 1: half context window (more recent patterns, wider matches)
+      Worker 2: double context window (more history, more specific matches)
+      Worker 3+: offset context by worker_id * stride
+    """
+
+    def __init__(self, max_workers: int, max_batch_size: int, K_alloc: int,
+                 max_match_window: int, num_ghost_variants: int):
+        self.max_workers = max(1, min(max_workers, 8))
+        self._active_count = 0
+        self._max_match_window = max_match_window
+        self._num_variants = num_ghost_variants
+        self._round_id = 0
+        self._job_counter = 0
+        self.patched_positions: list = []
+
+        # Per-worker state — each worker gets a single-slot pinned buffer
+        self._bufs = [
+            _GhostBuffer(max_batch_size, K_alloc, num_buffers=1)
+            for _ in range(self.max_workers)
+        ]
+        self._threads: list = [None] * self.max_workers
+        self._stops = [threading.Event() for _ in range(self.max_workers)]
+        self._requests = [threading.Event() for _ in range(self.max_workers)]
+        self._jobs: list = [None] * self.max_workers
+        self._job_locks = [threading.Lock() for _ in range(self.max_workers)]
+        # Worker state: 0=IDLE, 1=BUILDING, 2=READY
+        self._states = [0] * self.max_workers
+        self._state_locks = [threading.Lock() for _ in range(self.max_workers)]
+        self._active_job_ids = [-1] * self.max_workers
+
+        # References set after construction via set_corpus()
+        self._corpus = None
+        self._neg_filter = None
+        self._neg_controller = None
+
+    def set_corpus(self, corpus, neg_filter, neg_controller):
+        """Set references to corpus and negative filter (called after corpus creation)."""
+        self._corpus = corpus
+        self._neg_filter = neg_filter
+        self._neg_controller = neg_controller
+
+    @property
+    def active_count(self) -> int:
+        return self._active_count
+
+    def start(self, n: int = 1):
+        """Start n worker threads (capped at max_workers)."""
+        self._active_count = max(1, min(n, self.max_workers))
+        try:
+            avail = sorted(os.sched_getaffinity(0))
+        except OSError:
+            avail = []
+        for i in range(self._active_count):
+            if self._threads[i] is not None and self._threads[i].is_alive():
+                continue
+            self._stops[i].clear()
+            self._threads[i] = threading.Thread(
+                target=self._worker_loop, args=(i,),
+                name=f"phantom-ghost-{i}", daemon=True,
+            )
+            self._threads[i].start()
+            # Pin to distinct CPU cores (last N available cores)
+            if len(avail) > 1:
+                core = avail[-(i + 1)] if i + 1 <= len(avail) else avail[-1]
+                try:
+                    os.sched_setaffinity(self._threads[i].native_id, {core})
+                    logger.info("PHANTOM: ghost-%d → core %d", i, core)
+                except (OSError, AttributeError):
+                    pass
+        logger.info(
+            "PHANTOM: ghost pool started (%d/%d workers)", self._active_count, self.max_workers
+        )
+
+    def stop(self):
+        """Stop all worker threads."""
+        for i in range(self.max_workers):
+            self._stops[i].set()
+            self._requests[i].set()
+        for i in range(self.max_workers):
+            if self._threads[i] is not None:
+                self._threads[i].join(timeout=2.0)
+                self._threads[i] = None
+        self._active_count = 0
+
+    def submit(self, batch_tokens: list, bs: int, K: int):
+        """Fan out a ghost job to all active workers with diversity."""
+        self._round_id += 1
+        W = self._max_match_window
+        for i in range(self._active_count):
+            if i == 0:
+                job_tokens = batch_tokens
+            elif i == 1:
+                half = max(W // 2, 4)
+                job_tokens = [t[-half:] if len(t) > half else t for t in batch_tokens]
+            elif i == 2:
+                wide = min(W * 2, 128)
+                job_tokens = [t[-wide:] if len(t) > wide else t for t in batch_tokens]
+            else:
+                offset = (i - 2) * max(W // 4, 2)
+                job_tokens = [t[offset:] if len(t) > offset else t for t in batch_tokens]
+
+            self._job_counter += 1
+            job = _GhostJob(
+                job_id=self._job_counter,
+                batch_tokens=job_tokens,
+                K=K, bs=bs,
+                num_variants=self._num_variants if i == 0 else 1,
+            )
+            with self._job_locks[i]:
+                self._jobs[i] = job
+            self._requests[i].set()
+
+    def get_first_ready(self, bs: int, timeout: float = 0.002):
+        """Return (worker_id, draft_tokens_gpu, tree_mask_gpu) or None."""
+        deadline = time.monotonic() + timeout
+        while True:
+            for i in range(self._active_count):
+                with self._state_locks[i]:
+                    if self._states[i] == 2 and self._bufs[i].active_bs == bs:
+                        buf = self._bufs[i]
+                        K = buf.active_k
+                        draft = buf.gpu_tokens[:bs * K].cuda(non_blocking=True)
+                        mask = buf.gpu_mask[:bs * K * K].cuda(non_blocking=True)
+                        # DMA must complete before worker can reuse the buffer
+                        torch.cuda.synchronize()
+                        buf.consume()
+                        self._states[i] = 0
+                        return i, draft, mask
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.0001)
+
+    def scale_to(self, n: int):
+        """Adjust active worker count. Starts/stops threads as needed."""
+        n = max(1, min(n, self.max_workers))
+        if n > self._active_count:
+            old = self._active_count
+            self._active_count = n
+            try:
+                avail = sorted(os.sched_getaffinity(0))
+            except OSError:
+                avail = []
+            for i in range(old, n):
+                if self._threads[i] is not None and self._threads[i].is_alive():
+                    continue
+                self._stops[i].clear()
+                self._threads[i] = threading.Thread(
+                    target=self._worker_loop, args=(i,),
+                    name=f"phantom-ghost-{i}", daemon=True,
+                )
+                self._threads[i].start()
+                if len(avail) > 1:
+                    core = avail[-(i + 1)] if i + 1 <= len(avail) else avail[-1]
+                    try:
+                        os.sched_setaffinity(self._threads[i].native_id, {core})
+                    except (OSError, AttributeError):
+                        pass
+            logger.info("PHANTOM: scaled UP to %d ghost workers", n)
+        elif n < self._active_count:
+            for i in range(n, self._active_count):
+                self._stops[i].set()
+                self._requests[i].set()
+            for i in range(n, self._active_count):
+                if self._threads[i] is not None:
+                    self._threads[i].join(timeout=2.0)
+                    self._threads[i] = None
+                self._stops[i].clear()
+            self._active_count = n
+            logger.info("PHANTOM: scaled DOWN to %d ghost workers", n)
+
+    def reset(self):
+        """Reset all pool state (called from clear_cache_pool)."""
+        self._round_id = 0
+        self._job_counter = 0
+        self._active_job_ids = [-1] * self.max_workers
+        for i in range(self.max_workers):
+            with self._state_locks[i]:
+                self._states[i] = 0
+        self.patched_positions = []
+
+    # ── Worker loop (runs in each ghost thread) ──
+
+    def _worker_loop(self, wid: int):
+        """Per-worker ghost loop: wait → build → mark ready."""
+        while not self._stops[wid].is_set():
+            self._requests[wid].wait(timeout=0.1)
+            if self._stops[wid].is_set():
+                break
+            self._requests[wid].clear()
+
+            with self._job_locks[wid]:
+                job = self._jobs[wid]
+                self._jobs[wid] = None
+            if job is None:
+                continue
+
+            with self._state_locks[wid]:
+                self._states[wid] = 1  # BUILDING
+
+            try:
+                req_drafts, mask = self._corpus.batch_get(job.batch_tokens)
+                bs, K = job.bs, job.K
+                if len(req_drafts) != bs * K:
+                    with self._state_locks[wid]:
+                        self._states[wid] = 0
+                    continue
+
+                # Scan+patch only on worker 0 (primary context)
+                patched = []
+                if (wid == 0 and job.num_variants > 1
+                        and self._neg_filter is not None
+                        and self._neg_filter.size > 0
+                        and self._neg_controller is not None
+                        and self._neg_controller.is_active):
+                    bad = self._scan_bad(req_drafts, bs, K)
+                    if bad:
+                        req_drafts, mask, patched = self._patch_bad(
+                            job, req_drafts, mask, bad, bs, K
+                        )
+                if wid == 0:
+                    self.patched_positions = patched
+
+                # Copy to pinned buffer and mark ready
+                buf = self._bufs[wid]
+                buf.cpu_tokens[:bs * K].copy_(torch.from_numpy(req_drafts))
+                buf.cpu_mask[:bs * K * K].copy_(torch.from_numpy(mask))
+                self._active_job_ids[wid] = job.job_id
+                buf.swap(bs, k=K)
+
+                with self._state_locks[wid]:
+                    self._states[wid] = 2  # READY
+
+            except Exception as e:
+                logger.debug("PHANTOM ghost-%d error: %s", wid, e)
+                with self._state_locks[wid]:
+                    self._states[wid] = 0
+
+    def _scan_bad(self, drafts: np.ndarray, bs: int, K: int) -> list:
+        """Phase 2: identify draft positions containing known-bad bigrams."""
+        bad = []
+        for r in range(bs):
+            seq = drafts[r * K: (r + 1) * K]
+            for i in range(len(seq) - 1):
+                tok_a, tok_b = int(seq[i]), int(seq[i + 1])
+                if tok_a != 0 and tok_b != 0 and self._neg_filter.query_bigram(tok_a, tok_b):
+                    bad.append((r, i + 1))
+        return bad
+
+    def _patch_bad(self, job: _GhostJob, drafts: np.ndarray,
+                   mask: np.ndarray, bad_positions: list,
+                   bs: int, K: int):
+        """Phase 3: cherry-pick replacement tokens for flagged positions."""
+        W = self._max_match_window
+        alt_windows = [min(W * 2, 128), max(W // 2, 4)]
+        patched = []
+        for win in alt_windows:
+            alt_tokens = [t[-win:] if len(t) > win else t for t in job.batch_tokens]
+            try:
+                alt_drafts, alt_mask = self._corpus.batch_get(alt_tokens)
+            except Exception:
+                continue
+            if len(alt_drafts) != bs * K:
+                continue
+            remaining = []
+            for r, pos in bad_positions:
+                alt_tok = int(alt_drafts[r * K + pos])
+                orig_tok = int(drafts[r * K + pos])
+                if alt_tok == 0 or alt_tok == orig_tok:
+                    remaining.append((r, pos))
+                    continue
+                prev_tok = int(drafts[r * K + pos - 1]) if pos > 0 else 0
+                if prev_tok != 0 and self._neg_filter.query_bigram(prev_tok, alt_tok):
+                    remaining.append((r, pos))
+                    continue
+                drafts[r * K + pos] = alt_tok
+                m_off = r * K * K + pos * K
+                mask[m_off:m_off + K] = alt_mask[m_off:m_off + K]
+                patched.append((r, pos, orig_tok, alt_tok))
+            bad_positions = remaining
+            if not bad_positions:
+                break
+        return drafts, mask, patched
+
+
+class _GhostScaler:
+    """Throughput-based hill-climbing scaler for ghost worker count.
+
+    Measures accepted tokens/second over a sliding window. Periodically
+    tentatively adds a worker, measures the throughput delta, and keeps
+    the change only if positive. Hysteresis cooldown prevents oscillation.
+    """
+
+    def __init__(self, pool: _GhostPool, measure_window: int = 100,
+                 cooldown: int = 200):
+        self._pool = pool
+        self._measure_window = measure_window
+        self._cooldown = cooldown
+        self._round = 0
+        self._cooldown_remaining = 0
+        self._baseline_tps = 0.0
+        self._trial_active = False
+        self._trial_direction = 0
+        self._tps_window: deque = deque(maxlen=measure_window)
+        self._last_time = time.monotonic()
+
+    @property
+    def enabled(self) -> bool:
+        return self._pool.max_workers > 1
+
+    def record(self, accepted_tokens: int):
+        """Called each round with number of accepted tokens."""
+        if not self.enabled:
+            return
+        now = time.monotonic()
+        dt = now - self._last_time
+        if dt > 0:
+            self._tps_window.append(accepted_tokens / dt)
+        self._last_time = now
+        self._round += 1
+
+        if self._cooldown_remaining > 0:
+            self._cooldown_remaining -= 1
+            return
+        if self._round % self._measure_window != 0:
+            return
+
+        current_tps = sum(self._tps_window) / max(len(self._tps_window), 1)
+
+        if self._trial_active:
+            if current_tps > self._baseline_tps * 1.02:
+                self._baseline_tps = current_tps
+                logger.info(
+                    "PHANTOM scaler: kept change (%.1f t/s, %d workers)",
+                    current_tps, self._pool.active_count,
+                )
+            else:
+                self._pool.scale_to(self._pool.active_count - self._trial_direction)
+                self._cooldown_remaining = self._cooldown
+                logger.info(
+                    "PHANTOM scaler: reverted (%.1f ≤ %.1f t/s), cooldown %d",
+                    current_tps, self._baseline_tps, self._cooldown,
+                )
+            self._trial_active = False
+        else:
+            self._baseline_tps = current_tps
+            if self._pool.active_count < self._pool.max_workers:
+                self._trial_direction = 1
+                self._pool.scale_to(self._pool.active_count + 1)
+                self._trial_active = True
+                logger.info(
+                    "PHANTOM scaler: trial +1 worker (now %d)", self._pool.active_count
+                )
+
+    def reset(self):
+        self._round = 0
+        self._cooldown_remaining = 0
+        self._baseline_tps = 0.0
+        self._trial_active = False
+        self._tps_window.clear()
+        self._last_time = time.monotonic()
+
+
 class _FrozenCorpus:
     """Read-only snapshot of an n-gram corpus for lock-free CPU access.
 
@@ -541,8 +918,6 @@ class PhantomWorker:
         # Allocate for _max_draft (not draft_token_num) so dynamic γ growth
         # doesn't exceed buffer bounds at runtime.
         self._max_draft_alloc = min(self.draft_token_num * 2, 16)
-        num_buffers = getattr(server_args, 'phantom_num_buffers', 2)
-        self.ghost_buf = _GhostBuffer(self.max_batch_size, self._max_draft_alloc, num_buffers)
 
         # GPU-side tensors for tree reconstruction (these must be in VRAM)
         # Also sized for _max_draft_alloc to support dynamic γ.
@@ -553,46 +928,42 @@ class PhantomWorker:
         self.retrive_next_token = torch.empty((max_bs, K_alloc), dtype=torch.int64, device=self.device)
         self.retrive_next_sibling = torch.empty((max_bs, K_alloc), dtype=torch.int64, device=self.device)
 
-        # Ghost thread state — uses immutable _GhostJob for thread safety
-        self._ghost_thread: Optional[threading.Thread] = None
-        self._ghost_stop = threading.Event()
-        self._ghost_job: Optional[_GhostJob] = None
-        self._ghost_job_lock = threading.Lock()
-        self._ghost_request_event = threading.Event()
         self._corpus_frozen = False
-        self._job_counter = 0  # monotonic job ID
-        self._active_job_id = -1  # job ID of data currently in ghost_buf
 
-        # Multi-variant ghost lookups (different context windows).
-        # Despite the name, this controls the number of alternative corpus
-        # lookups per ghost round, NOT the number of ghost threads (always 1).
-        # When >1, the scan+patch pipeline activates to improve draft quality.
+        # Multi-variant ghost lookups (scan+patch pipeline variant count)
         self._num_ghost_variants = getattr(server_args, 'phantom_num_ghosts', 1)
 
         # Negative filter (bloom filter for rejected bigrams)
         self._neg_filter = _NegativeFilter()
 
         # Adaptive controller for negative filter pipeline (phases 2+3)
-        # "threshold" here controls bloom filter age_limit:
-        #   lower threshold → keep more history (aggressive filtering)
-        #   higher threshold → age faster (conservative, less filtering)
-        # Range: 500 (very aggressive) to 5000 (nearly disabled)
         self._neg_controller = AdaptiveThresholdController(
             initial_threshold=2000.0,
             min_threshold=500.0,
             max_threshold=5000.0,
             ema_alpha=0.1,
-            precision_target=0.70,   # 70% of patches should be correct
-            precision_floor=0.30,    # below 30% → disable scan+patch
-            warmup_steps=20,         # passthrough for 20 rounds while bloom fills
-            step_size=200.0,         # adjust age_limit by 200 per step
-            backoff_cooldown=40,     # stay disabled for 40 rounds before retry
+            precision_target=0.70,
+            precision_floor=0.30,
+            warmup_steps=20,
+            step_size=200.0,
+            backoff_cooldown=40,
         )
-        # Track which positions were patched this round for outcome measurement
-        self._patched_positions: list = []  # [(request_idx, position_idx), ...]
+
+        # Ghost pool — manages 1-N ghost CPU workers with diversity
+        max_ghosts = max(1, getattr(server_args, 'phantom_num_ghosts', 1))
+        self._ghost_pool = _GhostPool(
+            max_workers=max_ghosts,
+            max_batch_size=self.max_batch_size,
+            K_alloc=K_alloc,
+            max_match_window=self.max_match_window_size,
+            num_ghost_variants=self._num_ghost_variants,
+        )
+        self._ghost_pool.set_corpus(self.corpus, self._neg_filter, self._neg_controller)
+
+        # Ghost scaler — throughput-based adaptive worker count
+        self._ghost_scaler = _GhostScaler(self._ghost_pool)
 
         # Quantization telemetry — collects signals for offline calibration
-        # Snapshots written to /tmp/phantom_quant_telem/ by default
         telem_dir = os.environ.get(
             "PHANTOM_QUANT_TELEM_DIR", "/tmp/phantom_quant_telem"
         )
@@ -620,7 +991,7 @@ class PhantomWorker:
         _FALLBACK_THRESHOLD = 0.4
         _FALLBACK_STREAK_LIMIT = 10
         _REENABLE_THRESHOLD = 0.5
-        _PROBE_INTERVAL = 5
+        _PROBE_INTERVAL = 50
         self._fb_threshold = _FALLBACK_THRESHOLD
         self._fb_streak_limit = _FALLBACK_STREAK_LIMIT
         self._fb_reenable = _REENABLE_THRESHOLD
@@ -636,11 +1007,10 @@ class PhantomWorker:
 
         logger.info(
             "PHANTOM worker: draft_tokens=%d (max=%d), max_bs=%d, HSA=%s, "
-            "buffers=%d, pinned_buf=%.1f KB (tokens) + %.1f KB (mask) per slot",
+            "ghost_pool=%d workers, pinned_buf=%.1f KB per worker",
             self.draft_token_num, self._max_draft_alloc, max_bs, self._is_hsa,
-            self.ghost_buf.num_buffers,
-            self.ghost_buf._tokens[0].nelement() * 8 / 1024,
-            self.ghost_buf._masks[0].nelement() / 1024,
+            self._ghost_pool.max_workers,
+            self._ghost_pool._bufs[0]._tokens[0].nelement() * 8 / 1024,
         )
 
     @staticmethod
@@ -665,7 +1035,7 @@ class PhantomWorker:
         return self.target_worker.get_memory_pool()
 
     def clear_cache_pool(self):
-        self._stop_ghost_thread()
+        self._ghost_pool.stop()
         self.corpus._corpus.reset()
         self._corpus_frozen = False
         self.total_rounds = 0
@@ -691,202 +1061,30 @@ class PhantomWorker:
             step_size=200.0,
             backoff_cooldown=40,
         )
-        self._patched_positions = []
+        self._ghost_pool.set_corpus(self.corpus, self._neg_filter, self._neg_controller)
+        self._ghost_pool.reset()
+        self._ghost_scaler.reset()
         self._quant_telem.reset()
-        self._job_counter = 0
-        self._active_job_id = -1
 
-    # ---- Ghost thread management ----
+    # ---- Ghost pool management ----
 
-    def _start_ghost_thread(self):
-        if self._ghost_thread is not None and self._ghost_thread.is_alive():
-            return
-        self._ghost_stop.clear()
-        self._ghost_thread = threading.Thread(
-            target=self._ghost_loop, name="phantom-ghost", daemon=True
-        )
-        self._ghost_thread.start()
+    def _start_ghost_pool(self):
+        """Start ghost worker pool (delegates to _GhostPool)."""
+        self._ghost_pool.start(n=1)
 
-        # Pin ghost thread to last available CPU core to reduce contention
-        try:
-            available = sorted(os.sched_getaffinity(0))
-            if len(available) > 1:
-                target_core = available[-1]
-                # Must set from within the thread or use its native id
-                self._ghost_affinity_core = target_core
-                os.sched_setaffinity(self._ghost_thread.native_id, {target_core})
-                logger.info("PHANTOM: ghost thread pinned to core %d", target_core)
-            else:
-                logger.info("PHANTOM: ghost thread started (single core, no affinity)")
-        except (OSError, AttributeError):
-            logger.info("PHANTOM: ghost thread started (affinity not available)")
-
-    def _stop_ghost_thread(self):
-        self._ghost_stop.set()
-        self._ghost_request_event.set()  # wake it up so it can exit
-        if self._ghost_thread is not None:
-            self._ghost_thread.join(timeout=2.0)
-            self._ghost_thread = None
-
-    def _ghost_loop(self):
-        """Background CPU thread: 3-phase write → scan → patch pipeline.
-
-        Runs entirely while the GPU is busy verifying the current batch:
-
-          Phase 1 (WRITE):  corpus lookup → initial draft into numpy arrays
-          Phase 2 (SCAN):   bloom filter identifies bad bigram positions
-          Phase 3 (PATCH):  re-query corpus with alt context windows,
-                            cherry-pick token replacements for bad positions
-
-        By the time the GPU needs the next draft, all 3 phases have completed
-        and the patched result is already in pinned HSA memory.
-
-        When num_variants=1, the negative filter is cold (no data yet), or the
-        adaptive controller has backed off, only Phase 1 runs — zero overhead
-        vs the original single-lookup path.
-        """
-        while not self._ghost_stop.is_set():
-            self._ghost_request_event.wait(timeout=0.1)
-            if self._ghost_stop.is_set():
-                break
-            self._ghost_request_event.clear()
-
-            with self._ghost_job_lock:
-                job = self._ghost_job
-                self._ghost_job = None
-
-            if job is None:
-                continue
-
-            try:
-                bs = job.bs
-                K = job.K
-
-                # ── Phase 1: WRITE — standard corpus lookup ──
-                req_drafts, mask = self.corpus.batch_get(job.batch_tokens)
-                if len(req_drafts) != bs * K:
-                    continue
-
-                # ── Phase 2 + 3: SCAN + PATCH (gated by adaptive controller) ──
-                run_filter = (
-                    job.num_variants > 1
-                    and self._neg_filter.size > 0
-                    and self._neg_controller.is_active
-                )
-                patched = []
-                if run_filter:
-                    bad_positions = self._scan_bad_positions(req_drafts, bs, K)
-                    if bad_positions:
-                        req_drafts, mask, patched = self._patch_bad_positions(
-                            job, req_drafts, mask, bad_positions, bs, K
-                        )
-                self._patched_positions = patched
-
-                # Copy final result into pinned buffer and signal ready
-                cpu_tokens = self.ghost_buf.cpu_tokens
-                cpu_mask = self.ghost_buf.cpu_mask
-                cpu_tokens[:bs * K].copy_(torch.from_numpy(req_drafts))
-                cpu_mask[:bs * K * K].copy_(torch.from_numpy(mask))
-
-                self._active_job_id = job.job_id
-                self.ghost_buf.swap(bs)
-
-            except Exception as e:
-                logger.debug("PHANTOM ghost build error: %s", e)
-
-    def _scan_bad_positions(self, drafts: np.ndarray, bs: int, K: int) -> list:
-        """Phase 2: identify draft positions containing known-bad bigrams.
-
-        Returns list of (request_idx, position_idx) where the negative filter
-        flagged a bad bigram. Position is the index of the second token in the
-        bad pair (the one we'll try to replace).
-        """
-        bad = []
-        for r in range(bs):
-            seq = drafts[r * K: (r + 1) * K]
-            for i in range(len(seq) - 1):
-                tok_a, tok_b = int(seq[i]), int(seq[i + 1])
-                if tok_a != 0 and tok_b != 0 and self._neg_filter.query_bigram(tok_a, tok_b):
-                    bad.append((r, i + 1))
-        return bad
-
-    def _patch_bad_positions(self, job: _GhostJob, drafts: np.ndarray,
-                             mask: np.ndarray, bad_positions: list,
-                             bs: int, K: int):
-        """Phase 3: cherry-pick replacement tokens for flagged positions.
-
-        Re-queries the corpus with alternative context windows (wider, narrower).
-        For each bad position, if the alt lookup produced a different token that
-        doesn't itself form a known-bad bigram, swap it in. Mask rows are updated
-        to match the alt lookup's tree structure at the patched position.
-
-        Returns (drafts, mask, patched) where patched is a list of
-        (request_idx, position_idx, original_token, replacement_token) tuples
-        for outcome tracking and future contrastive training.
-        """
-        W = self.max_match_window_size
-        alt_windows = [min(W * 2, 128), max(W // 2, 4)]
-        patched = []  # (r, pos, orig_tok, new_tok)
-
-        for win in alt_windows:
-            alt_tokens = []
-            for tokens in job.batch_tokens:
-                alt_tokens.append(tokens[-win:] if len(tokens) > win else tokens)
-
-            try:
-                alt_drafts, alt_mask = self.corpus.batch_get(alt_tokens)
-            except Exception:
-                continue
-            if len(alt_drafts) != bs * K:
-                continue
-
-            remaining = []
-            for r, pos in bad_positions:
-                alt_tok = int(alt_drafts[r * K + pos])
-                orig_tok = int(drafts[r * K + pos])
-
-                if alt_tok == 0 or alt_tok == orig_tok:
-                    remaining.append((r, pos))
-                    continue
-
-                # Verify replacement doesn't create a new bad bigram
-                prev_tok = int(drafts[r * K + pos - 1]) if pos > 0 else 0
-                if prev_tok != 0 and self._neg_filter.query_bigram(prev_tok, alt_tok):
-                    remaining.append((r, pos))
-                    continue
-
-                # Swap token and its mask row
-                drafts[r * K + pos] = alt_tok
-                m_off = r * K * K + pos * K
-                mask[m_off:m_off + K] = alt_mask[m_off:m_off + K]
-                patched.append((r, pos, orig_tok, alt_tok))
-
-            bad_positions = remaining
-            if not bad_positions:
-                break
-
-        return drafts, mask, patched
+    def _stop_ghost_pool(self):
+        """Stop ghost worker pool."""
+        self._ghost_pool.stop()
 
     def _submit_ghost_request(self, batch: ScheduleBatch):
-        """Submit a _GhostJob for the ghost thread to process."""
+        """Submit a ghost job to the pool (fans out to all active workers)."""
         batch_tokens = []
         for req in batch.reqs:
             tokens = self._efficient_concat_last_n(
                 req.origin_input_ids, req.output_ids, self.max_match_window_size
             )
             batch_tokens.append(tokens)
-
-        self._job_counter += 1
-        job = _GhostJob(
-            job_id=self._job_counter,
-            batch_tokens=batch_tokens,
-            K=self.draft_token_num,
-            bs=len(batch_tokens),
-            num_variants=self._num_ghost_variants,
-        )
-        with self._ghost_job_lock:
-            self._ghost_job = job
-        self._ghost_request_event.set()
+        self._ghost_pool.submit(batch_tokens, len(batch_tokens), self.draft_token_num)
 
     # ---- Helpers ----
 
@@ -936,7 +1134,7 @@ class PhantomWorker:
         Also stores preference pairs for future contrastive training:
           (original_token, replacement_token, was_accepted)
         """
-        patched = self._patched_positions
+        patched = self._ghost_pool.patched_positions
         if not patched:
             # No patches this round — still count the step so warmup advances
             self._neg_controller.record_outcome(0, 0)
@@ -982,31 +1180,22 @@ class PhantomWorker:
             # Probe round: try spec decode, check if acceptance recovered
             self._fallback_probe_counter = 0
 
-        # Try to use the ghost thread's pre-built tree (zero-copy from pinned mem)
-        ghost_ready = self.ghost_buf.wait_ready(timeout=0.002)
+        # Try to use the ghost pool's pre-built tree (first-ready selection)
+        ready = self._ghost_pool.get_first_ready(bs, timeout=0.002)
 
-        if (ghost_ready and self.ghost_buf.active_bs == bs
-                and self._active_job_id == self._job_counter):
-            # Ghost tree is ready and matches current job — read from pinned HSA memory
-            # On ROCm, .cuda(non_blocking=True) on pinned memory is zero-copy
-            draft_tokens_gpu = self.ghost_buf.gpu_tokens[:bs * K].cuda(non_blocking=True)
-            tree_mask_gpu = self.ghost_buf.gpu_mask[:bs * K * K].cuda(non_blocking=True)
-            # CRITICAL: GPU must finish reading pinned memory before we tell
-            # the ghost thread the buffer is free — otherwise the ghost thread
-            # overwrites the buffer mid-DMA, causing HSA memory faults on gfx1030.
-            torch.cuda.synchronize()
-            self.ghost_buf.consume()
+        if ready is not None:
+            wid, draft_tokens_gpu, tree_mask_gpu = ready
             self.ghost_hits += 1
         else:
-            # Ghost wasn't ready — build synchronously (fallback)
+            # No worker ready — build synchronously (fallback)
             self.ghost_misses += 1
             draft_tokens_gpu, tree_mask_gpu = self._build_tree_sync(batch)
 
-        # Reconstruct tree indices (must be in VRAM)
+        # Reconstruct tree indices (must be in VRAM and contiguous)
         positions = self.positions[:bs * K]
-        retrive_index = self.retrive_index[:bs, :K]
-        retrive_next_token = self.retrive_next_token[:bs, :K]
-        retrive_next_sibling = self.retrive_next_sibling[:bs, :K]
+        retrive_index = self.retrive_index[:bs, :K].contiguous()
+        retrive_next_token = self.retrive_next_token[:bs, :K].contiguous()
+        retrive_next_sibling = self.retrive_next_sibling[:bs, :K].contiguous()
 
         try:
             if reconstruct_indices_from_tree_mask is None:
@@ -1066,13 +1255,35 @@ class PhantomWorker:
         )
         batch.spec_info.prepare_for_verify(batch, self.page_size)
 
+        # CRASH9b diagnostic: trace token count at every stage
+        import os as _os9b, sys as _sys9b
+        if _os9b.environ.get("PHANTOM_VERIFY_SYNC"):
+            _sys9b.stderr.write(
+                f"[PHANTOM_BATCH] K={K} draft_tokens_gpu={draft_tokens_gpu.shape} "
+                f"batch.input_ids={batch.input_ids.shape} "
+                f"spec_info.draft_token_num={batch.spec_info.draft_token_num}\n"
+            )
+            _sys9b.stderr.flush()
+
         # Run target verification on GPU
         model_worker_batch = batch.get_model_worker_batch()
 
         if model_worker_batch.forward_mode.is_target_verify():
+            # RDNA2 diagnostic: sync before forward to flush any prior async errors
+            import os
+            _diag = os.environ.get("PHANTOM_VERIFY_SYNC")
+            if _diag:
+                torch.cuda.synchronize()
+                logger.info("PHANTOM_DIAG: pre-forward sync OK")
+
             batch_result = self.target_worker.forward_batch_generation(
                 model_worker_batch, is_verify=True
             )
+
+            if _diag:
+                torch.cuda.synchronize()
+                logger.info("PHANTOM_DIAG: post-forward sync OK")
+
             logits_output = batch_result.logits_output
             can_run_cuda_graph = batch_result.can_run_cuda_graph
 
@@ -1084,9 +1295,20 @@ class PhantomWorker:
             batch.forward_mode = ForwardMode.DECODE
             batch.spec_algorithm = original_algo
 
+            # CRITICAL: verify() updates batch.seq_lens/seq_lens_cpu but NOT
+            # seq_lens_sum or orig_seq_lens.  In PHANTOM's reused-batch pattern,
+            # stale seq_lens_sum causes kv_indices underallocation in
+            # triton_backend → OOB write → HIP 700.
+            batch.seq_lens_sum = batch.seq_lens.sum().item()
+            if batch.orig_seq_lens is not None:
+                batch.orig_seq_lens = batch.seq_lens.clone()
+
             # ── Track acceptance rate ──
             accept_rate = num_accepted / max(bs * K, 1)
             self._accept_window.append(accept_rate)
+
+            # ── Ghost scaler: record throughput sample ──
+            self._ghost_scaler.record(num_accepted)
 
             # ── Feed rejected patterns into negative filter ──
             self._update_negative_filter(
@@ -1169,7 +1391,7 @@ class PhantomWorker:
         if not self._corpus_frozen:
             self.corpus.freeze()
             self._corpus_frozen = True
-            self._start_ghost_thread()
+            self._start_ghost_pool()
 
         # Run normal extend on target
         result = self.target_worker.forward_batch_generation(
@@ -1252,29 +1474,84 @@ class PhantomWorker:
         """Fall back to a single target-model decode step (no speculation).
 
         This is called when ghost drafts are unavailable, blocked, or all filtered.
-        Must properly set up the batch for decode since prepare_for_decode() returns
-        early when spec_algorithm is active.
+        Must fully prepare the batch for decode since prepare_for_decode() returns
+        early when spec_algorithm is active — leaving input_ids, out_cache_loc,
+        seq_lens, and kv tracking un-updated.
         """
-        import os
-        diag = os.environ.get("SGLANG_DIAG_SYNC", "")
+        from sglang.srt.mem_cache.common import alloc_for_decode
 
-        # Allocate cache slots for decode
+        bs = batch.batch_size()
         batch.forward_mode = ForwardMode.DECODE
         batch.spec_info = None
+        batch.input_embeds = None
+        batch.output_ids = None  # prevent stale speculative output_ids leaking
 
-        # Manually prepare what prepare_for_decode would do:
-        # set input_ids from last output token, advance seq_lens
-        for i, req in enumerate(batch.reqs):
-            if req.output_ids:
-                batch.input_ids[i] = req.output_ids[-1]
+        # Clear prefill-only metadata (mirrors prepare_for_decode)
+        if hasattr(batch, "attn_cp_metadata") and batch.attn_cp_metadata is not None:
+            batch.attn_cp_metadata = None
+        if hasattr(batch, "nsa_cp_metadata") and batch.nsa_cp_metadata is not None:
+            batch.nsa_cp_metadata = None
 
-        if diag:
-            logger.info("_fallback_target_only: bs=%d, input_ids=%s",
-                        len(batch.reqs), batch.input_ids[:len(batch.reqs)].tolist())
+        # input_ids may still be K-wide from prepare_for_verify; resize to bs
+        batch.input_ids = torch.tensor(
+            [req.output_ids[-1] if req.output_ids else req.origin_input_ids[-1]
+             for req in batch.reqs],
+            dtype=torch.int64, device=self.device,
+        )
 
-        return self.target_worker.forward_batch_generation(
+        # Accumulate penalizer state for the decode token (mirrors prepare_for_decode)
+        if batch.sampling_info and batch.sampling_info.penalizer_orchestrator.is_required:
+            batch.sampling_info.penalizer_orchestrator.cumulate_output_tokens(
+                batch.input_ids.to(torch.int64)
+            )
+
+        # Allocate exactly 1 KV cache slot per request (what prepare_for_decode does)
+        batch.out_cache_loc = alloc_for_decode(batch, token_per_req=1)
+
+        # ── CRASH11 diagnostic: print decode batch state before forward ──
+        if os.environ.get("PHANTOM_VERIFY_SYNC"):
+            import sys
+            torch.cuda.synchronize()  # catch stale HIP errors BEFORE forward
+            sys.stderr.write(
+                f"[FALLBACK_DECODE] bs={bs} input_ids={batch.input_ids.shape} "
+                f"seq_lens={batch.seq_lens.tolist()} "
+                f"out_cache_loc={batch.out_cache_loc.tolist()} "
+                f"forward_mode={batch.forward_mode} "
+                f"kv_committed=[{','.join(str(r.kv_committed_len) for r in batch.reqs)}] "
+                f"kv_allocated=[{','.join(str(r.kv_allocated_len) for r in batch.reqs)}] "
+                f"req_pool_idx=[{','.join(str(r.req_pool_idx) for r in batch.reqs)}]\n"
+            )
+            sys.stderr.flush()
+
+        result = self.target_worker.forward_batch_generation(
             batch.get_model_worker_batch()
         )
+
+        # ── CRASH11 diagnostic: sync after forward to catch errors here ──
+        if os.environ.get("PHANTOM_VERIFY_SYNC"):
+            torch.cuda.synchronize()
+            sys.stderr.write("[FALLBACK_DECODE] post-forward sync OK\n")
+            sys.stderr.flush()
+
+        # Scheduler skips output_ids.append for spec v1 — do it here
+        next_ids = result.next_token_ids
+        if isinstance(next_ids, torch.Tensor):
+            next_ids = next_ids.tolist()
+        for req, tok in zip(batch.reqs, next_ids):
+            req.output_ids.append(tok)
+
+        # Advance seq_lens and per-request KV bookkeeping
+        batch.seq_lens.add_(1)
+        batch.seq_lens_cpu.add_(1)
+        if batch.orig_seq_lens is not None:
+            batch.orig_seq_lens.add_(1)
+        batch.seq_lens_sum += bs
+        for req in batch.reqs:
+            req.decode_batch_idx += 1
+            req.kv_committed_len += 1
+            req.kv_allocated_len += 1
+
+        return result
 
     def _periodic_log(self):
         if self.total_rounds % self._log_interval == 0 and self.total_rounds > 0:
@@ -1287,17 +1564,18 @@ class PhantomWorker:
             neg_size = self._neg_filter.size if self._neg_filter else 0
             neg_age = self._neg_filter._count if self._neg_filter else 0
             ctrl = self._neg_controller.get_state()
+            pool_active = self._ghost_pool.active_count
             logger.info(
                 "PHANTOM stats: rounds=%d, ghost=%.1f%% (%d/%d), "
                 "accept=%.2f, γ=%d, corpus_hit=%.1f%%, fallback=%s, "
-                "buf=%s, neg_filter=%d (age_lim=%d), ghosts=%d, "
+                "buf=%s, neg_filter=%d (age_lim=%d), pool=%d/%d workers, "
                 "patch_ema=%.2f τ=%.0f %s",
                 self.total_rounds, ghost_pct, self.ghost_hits, total,
                 avg_accept, self.draft_token_num, corpus_pct,
                 "ON" if self._fallback_active else "off",
                 "HSA" if self._is_hsa else "pinned",
                 neg_size, self._neg_filter._age_limit,
-                self._num_ghost_variants,
+                pool_active, self._ghost_pool.max_workers,
                 ctrl["precision_ema"], ctrl["threshold"],
                 "(warmup)" if ctrl["in_warmup"] else
                 "(OFF)" if not ctrl["enabled"] else "",
@@ -1315,6 +1593,6 @@ class PhantomWorker:
 
     def __del__(self):
         try:
-            self._stop_ghost_thread()
+            self._stop_ghost_pool()
         except Exception:
             pass

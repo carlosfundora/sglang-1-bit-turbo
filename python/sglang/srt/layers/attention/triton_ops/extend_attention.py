@@ -346,14 +346,16 @@ def _fwd_kernel(
 
         final_mask = mask_m[:, None] & mask_n[None, :]
         if USE_CUSTOM_MASK and not SKIP_PREFIX_CUSTOM_MASK:
+            # RDNA2: clamp row/col indices for masked lanes in mask_ptr load
+            offs_m_mask_safe = tl.where(mask_m, cur_block_m * BLOCK_M + offs_m, 0)
+            offs_n_mask_safe = tl.where(mask_n, start_n + offs_n, 0)
             custom_mask = tl.load(
                 mask_ptr
                 + cur_seq_mask_start_idx
-                + (cur_block_m * BLOCK_M + offs_m[:, None])
+                + offs_m_mask_safe[:, None]
                 * (cur_seq_len + window_kv_offset)
                 + window_kv_offset
-                + start_n
-                + offs_n[None, :],
+                + offs_n_mask_safe[None, :],
                 mask=(mask_m[:, None] & mask_n[None, :]),
                 other=0,
             )
@@ -450,15 +452,17 @@ def _fwd_kernel(
 
         final_mask = mask_m[:, None] & mask_n[None, :]
         if USE_CUSTOM_MASK:
+            # RDNA2: clamp row/col indices for masked lanes in mask_ptr load
+            offs_m_mask_safe = tl.where(mask_m, cur_block_m * BLOCK_M + offs_m, 0)
+            offs_n_mask_safe = tl.where(mask_n, start_n + offs_n, 0)
             custom_mask = tl.load(
                 mask_ptr
                 + cur_seq_mask_start_idx
-                + (cur_block_m * BLOCK_M + offs_m[:, None])
+                + offs_m_mask_safe[:, None]
                 * (cur_seq_len + window_kv_offset)
                 + window_kv_offset
                 + cur_seq_len_prefix
-                + start_n
-                + offs_n[None, :],
+                + offs_n_mask_safe[None, :],
                 mask=(mask_m[:, None] & mask_n[None, :]),
                 other=0,
             )
@@ -618,6 +622,47 @@ def extend_attention_fwd(
     grid = (batch_size, head_num, triton.cdiv(max_len_extend, BLOCK_M))
     num_stages = 1
 
+    # RDNA2 diagnostic: validate all tensor bounds before kernel launch
+    import os as _os
+    import sys as _sys
+    if _os.environ.get("PHANTOM_VERIFY_SYNC") and _is_hip:
+        def _diag(msg):
+            _sys.stderr.write(f"[ATTN_DIAG] {msg}\n")
+            _sys.stderr.flush()
+        _qo = qo_indptr.cpu().tolist()
+        _kvi = kv_indptr.cpu().tolist()
+        for _s in range(batch_size):
+            _ext_start = _qo[_s]
+            _ext_len = _qo[_s + 1] - _qo[_s]
+            _kv_start = _kvi[_s]
+            _pfx_len = _kvi[_s + 1] - _kvi[_s]
+            _total = _pfx_len + _ext_len
+            # Check kv_indices bounds
+            if _pfx_len > 0:
+                _kv_slice = kv_indices[_kv_start : _kv_start + _pfx_len]
+                _max_kv = _kv_slice.max().item()
+                _buf_size = k_buffer.shape[0]
+                if _max_kv >= _buf_size:
+                    _diag(f"!!! OOB kv_indices! seq={_s} max_kv_idx={_max_kv} >= buf={_buf_size}")
+            # Check custom mask bounds
+            if USE_CUSTOM_MASK and custom_mask is not None:
+                _mi = mask_indptr.cpu().tolist() if mask_indptr is not None else [0]
+                _mask_start = _mi[_s] if _s < len(_mi) else 0
+                _mask_needed = _ext_len * _total
+                _mask_avail = custom_mask.numel() - _mask_start
+                if _mask_needed > _mask_avail:
+                    _diag(
+                        f"!!! OOB mask! seq={_s} ext={_ext_len} pfx={_pfx_len} total={_total} "
+                        f"needed={_mask_needed} avail={_mask_avail} start={_mask_start}"
+                    )
+            _diag(
+                f"seq={_s} ext_start={_ext_start} ext_len={_ext_len} pfx_len={_pfx_len} "
+                f"total={_total} q={q_extend.shape} k_buf={k_buffer.shape} "
+                f"mask={'YES' if USE_CUSTOM_MASK else 'NO'} grid={grid} BM={BLOCK_M} BN={BLOCK_N}"
+            )
+        # Sync before kernel to ensure any prior async HIP error is caught HERE
+        torch.cuda.synchronize()
+
     extra_kargs = {}
     if _is_hip:
         _gcn_ext2 = ""
@@ -630,6 +675,28 @@ def extend_attention_fwd(
             extra_kargs = {"waves_per_eu": 1}
         else:
             extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
+
+    # RDNA2 safety: clamp qo_indptr so ext_len never exceeds actual Q tensor rows.
+    # PHANTOM TARGET_VERIFY may set ext_len=draft_token_num while the actual
+    # token count is fewer (partial acceptance → dynamic γ shrinks input_ids).
+    # On RDNA2, reading beyond q_extend triggers HIP illegal memory access.
+    if _is_hip:
+        _total_q = q_extend.shape[0]
+        _max_ext = qo_indptr[-1].item() if qo_indptr is not None and qo_indptr.numel() > 0 else 0
+        if _max_ext > _total_q:
+            import sys as _sys
+            _sys.stderr.write(
+                f"[ATTN_GUARD] ext_len mismatch! qo_indptr max={_max_ext} > q_extend rows={_total_q}. "
+                f"Clamping qo_indptr to match actual Q.\n"
+            )
+            _sys.stderr.flush()
+            # Proportionally scale all indptr entries to fit actual token count
+            _scale = _total_q / max(_max_ext, 1)
+            for _i in range(1, qo_indptr.shape[0]):
+                qo_indptr[_i] = min(int(qo_indptr[_i].item() * _scale), _total_q)
+            # Recompute grid with corrected max_extend_len
+            max_extend_len = max(1, _total_q // max(batch_size, 1))
+            grid = (triton.cdiv(max_extend_len, BLOCK_M), head_num, batch_size)
 
     _fwd_kernel[grid](
         q_extend,
@@ -680,6 +747,22 @@ def extend_attention_fwd(
         num_stages=num_stages,
         **extra_kargs,
     )
+
+    # RDNA2 diagnostic: sync after kernel to catch OOB at the source
+    import os as _os2
+    if _os2.environ.get("PHANTOM_VERIFY_SYNC") and _is_hip:
+        try:
+            torch.cuda.synchronize()
+        except RuntimeError as _e:
+            import sys as _sys2
+            _sys2.stderr.write(
+                f"[ATTN_CRASH] _fwd_kernel OOB! q={q_extend.shape} "
+                f"ext_len={qo_indptr[-1].item() if qo_indptr is not None else '?'} "
+                f"k_ext={k_extend.shape} o_ext={o_extend.shape} "
+                f"grid={grid} err={_e}\n"
+            )
+            _sys2.stderr.flush()
+            raise
 
 
 def redundant_attention(

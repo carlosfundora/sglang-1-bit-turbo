@@ -336,6 +336,13 @@ class NgramVerifyInput(SpecInput):
             logits_output.next_token_logits / expanded_temperature, dim=-1
         )  # (bs * draft_token_num, vocab_size)
 
+        # RDNA2 diagnostic: sync here to surface any async HIP errors from the forward pass
+        # before they propagate into sampling. Remove after crash is identified.
+        import os
+        if os.environ.get("PHANTOM_VERIFY_SYNC"):
+            torch.cuda.synchronize()
+            logger.info("PHANTOM_VERIFY_SYNC: forward pass completed without HIP error")
+
         # NOTE: The test shows that top_p_renorm_prob and top_k_renorm_prob are the key factors
         # contributing to the poor performance of _sampling_verify.
         target_probs = top_k_renorm_prob(
@@ -364,14 +371,25 @@ class NgramVerifyInput(SpecInput):
             (bs,), dtype=torch.float32, device=self.device
         )
         tree_spec_fn = get_tree_spec_sampling_fn()
+        # RDNA2 diagnostic: force contiguous for tree spec sampling
+        _ri = self.retrive_index.to(torch.int64).contiguous()
+        _rnt = self.retrive_next_token.to(torch.int64).contiguous()
+        _rns = self.retrive_next_sibling.to(torch.int64).contiguous()
+        logger.info(
+            "PHANTOM tree_spec: retrive_index shape=%s contig=%s stride=%s, "
+            "predict shape=%s contig=%s, candidates shape=%s contig=%s",
+            _ri.shape, _ri.is_contiguous(), _ri.stride(),
+            self.predict.shape, self.predict.is_contiguous(),
+            candidates.shape, candidates.is_contiguous(),
+        )
         tree_spec_fn(
             predicts=self.predict,  # mutable
             accept_index=self.accepted_indices,  # mutable
             accept_token_num=self.accept_length,  # mutable
-            candidates=candidates.to(torch.int64),
-            retrive_index=self.retrive_index.to(torch.int64),
-            retrive_next_token=self.retrive_next_token.to(torch.int64),
-            retrive_next_sibling=self.retrive_next_sibling.to(torch.int64),
+            candidates=candidates.to(torch.int64).contiguous(),
+            retrive_index=_ri,
+            retrive_next_token=_rnt,
+            retrive_next_sibling=_rns,
             uniform_samples=coins,
             uniform_samples_for_final_sampling=coins_for_final_sampling,
             target_probs=target_probs,

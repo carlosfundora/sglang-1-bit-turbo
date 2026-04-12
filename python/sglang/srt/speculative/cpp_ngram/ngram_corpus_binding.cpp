@@ -10,10 +10,13 @@ PYBIND11_MODULE(ngram_corpus_cpp, m) {
 
   py::class_<Ngram>(m, "Ngram")
       .def(py::init<size_t, const Param&>(), py::arg("capacity"), py::arg("param"))
-      .def("asyncInsert", &Ngram::asyncInsert, "")
-      .def("batchMatch", &Ngram::batchMatch, "")
+      .def("asyncInsert", &Ngram::asyncInsert, "",
+           py::call_guard<py::gil_scoped_release>())
+      .def("batchMatch", &Ngram::batchMatch, "",
+           py::call_guard<py::gil_scoped_release>())
       .def("reset", &Ngram::reset, "")
-      .def("synchronize", &Ngram::synchronize, "");
+      .def("synchronize", &Ngram::synchronize, "",
+           py::call_guard<py::gil_scoped_release>());
 
   py::class_<Param>(m, "Param")
       .def(py::init<>())

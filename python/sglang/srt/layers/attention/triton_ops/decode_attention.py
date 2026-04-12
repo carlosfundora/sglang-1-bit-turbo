@@ -109,8 +109,10 @@ def _fwd_kernel_stage1(
         q = tl.load(Q + off_q, mask=mask_d, other=0.0)
         for start_n in range(split_kv_start, split_kv_end, BLOCK_N):
             offs_n = start_n + tl.arange(0, BLOCK_N)
+            # RDNA2: clamp inactive-lane offsets to avoid OOB VA validation
+            offs_n_safe = tl.where(offs_n < split_kv_end, offs_n, 0)
             kv_loc = tl.load(
-                kv_indices + cur_batch_kv_start_idx + offs_n,
+                kv_indices + cur_batch_kv_start_idx + offs_n_safe,
                 mask=offs_n < split_kv_end,
                 other=0,
             )
@@ -362,8 +364,10 @@ def _fwd_grouped_kernel_stage1(
             )
         for start_n in tl.range(split_kv_start, split_kv_end, BLOCK_N):
             offs_n = start_n + tl.arange(0, BLOCK_N)
+            # RDNA2: clamp inactive-lane offsets to avoid OOB VA validation
+            offs_n_safe = tl.where(offs_n < split_kv_end, offs_n, 0)
             kv_loc = tl.load(
-                kv_indices + cur_batch_kv_start_idx + offs_n,
+                kv_indices + cur_batch_kv_start_idx + offs_n_safe,
                 mask=offs_n < split_kv_end,
                 other=0,
             )

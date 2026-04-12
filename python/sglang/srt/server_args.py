@@ -5115,10 +5115,10 @@ class ServerArgs:
             "--phantom-num-ghosts",
             type=int,
             default=ServerArgs.phantom_num_ghosts,
-            choices=[1, 2, 3],
-            help="Number of corpus lookup variants per ghost round. "
-                 "1=single lookup (default), 2-3=multi-variant with negative "
-                 "filtering (write→scan→patch pipeline).",
+            choices=[1, 2, 3, 4, 5, 6, 7, 8],
+            help="Maximum ghost worker threads for PHANTOM-X adaptive scaling. "
+                 "1=single worker (no scaling), 2-8=pool with throughput-based "
+                 "hill-climbing scaler. Default=4.",
         )
 
         # Medusa speculative decoding
