@@ -19,7 +19,7 @@ limitations under the License.
 ==============================================================================*/
 
 #include <ATen/hip/HIPContext.h>
-#include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
+#include <c10/hip/HIPGuard.h>
 #include <torch/all.h>
 
 #ifndef USE_ROCM
@@ -414,7 +414,7 @@ void topkGatingSigmoidLauncherHelper(
   const int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
 
   dim3 block_dim(WARP_SIZE, WARPS_PER_TB);
- hipLaunchKernelGGL(( topkGatingSigmoid<T, VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG>), dim3(num_blocks), dim3(block_dim), 0, stream,
+ hipLaunchKernelGGL(( topkGatingSigmoid<T, VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG>), dim3(num_blocks), dim3(block_dim), 0, stream, 
       input, finished, output, num_rows, indices, k, start_expert, end_expert, renormalize, correction_bias);
 }
 
@@ -480,7 +480,7 @@ void topkGatingSigmoidKernelLauncher(
       static constexpr int TPB = 256;
      hipLaunchKernelGGL(( moeSigmoid<T, TPB>)
           , dim3(num_tokens), dim3(TPB), 0, stream, gating_output, nullptr, sigmoid_workspace, num_experts, correction_bias);
-     hipLaunchKernelGGL(( moeTopK<TPB>), dim3(num_tokens), dim3(TPB), 0, stream,
+     hipLaunchKernelGGL(( moeTopK<TPB>), dim3(num_tokens), dim3(TPB), 0, stream, 
           sigmoid_workspace,
           nullptr,
           topk_weights,
@@ -532,8 +532,8 @@ void topk_sigmoid(
   const bool needs_workspace = !is_pow_2 || num_experts > 256;
   const int64_t workspace_size = needs_workspace ? num_tokens * num_experts : 0;
 
-  const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(gating_output));
-  const hipStream_t stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(gating_output));
+  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
   torch::Tensor sigmoid_workspace =
       torch::empty({workspace_size}, gating_output.options().dtype(at::ScalarType::Float));
 

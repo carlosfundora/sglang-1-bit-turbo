@@ -90,6 +90,7 @@ from sglang.srt.utils import (
 from sglang.srt.utils.hf_transformers_utils import get_rope_config
 
 _is_cuda = is_cuda()
+_is_hip = hasattr(torch.version, "hip") and torch.version.hip is not None
 
 if _is_cuda:
     from sglang.jit_kernel.fused_qknorm_rope import (
@@ -525,6 +526,18 @@ class Qwen3MoeAttention(nn.Module):
         )
         self._used_fused_qk_norm_rope_last_call = False
 
+        # RDNA2 fused QKNorm+RoPE: one kernel launch instead of separate norm + rope
+        self._use_rdna2_fused_qknorm_rope = False
+        if _is_hip and not self.use_fused_qk_norm_rope and self.compatible_with_fused_qk_norm_rope:
+            try:
+                from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
+                if rdna2_ops.probe():
+                    self._use_rdna2_fused_qknorm_rope = True
+                    self._rdna2_ops = rdna2_ops
+                    logger.info(f"Qwen3MoEAttention layer {layer_id}: RDNA2 fused QKNorm+RoPE enabled")
+            except ImportError:
+                pass
+
         self.attn = RadixAttention(
             self.num_heads,
             self.head_dim,
@@ -616,6 +629,37 @@ class Qwen3MoeAttention(nn.Module):
             )
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
             self._used_fused_qk_norm_rope_last_call = True
+        elif self._use_rdna2_fused_qknorm_rope:
+            # RDNA2 fused path: QKNorm + RoPE in a single kernel on unsplit QKV
+            cos_sin_cache = self.rotary_emb.cos_sin_cache.to(
+                qkv.device, dtype=qkv.dtype
+            )
+            result = self._rdna2_ops.fused_qknorm_rope(
+                qkv=qkv,
+                q_weight=self.q_norm.weight,
+                k_weight=self.k_norm.weight,
+                cos_sin_cache=cos_sin_cache,
+                position_ids=positions.flatten().to(torch.int64),
+                num_heads_q=self.num_heads,
+                num_heads_k=self.num_kv_heads,
+                num_heads_v=self.num_kv_heads,
+                head_dim=self.head_dim,
+                rotary_dim=self.rotary_emb.rotary_dim,
+                eps=self.q_norm.variance_epsilon,
+                is_neox=self.rotary_emb.is_neox_style,
+            )
+            if result is not None:
+                q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+                self._used_fused_qk_norm_rope_last_call = True
+                return q, k, v
+            # Fall through to standard path on failure
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k = apply_qk_norm(
+                q=q, k=k, q_norm=self.q_norm, k_norm=self.k_norm,
+                head_dim=self.head_dim, alt_stream=self.alt_stream,
+            )
+            q, k = self.rotary_emb(positions, q, k)
+            self._used_fused_qk_norm_rope_last_call = False
         else:
             # Fallback to non-fused QK Norm & RoPE implementation
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)

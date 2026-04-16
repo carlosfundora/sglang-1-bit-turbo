@@ -93,7 +93,7 @@ void reconstruct_indices_from_tree_mask(
     int64_t draft_token_num) {
   dim3 grid(batch_size);
   dim3 block(draft_token_num);
-  const hipStream_t stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
+  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
 
  hipLaunchKernelGGL(( reconstructIndicesFromTreeMask), dim3(grid), dim3(block), 0, stream,
       static_cast<bool*>(tree_mask.data_ptr()),

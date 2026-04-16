@@ -286,3 +286,4 @@ sgl-kernel/csrc/quantization/gguf/*.hip
 # Temporary config backups
 python/pyproject_*.toml.bak
 python/pyproject_active.toml
+sgl-kernel/python/sgl_kernel/*.so

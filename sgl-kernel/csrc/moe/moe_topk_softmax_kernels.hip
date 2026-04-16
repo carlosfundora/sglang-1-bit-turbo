@@ -19,7 +19,7 @@ limitations under the License.
 ==============================================================================*/
 
 #include <ATen/hip/HIPContext.h>
-#include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
+#include <c10/hip/HIPGuard.h>
 #include <torch/all.h>
 
 #ifndef USE_ROCM
@@ -625,7 +625,7 @@ void topkGatingSoftmaxLauncherHelper(
   const int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
 
   dim3 block_dim(WARP_SIZE, WARPS_PER_TB);
- hipLaunchKernelGGL(( topkGatingSoftmax<T, VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG>), dim3(num_blocks), dim3(block_dim), 0, stream,
+ hipLaunchKernelGGL(( topkGatingSoftmax<T, VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG>), dim3(num_blocks), dim3(block_dim), 0, stream, 
       input,
       finished,
       output,
@@ -701,15 +701,15 @@ void topkGatingSoftmaxKernelLauncher(
           softmax_workspace != nullptr,
           "softmax_workspace must be provided for num_experts that are not a power of 2.");
       static constexpr int TPB = 256;
-     hipLaunchKernelGGL(( moeSoftmax<T, TPB>), dim3(num_tokens), dim3(TPB), 0, stream,
+     hipLaunchKernelGGL(( moeSoftmax<T, TPB>), dim3(num_tokens), dim3(TPB), 0, stream, 
           gating_output, nullptr, softmax_workspace, num_experts, moe_softcapping, correction_bias);
       if (topk == 1) {
         // Note: As an optimization for better performance,
         // the softmax_workspace is overwritten in-place by both moeTopK and moeTopKFast.
-       hipLaunchKernelGGL(( moeTopK<TPB>), dim3(num_tokens), dim3(TPB), 0, stream,
+       hipLaunchKernelGGL(( moeTopK<TPB>), dim3(num_tokens), dim3(TPB), 0, stream, 
             softmax_workspace, nullptr, topk_weights, topk_indices, num_experts, topk, 0, num_experts, renormalize);
       } else {
-       hipLaunchKernelGGL(( moeTopKFast<TPB>), dim3(num_tokens), dim3(TPB), 0, stream,
+       hipLaunchKernelGGL(( moeTopKFast<TPB>), dim3(num_tokens), dim3(TPB), 0, stream, 
             softmax_workspace, nullptr, topk_weights, topk_indices, num_experts, topk, 0, num_experts, renormalize);
       }
     }
@@ -754,8 +754,8 @@ void topk_softmax(
   const bool needs_workspace = !is_pow_2 || num_experts > 256;
   const int64_t workspace_size = needs_workspace ? num_tokens * num_experts : 0;
 
-  const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(gating_output));
-  const hipStream_t stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(gating_output));
+  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
   torch::Tensor softmax_workspace =
       torch::empty({workspace_size}, gating_output.options().dtype(at::ScalarType::Float));
 
