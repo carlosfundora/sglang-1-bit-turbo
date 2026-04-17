@@ -653,7 +653,10 @@ class TritonAttnBackend(AttentionBackend):
                 )
 
             custom_mask = self.cuda_graph_custom_mask
-            if spec_info is not None and getattr(spec_info, "custom_mask", None) is not None:
+            if (
+                spec_info is not None
+                and getattr(spec_info, "custom_mask", None) is not None
+            ):
                 custom_mask[: spec_info.custom_mask.shape[0]] = spec_info.custom_mask
             else:
                 custom_mask = None
@@ -806,7 +809,10 @@ class TritonAttnBackend(AttentionBackend):
                     )
                 )
             custom_mask = self.cuda_graph_custom_mask
-            if spec_info is not None and getattr(spec_info, "custom_mask", None) is not None:
+            if (
+                spec_info is not None
+                and getattr(spec_info, "custom_mask", None) is not None
+            ):
                 custom_mask[: spec_info.custom_mask.shape[0]] = spec_info.custom_mask
             else:
                 custom_mask = None
