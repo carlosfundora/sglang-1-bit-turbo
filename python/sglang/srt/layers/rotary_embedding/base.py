@@ -53,6 +53,25 @@ if _is_hip:
     )
 
 
+
+# RDNA2 Wave32 RoPE kernel — lazy init
+_rdna2_rope_checked = False
+_rdna2_rope_ok = False
+
+def _check_rdna2_rope():
+    global _rdna2_rope_checked, _rdna2_rope_ok
+    if _rdna2_rope_checked:
+        return _rdna2_rope_ok
+    _rdna2_rope_checked = True
+    if not _is_hip:
+        return False
+    try:
+        if 'rdna2_ops' in globals() and rdna2_ops.probe():
+            _rdna2_rope_ok = True
+    except Exception:
+        pass
+    return _rdna2_rope_ok
+
 class RotaryEmbedding(MultiPlatformOp):
     """Original rotary positional embedding."""
 
@@ -482,7 +501,7 @@ class RotaryEmbedding(MultiPlatformOp):
         if self.is_neox_style and self.rotary_dim == self.head_size and offsets is None:
             try:
 
-                if rdna2_ops.probe():
+                if _check_rdna2_rope():
                     if offsets is not None:
                         positions = positions + offsets
                     positions = positions.flatten()

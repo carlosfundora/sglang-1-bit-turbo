@@ -32,6 +32,12 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+try:
+    import xielu.ops  # noqa: F401
+    _xielu_ops_available = True
+except ImportError:
+    _xielu_ops_available = False
+
 from transformers import PretrainedConfig
 
 try:
@@ -287,9 +293,10 @@ class XIELU(MultiPlatformOp):
 
         self._xielu_cuda_obj = None
         try:
-            import xielu.ops  # noqa: F401
-
-            self._xielu_cuda_obj = torch.classes.xielu.XIELU()
+            if _xielu_ops_available:
+                self._xielu_cuda_obj = torch.classes.xielu.XIELU()
+            else:
+                raise ImportError()
             msg = "Using experimental xIELU CUDA."
             try:
                 from torch._dynamo import allow_in_graph

@@ -106,6 +106,15 @@ _te_norm_available = False
 _te_norms_enabled = get_bool_env_var("SGLANG_USE_TE_NORMS") and _is_hip
 
 
+
+_te_module = None
+def _get_te_module():
+    global _te_module
+    if _te_module is None:
+        import transformer_engine.pytorch as te
+        _te_module = te
+    return _te_module
+
 def _check_te_norm():
     """Lazy check for TransformerEngine norm availability (opt-in via SGLANG_USE_TE_NORMS=1)."""
     global _te_norm_checked, _te_norm_available
@@ -303,7 +312,7 @@ class RMSNorm(MultiPlatformOp):
             self._te_norm = False
             return None
         try:
-            import transformer_engine.pytorch as te
+            te = _get_te_module()
 
             te_mod = te.RMSNorm(self.hidden_size, eps=self.variance_epsilon).to(
                 device=self.weight.device, dtype=self.weight.dtype
@@ -609,7 +618,7 @@ class LayerNorm(MultiPlatformOp):
             self._te_norm = False
             return None
         try:
-            import transformer_engine.pytorch as te
+            te = _get_te_module()
 
             te_mod = te.LayerNorm(self.hidden_size, eps=self.variance_epsilon).to(
                 device=self.weight.device, dtype=self.weight.dtype
