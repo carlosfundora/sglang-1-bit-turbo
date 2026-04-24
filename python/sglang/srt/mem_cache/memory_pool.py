@@ -28,7 +28,7 @@ import abc
 import dataclasses
 import logging
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import numpy as np
@@ -52,15 +52,11 @@ from sglang.srt.mem_cache.utils import (
     set_mla_kv_buffer_triton,
     set_mla_kv_scale_buffer_triton,
 )
-from sglang.srt.utils import (
-    cpu_has_amx_support,
-    is_cpu,
-    is_cuda,
-    is_hip,
-    is_npu,
-    next_power_of_2,
-)
+from sglang.srt.utils import is_cuda, is_hip, is_npu, next_power_of_2
+from sglang.srt.utils.custom_op import register_custom_op
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
+
+store_cache = register_custom_op(store_cache, mutates_args=["k_cache", "v_cache"])
 
 if TYPE_CHECKING:
     from sglang.srt.managers.cache_controller import LayerDoneCounter
@@ -72,8 +68,6 @@ logger = logging.getLogger(__name__)
 GB = 1024 * 1024 * 1024
 _is_cuda = is_cuda()
 _is_npu = is_npu()
-_is_cpu = is_cpu()
-_cpu_has_amx_support = cpu_has_amx_support()
 _is_hip = is_hip()
 
 
@@ -96,7 +90,7 @@ def _set_kv_buffer_impl(
     same_kv_dim: bool = True,
 ) -> None:
     row_bytes = row_dim * store_dtype.itemsize
-    if (_is_cuda or _is_hip) and same_kv_dim and can_use_store_cache(row_bytes):
+    if _is_cuda and same_kv_dim and can_use_store_cache(row_bytes):
         return store_cache(
             k.view(-1, row_dim),
             v.view(-1, row_dim),
@@ -130,6 +124,7 @@ class ReqToTokenPool:
         device: str,
         enable_memory_saver: bool,
     ):
+
         memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=enable_memory_saver
         )
@@ -141,7 +136,11 @@ class ReqToTokenPool:
             self.req_to_token = torch.zeros(
                 (size, max_context_len), dtype=torch.int32, device=device
             )
-        self.free_slots = list(range(size))
+
+        # NOTE: must also change the one in `clear`
+        # temporarily skip index 0 because SWA cache and KV State don't have padding
+        # self.free_slots = list(range(size))  # Old code
+        self.free_slots = list(range(1, size))
 
     def write(self, indices, values):
         self.req_to_token[indices] = values
@@ -149,40 +148,25 @@ class ReqToTokenPool:
     def available_size(self):
         return len(self.free_slots)
 
-    def alloc(self, reqs: list[Req]) -> Optional[List[int]]:
-        # Indices of reqs that already have a req_pool_idx and will reuse
-        # their existing slot (e.g. chunked prefill continuing across chunks).
-        reusing = [i for i, r in enumerate(reqs) if r.req_pool_idx is not None]
-        # NOTE: this check is relaxed temporarily
-        # https://github.com/sgl-project/sglang/pull/20476
-        # if not any(r.is_dllm() for r in reqs):
-        #     assert (
-        #         sum(1 for i in reusing if reqs[i].is_chunked > 0) <= 1
-        #     ), "only one chunked request may reuse req_pool_idx in a batch"
-        assert all(
-            reqs[i].is_chunked > 0 or reqs[i].kv_committed_len > 0 for i in reusing
-        ), "reusing request must be chunked or have committed KV"
-
-        need_size = len(reqs) - len(reusing)
+    def alloc(self, need_size: int) -> List[int]:
         if need_size > len(self.free_slots):
             return None
+
         select_index = self.free_slots[:need_size]
         self.free_slots = self.free_slots[need_size:]
-        offset = 0
-        for r in reqs:
-            if r.req_pool_idx is None:
-                r.req_pool_idx = select_index[offset]
-                offset += 1
-        result = [r.req_pool_idx for r in reqs]
-        return result
 
-    def free(self, req: Req):
-        assert req.req_pool_idx is not None, "request must have req_pool_idx"
-        self.free_slots.append(req.req_pool_idx)
-        req.req_pool_idx = None
+        return select_index
+
+    def free(self, free_index: Union[int, List[int]]):
+        if isinstance(free_index, (int,)):
+            self.free_slots.append(free_index)
+        else:
+            self.free_slots.extend(free_index)
 
     def clear(self):
-        self.free_slots = list(range(self.size))
+        # temporarily skip index 0 because SWA cache and KV State don't have padding
+        # self.free_slots = list(range(self.size))
+        self.free_slots = list(range(1, self.size))
 
 
 class MambaPool:
@@ -193,15 +177,11 @@ class MambaPool:
 
         def at_layer_idx(self, layer: int):
             kwargs = {}
-            # Use fields instead of vars to avoid torch.compile graph break
-            for f in fields(self):
-                name = f.name
-                v = getattr(self, name)
-                if name in ("conv", "intermediate_conv_window"):
-                    kwargs[name] = [conv[layer] for conv in v]
+            for k, v in vars(self).items():
+                if k == "conv" or k == "intermediate_conv_window":
+                    kwargs[k] = [conv[layer] for conv in v]
                 else:
-                    kwargs[name] = v[layer]
-
+                    kwargs[k] = v[layer]
             return type(self)(**kwargs)
 
         def mem_usage_bytes(self):
@@ -221,7 +201,6 @@ class MambaPool:
         size: int,
         spec_state_size: int,
         cache_params: BaseLinearStateParams,
-        mamba_layer_ids: List[int],
         device: str,
         enable_memory_saver: bool = False,
         speculative_num_draft_tokens: Optional[int] = None,
@@ -233,7 +212,7 @@ class MambaPool:
         self.memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=enable_memory_saver
         )
-        num_mamba_layers = len(mamba_layer_ids)
+        num_mamba_layers = len(cache_params.layers)
 
         self.size = size
         self.device = device
@@ -256,13 +235,6 @@ class MambaPool:
                 )
                 for conv_shape in conv_state_shape
             ]
-
-            if _is_cpu and _cpu_has_amx_support:
-                from sglang.srt.layers.amx_utils import _init_amx_conv_state
-
-                # CPU uses a different layout of conv_state for kernel optimization
-                conv_state = _init_amx_conv_state(conv_state)
-
             temporal_state = torch.zeros(
                 size=(num_mamba_layers, size + 1) + temporal_state_shape,
                 dtype=ssm_dtype,
@@ -344,18 +316,10 @@ class MambaPool:
 
         select_index = self.free_slots[:need_size]
         self.free_slots = self.free_slots[need_size:]
-        # clear at alloc time — expand a scalar GPU zero to the right shape, no CPU-GPU sync
+        # clear at alloc time, fill allocated slots with zeros
         for i in range(len(self.mamba_cache.conv)):
-            t = self.mamba_cache.conv[i]
-            z = torch.zeros(1, dtype=t.dtype, device=t.device).expand(
-                t.shape[0], need_size, *t.shape[2:]
-            )
-            t[:, select_index] = z
-        t = self.mamba_cache.temporal
-        z = torch.zeros(1, dtype=t.dtype, device=t.device).expand(
-            t.shape[0], need_size, *t.shape[2:]
-        )
-        t[:, select_index] = z
+            self.mamba_cache.conv[i][:, select_index] = 0
+        self.mamba_cache.temporal[:, select_index] = 0
 
         return select_index
 
@@ -381,7 +345,7 @@ class MambaPool:
 
     def fork_from(self, src_index: torch.Tensor) -> Optional[torch.Tensor]:
         dst_index = self.alloc(1)
-        if dst_index is None:
+        if dst_index == None:
             return None
         self.copy_from(src_index, dst_index)
         return dst_index
@@ -456,11 +420,8 @@ class HybridReqToTokenPool(ReqToTokenPool):
         device: str,
         enable_memory_saver: bool,
         cache_params: BaseLinearStateParams,
-        mamba_layer_ids: List[int],
         enable_mamba_extra_buffer: bool,
         speculative_num_draft_tokens: int = None,
-        enable_overlap_schedule: bool = True,
-        start_layer: Optional[int] = None,
     ):
         super().__init__(
             size=size,
@@ -468,17 +429,15 @@ class HybridReqToTokenPool(ReqToTokenPool):
             device=device,
             enable_memory_saver=enable_memory_saver,
         )
-
-        self.mamba_ping_pong_track_buffer_size = 2 if enable_overlap_schedule else 1
+        self.mamba_ping_pong_track_buffer_size = (
+            2 if speculative_num_draft_tokens is None else 1
+        )
         self.enable_mamba_extra_buffer = enable_mamba_extra_buffer
         self.enable_memory_saver = enable_memory_saver
-        self.start_layer = start_layer if start_layer is not None else 0
-        self.layer_transfer_counter = None
         self._init_mamba_pool(
             size=mamba_size,
             mamba_spec_state_size=mamba_spec_state_size,
             cache_params=cache_params,
-            mamba_layer_ids=mamba_layer_ids,
             device=device,
             enable_mamba_extra_buffer=enable_mamba_extra_buffer,
             speculative_num_draft_tokens=speculative_num_draft_tokens,
@@ -489,7 +448,6 @@ class HybridReqToTokenPool(ReqToTokenPool):
         size: int,
         mamba_spec_state_size: int,
         cache_params: BaseLinearStateParams,
-        mamba_layer_ids: List[int],
         device: str,
         enable_mamba_extra_buffer: bool,
         speculative_num_draft_tokens: int = None,
@@ -498,12 +456,11 @@ class HybridReqToTokenPool(ReqToTokenPool):
             size=size,
             spec_state_size=mamba_spec_state_size,
             cache_params=cache_params,
-            mamba_layer_ids=mamba_layer_ids,
             device=device,
             enable_memory_saver=self.enable_memory_saver,
             speculative_num_draft_tokens=speculative_num_draft_tokens,
         )
-        self.mamba_map = {layer_id: i for i, layer_id in enumerate(mamba_layer_ids)}
+        self.mamba_map = {layer_id: i for i, layer_id in enumerate(cache_params.layers)}
 
         self.device = device
         self.req_index_to_mamba_index_mapping: torch.Tensor = torch.zeros(
@@ -518,20 +475,16 @@ class HybridReqToTokenPool(ReqToTokenPool):
                 )
             )
 
-    def register_layer_transfer_counter(
-        self, layer_transfer_counter: "LayerDoneCounter"
-    ):
-        self.layer_transfer_counter = layer_transfer_counter
-
     # For chunk prefill req, we do not need to allocate mamba cache,
     # We could use allocated mamba cache instead.
-    def alloc(self, reqs: List["Req"]) -> Optional[List[int]]:
-        select_index = super().alloc(reqs)
-        if select_index is None:
+    def alloc(self, need_size: int, reqs: Optional[List["Req"]]) -> Optional[List[int]]:
+        assert reqs is not None
+        select_index = super().alloc(need_size)
+        if select_index == None:
             return None
 
-        mamba_indices: list[torch.Tensor] = []
-        mamba_ping_pong_track_buffers: list[torch.Tensor] = []
+        mamba_index = []
+        mamba_ping_pong_track_buffer_list = []
         for req in reqs:
             mid = None
             if req.mamba_pool_idx is not None:  # for radix cache
@@ -543,7 +496,7 @@ class HybridReqToTokenPool(ReqToTokenPool):
                 ), f"Not enough space for mamba cache, try to increase --mamba-full-memory-ratio or --max-mamba-cache-size. {mid=}, {self.mamba_pool.size=}, {self.mamba_pool.available_size()=}, {len(reqs)=}"
                 mid = mid[0]
                 req.mamba_pool_idx = mid
-            mamba_indices.append(mid)
+            mamba_index.append(mid)
             if self.enable_mamba_extra_buffer:
                 if req.mamba_ping_pong_track_buffer is None:
                     req.mamba_ping_pong_track_buffer = self.mamba_pool.alloc(
@@ -553,22 +506,26 @@ class HybridReqToTokenPool(ReqToTokenPool):
                         req.mamba_ping_pong_track_buffer is not None
                     ), "Not enough space for mamba ping pong idx, try to increase --mamba-full-memory-ratio."
                     req.mamba_next_track_idx = 0
-                mamba_ping_pong_track_buffers.append(req.mamba_ping_pong_track_buffer)
+                mamba_ping_pong_track_buffer_list.append(
+                    req.mamba_ping_pong_track_buffer.tolist()
+                )
         assert len(select_index) == len(
-            mamba_indices
+            mamba_index
         ), f"Not enough space for mamba cache, try to increase --mamba-full-memory-ratio or --max-mamba-cache-size."
         if self.enable_mamba_extra_buffer:
             assert len(select_index) == len(
-                mamba_ping_pong_track_buffers
+                mamba_ping_pong_track_buffer_list
             ), f"Not enough space for mamba ping pong idx, try to increase --mamba-full-memory-ratio."
-        mamba_index_tensor = torch.stack(mamba_indices).to(dtype=torch.int32)
-        self.req_index_to_mamba_index_mapping[select_index] = mamba_index_tensor
+        self.req_index_to_mamba_index_mapping[select_index] = torch.tensor(
+            mamba_index, dtype=torch.int32, device=self.device
+        )
         if self.enable_mamba_extra_buffer:
-            ping_pong_tensor = torch.stack(mamba_ping_pong_track_buffers).to(
-                dtype=torch.int32
-            )
             self.req_index_to_mamba_ping_pong_track_buffer_mapping[select_index] = (
-                ping_pong_tensor
+                torch.tensor(
+                    mamba_ping_pong_track_buffer_list,
+                    dtype=torch.int32,
+                    device=self.device,
+                )
             )
         return select_index
 
@@ -577,8 +534,6 @@ class HybridReqToTokenPool(ReqToTokenPool):
 
     def mamba2_layer_cache(self, layer_id: int):
         assert layer_id in self.mamba_map
-        if self.layer_transfer_counter is not None:
-            self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
         return self.mamba_pool.mamba2_layer_cache(self.mamba_map[layer_id])
 
     def get_speculative_mamba2_params_all_layers(self) -> MambaPool.SpeculativeState:
@@ -590,46 +545,37 @@ class HybridReqToTokenPool(ReqToTokenPool):
         else:
             return mamba_next_track_idx
 
-    def free_mamba_cache(
-        self, req: "Req", mamba_ping_pong_track_buffer_to_keep: Optional[int] = None
+    # For chunk prefill, we can not free mamba cache, we need use it in the future
+    def free(
+        self,
+        free_index: Union[int, List[int]],
+        free_mamba_cache: bool = True,
+        mamba_ping_pong_track_buffer_to_keep: Optional[int] = None,
     ):
-        mamba_index = req.mamba_pool_idx
-        assert mamba_index is not None, "double free? mamba_index is None"
-        self.mamba_pool.free(mamba_index.unsqueeze(0))
-        req.mamba_pool_idx = None
+        if isinstance(free_index, (int,)):
+            free_index = [free_index]
+        super().free(free_index)
+        if free_mamba_cache:
+            mamba_index = self.req_index_to_mamba_index_mapping[free_index]
+            self.mamba_pool.free(mamba_index)
 
-        if self.enable_mamba_extra_buffer:
-            mamba_ping_pong_track_buffer_to_free = (
-                self.req_index_to_mamba_ping_pong_track_buffer_mapping[req.req_pool_idx]
-            )
-            if mamba_ping_pong_track_buffer_to_keep is not None:
-                assert mamba_ping_pong_track_buffer_to_keep in [
-                    0,
-                    1,
-                ], f"mamba_ping_pong_track_buffer_to_keep must be 0 or 1, {mamba_ping_pong_track_buffer_to_keep=}"
-                # Avoid Python-list advanced indexing on a device tensor.
-                # The ping-pong buffer size is either 2 (normal) or 1 (spec decode).
-                if self.mamba_ping_pong_track_buffer_size == 2:
-                    idx_to_free = 1 - mamba_ping_pong_track_buffer_to_keep
+            if self.enable_mamba_extra_buffer:
+                mamba_ping_pong_track_buffer_to_free = (
+                    self.req_index_to_mamba_ping_pong_track_buffer_mapping[
+                        free_index
+                    ].squeeze(0)
+                )
+                if mamba_ping_pong_track_buffer_to_keep is not None:
+                    assert mamba_ping_pong_track_buffer_to_keep in [
+                        0,
+                        1,
+                    ], f"mamba_ping_pong_track_buffer_to_keep must be 0 or 1, {mamba_ping_pong_track_buffer_to_keep=}"
+                    idx_to_free = list(range(self.mamba_ping_pong_track_buffer_size))
+                    idx_to_free.remove(mamba_ping_pong_track_buffer_to_keep)
                     mamba_ping_pong_track_buffer_to_free = (
-                        mamba_ping_pong_track_buffer_to_free[
-                            idx_to_free : idx_to_free + 1
-                        ]
+                        mamba_ping_pong_track_buffer_to_free[idx_to_free]
                     )
-                else:
-                    assert self.mamba_ping_pong_track_buffer_size == 1, (
-                        f"Unexpected mamba_ping_pong_track_buffer_size="
-                        f"{self.mamba_ping_pong_track_buffer_size}"
-                    )
-                    assert mamba_ping_pong_track_buffer_to_keep == 0, (
-                        "mamba_ping_pong_track_buffer_to_keep must be 0 when "
-                        "mamba_ping_pong_track_buffer_size is 1"
-                    )
-                    # Keep the only slot, so free nothing.
-                    mamba_ping_pong_track_buffer_to_free = (
-                        mamba_ping_pong_track_buffer_to_free[0:0]
-                    )
-            self.mamba_pool.free(mamba_ping_pong_track_buffer_to_free)
+                self.mamba_pool.free(mamba_ping_pong_track_buffer_to_free)
 
     def clear(self):
         logger.info("Reset HybridReqToTokenPool")
@@ -1241,15 +1187,14 @@ class HybridLinearKVPool(KVCache):
         use_mla: bool = False,
         kv_lora_rank: int = None,
         qk_rope_head_dim: int = None,
-        start_layer: Optional[int] = None,
     ):
         self.size = size
         self.dtype = dtype
         self.device = device
         self.full_layer_nums = len(full_attention_layer_ids)
         self.page_size = page_size
-        self.start_layer = start_layer if start_layer is not None else 0
-        self.layer_transfer_counter = None
+        # TODO support pp?
+        self.start_layer = 0
         self.head_num = head_num
         self.head_dim = head_dim
         self.mamba_pool = mamba_pool
@@ -1333,30 +1278,15 @@ class HybridLinearKVPool(KVCache):
             )
         return self.full_attention_layer_id_mapping[layer_id]
 
-    def register_layer_transfer_counter(
-        self, layer_transfer_counter: "LayerDoneCounter"
-    ):
-        self.layer_transfer_counter = layer_transfer_counter
-        # The layer-wise wait logic is executed at the Hybrid LinearPool level;
-        # no additional wait is needed in the full_kv_pool
-        self.full_kv_pool.register_layer_transfer_counter(None)
-
-    def _wait_for_layer(self, layer_id: int):
-        if self.layer_transfer_counter is not None:
-            self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
-
     def get_key_buffer(self, layer_id: int):
-        self._wait_for_layer(layer_id)
         layer_id = self._transfer_full_attention_id(layer_id)
         return self.full_kv_pool.get_key_buffer(layer_id)
 
     def get_value_buffer(self, layer_id: int):
-        self._wait_for_layer(layer_id)
         layer_id = self._transfer_full_attention_id(layer_id)
         return self.full_kv_pool.get_value_buffer(layer_id)
 
     def get_kv_buffer(self, layer_id: int):
-        self._wait_for_layer(layer_id)
         layer_id = self._transfer_full_attention_id(layer_id)
         return self.full_kv_pool.get_kv_buffer(layer_id)
 
@@ -1462,16 +1392,13 @@ class MLATokenToKVPool(KVCache):
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
         self.use_nsa = use_nsa
-        self.nsa_kv_cache_store_fp8 = (
-            use_nsa
-            and dtype == torch.float8_e4m3fn
-            and override_kv_cache_dim is not None
-        )
-        # When override_kv_cache_dim is provided with nsa model, we assume the
-        # override kv cache dim is correct and use it directly.
+        self.nsa_kv_cache_store_fp8 = use_nsa and dtype == torch.float8_e4m3fn
+        assert not (
+            self.nsa_kv_cache_store_fp8 and override_kv_cache_dim is None
+        ), "override_kv_cache_dim must be provided when using NSA with FP8 kv cache storage"
         self.kv_cache_dim = (
             override_kv_cache_dim
-            if self.nsa_kv_cache_store_fp8
+            if self.use_nsa and self.nsa_kv_cache_store_fp8
             else (kv_lora_rank + qk_rope_head_dim)
         )
 
@@ -1553,7 +1480,7 @@ class MLATokenToKVPool(KVCache):
         cache_v: torch.Tensor,
     ):
         layer_id = layer.layer_id
-        assert not self.nsa_kv_cache_store_fp8
+        assert not (self.use_nsa and self.nsa_kv_cache_store_fp8)
         if cache_k.dtype != self.dtype:
             cache_k = cache_k.to(self.dtype)
 
@@ -1573,7 +1500,7 @@ class MLATokenToKVPool(KVCache):
     ):
         layer_id = layer.layer_id
 
-        if self.nsa_kv_cache_store_fp8:
+        if self.use_nsa and self.nsa_kv_cache_store_fp8:
             # OPTIMIZATION: Quantize k_nope and k_rope separately to avoid concat overhead
             # This also enables reuse of set_mla_kv_buffer_triton two-tensor write path
             # quantize_k_cache_separate returns (nope_part, rope_part) as uint8 bytes
@@ -1722,7 +1649,7 @@ class MLATokenToKVPoolFP4(MLATokenToKVPool):
         cache_v: torch.Tensor,
     ):
         layer_id = layer.layer_id
-        assert not self.nsa_kv_cache_store_fp8
+        assert not (self.use_nsa and self.nsa_kv_cache_store_fp8)
         if cache_k.dtype != self.dtype:
             from sglang.srt.layers.quantization.kvfp4_tensor import KVFP4QuantizeUtil
 
@@ -1747,7 +1674,7 @@ class MLATokenToKVPoolFP4(MLATokenToKVPool):
     ):
         layer_id = layer.layer_id
 
-        if self.nsa_kv_cache_store_fp8:
+        if self.use_nsa and self.nsa_kv_cache_store_fp8:
             # original cache_k: (num_tokens, num_heads 1, hidden 576); we unsqueeze the page_size=1 dim here
             # TODO no need to cat
             cache_k = torch.cat([cache_k_nope, cache_k_rope], dim=-1)
@@ -1801,14 +1728,20 @@ class NSATokenToKVPool(MLATokenToKVPool):
         device: str,
         index_head_dim: int,
         enable_memory_saver: bool,
-        kv_cache_dim: int,
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
-        index_buf_size: Optional[int] = None,
     ):
+        assert (
+            kv_lora_rank % self.quant_block_size == 0
+        ), f"kv_lora_rank {kv_lora_rank} must be multiple of quant_block_size {self.quant_block_size}"
 
+        # Calculate override_kv_cache_dim for FP8 storage:
+        # kv_lora_rank + scale storage (kv_lora_rank // quant_block_size * 4 bytes) + rope dimension storage
+        # Note: rope dimension is stored in original dtype (bf16), not quantized to fp8
         override_dim = (
-            kv_cache_dim if kv_cache_dim != kv_lora_rank + qk_rope_head_dim else None
+            kv_lora_rank
+            + kv_lora_rank // self.quant_block_size * 4
+            + qk_rope_head_dim * self.rope_storage_dtype.itemsize
         )
 
         super().__init__(
@@ -1828,8 +1761,6 @@ class NSATokenToKVPool(MLATokenToKVPool):
         # self.index_k_dtype = torch.float8_e4m3fn
         # self.index_k_scale_dtype = torch.float32
         self.index_head_dim = index_head_dim
-        if index_buf_size is None:
-            index_buf_size = size
         # num head == 1 and head dim == 128 for index_k in NSA
         assert index_head_dim == 128
 
@@ -1851,7 +1782,7 @@ class NSATokenToKVPool(MLATokenToKVPool):
                     #         * buf[i, :page_size * head_dim] for fp8 data
                     #         * buf[i, page_size * head_dim:].view(float32) for scale
                     (
-                        (index_buf_size + page_size + 1) // self.page_size,
+                        (size + page_size + 1) // self.page_size,
                         self.page_size
                         * (
                             index_head_dim + index_head_dim // self.quant_block_size * 4
@@ -1894,10 +1825,8 @@ class NSATokenToKVPool(MLATokenToKVPool):
     def get_index_k_scale_buffer(
         self,
         layer_id: int,
-        seq_len_tensor: torch.Tensor,
+        seq_len: int,
         page_indices: torch.Tensor,
-        seq_len_sum: int,
-        max_seq_len: int,
     ):
         """
         Fused method to get both index K and scale data in a single call using Triton.
@@ -1912,12 +1841,7 @@ class NSATokenToKVPool(MLATokenToKVPool):
         """
         buf = self.index_k_with_scale_buffer[layer_id - self.start_layer]
         return index_buf_accessor.GetKAndS.execute(
-            self,
-            buf,
-            page_indices=page_indices,
-            seq_len_tensor=seq_len_tensor,
-            seq_len_sum=seq_len_sum,
-            max_seq_len=max_seq_len,
+            self, buf, seq_len=seq_len, page_indices=page_indices
         )
 
     def set_index_k_scale_buffer(
@@ -2091,2414 +2015,3 @@ def copy_all_layer_kv_cache_tiled(
     mask = mask_loc[:, None] & mask_byte[None, :]
     vals = tl.load(src_ptr, mask=mask)
     tl.store(tgt_ptr, vals, mask=mask)
-
-
-# ========================================================================
-# TurboQuant INT4 KV Cache Pool for MLA
-# ========================================================================
-
-class MLATokenToKVPoolTQ(MLATokenToKVPool):
-    """MLA KV cache pool with TurboQuant compression (2/3/4-bit).
-
-    Compresses the kv_lora_rank part of the MLA latent, keeps
-    qk_rope_head_dim in FP16. Dequantizes on read.
-
-    Bit-width set via SGLANG_KV_CACHE_TURBOQUANT env var:
-      "1" or "4" → 4-bit (2.94x compression, CosSim > 0.995)
-      "3"        → 3-bit (3.51x compression)
-      "2"        → 2-bit (4.36x compression)
-
-    QJL (Stage 2) enabled via SGLANG_KV_CACHE_TURBOQUANT_QJL=1:
-      Adds unbiased inner product correction at the cost of extra storage
-      (d/8 bytes signs + 2 bytes residual norm per token).
-      Only beneficial for GQA models with head_dim <= 64 at bit_width <= 2.
-      For MLA models (d=512), QJL is harmful and should be OFF (default).
-
-    Integration with aiter backend: transparent — get_key_buffer() returns
-    dequantized FP16, so aiter's mla_decode_fwd works unchanged.
-    """
-
-    def __init__(self, *args, tq_bit_width=None, **kwargs):
-        self._tq_bit_width_override = tq_bit_width
-        super().__init__(*args, **kwargs)
-
-    def _create_buffers(self):
-        import math, os
-        from sglang.srt.layers.quantization.turboquant_engine import (
-            get_codebook, generate_rotation_matrix, packed_bytes_per_dim, pad_for_packing,
-        )
-
-        # Priority: constructor arg > env var > default 4
-        if self._tq_bit_width_override is not None:
-            tq_val = str(self._tq_bit_width_override)
-        else:
-            tq_val = os.environ.get("SGLANG_KV_CACHE_TURBOQUANT", "4")
-        try:
-            self.tq_effective_bits = float(tq_val) if tq_val not in ("1", "true", "True") else 4.0
-        except ValueError:
-            self.tq_effective_bits = 4.0
-        self.tq_bit_width = int(self.tq_effective_bits)
-        self.tq_mixed = self.tq_effective_bits != int(self.tq_effective_bits)
-        self.tq_group_size = min(128, self.kv_lora_rank)
-        self.tq_n_groups = math.ceil(self.kv_lora_rank / self.tq_group_size)
-
-        if self.tq_mixed:
-            from sglang.srt.layers.quantization.turboquant_engine import mixed_bit_config
-            self.tq_group_bits = mixed_bit_config(self.tq_effective_bits, self.tq_n_groups)
-            logger.info(f"TurboQuant mixed-bit: {self.tq_effective_bits}-bit, per-group={self.tq_group_bits}")
-        else:
-            if self.tq_bit_width not in (2, 3, 4):
-                logger.warning(f"Invalid TQ bit_width {self.tq_bit_width}, defaulting to 4")
-                self.tq_bit_width = 4
-            self.tq_group_bits = None
-
-        self.tq_use_qjl = os.environ.get("SGLANG_KV_CACHE_TURBOQUANT_QJL", "0") == "1"
-        # RoPE quantization: default ON (quantize RoPE too for max compression)
-        # Set SGLANG_KV_CACHE_TURBOQUANT_ROPE=0 to keep RoPE in FP16
-        self.tq_quant_rope = os.environ.get("SGLANG_KV_CACHE_TURBOQUANT_ROPE", "1") != "0"
-
-        centroids, boundaries = get_codebook(self.tq_bit_width)
-        self.tq_centroids = centroids.to(self.device)
-        self.tq_boundaries = boundaries.to(self.device)
-
-        self.tq_rotations = {}
-        Pi_list = []
-        for g in range(self.tq_n_groups):
-            g_start = g * self.tq_group_size
-            g_end = min(g_start + self.tq_group_size, self.kv_lora_rank)
-            g_dim = g_end - g_start
-            Pi = generate_rotation_matrix(g_dim, seed=42 + g_start).to(self.device)
-            self.tq_rotations[g_start] = Pi
-            Pi_list.append(Pi)
-        self.tq_Pi_all = torch.stack(Pi_list)
-
-        # RoPE rotation matrix (separate from latent groups)
-        if self.tq_quant_rope and self.qk_rope_head_dim > 0:
-            rope_dim = self.qk_rope_head_dim
-            padded_rope = pad_for_packing(rope_dim, self.tq_bit_width)
-            self.tq_rope_Pi = generate_rotation_matrix(rope_dim, seed=42 + 9999).to(self.device)
-            self.tq_rope_padded = padded_rope
-        else:
-            self.tq_rope_Pi = None
-
-        # QJL projection matrix (d x d Gaussian)
-        if self.tq_use_qjl:
-            gen = torch.Generator().manual_seed(10042)
-            self.tq_S = torch.randn(
-                self.kv_lora_rank, self.kv_lora_rank,
-                generator=gen, dtype=torch.float32,
-            ).to(self.device)
-            self._tq_qjl_scale = math.sqrt(math.pi / 2) / self.kv_lora_rank
-            logger.info("TurboQuant QJL (Stage 2) enabled")
-        else:
-            self.tq_S = None
-
-        self._tq_gpu_kernel = None
-        try:
-            self._tq_gpu_kernel = self._load_tq_gpu_kernel()
-        except Exception as e:
-            logger.warning(f"TurboQuant GPU kernel unavailable, using Python fallback: {e}")
-
-        with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
-            with (
-                torch.cuda.use_mem_pool(self.custom_mem_pool)
-                if self.custom_mem_pool
-                else nullcontext()
-            ):
-                m = self.size + self.page_size
-                if self.tq_mixed:
-                    from sglang.srt.layers.quantization.turboquant_engine import mixed_compressed_bytes
-                    self.tq_compressed_bytes = mixed_compressed_bytes(
-                        self.kv_lora_rank, self.tq_group_size,
-                        self.qk_rope_head_dim, self.tq_group_bits, self.tq_use_qjl
-                    )
-                    # Compute per-group packed offsets for mixed-bit layout
-                    self._tq_group_offsets = [0]
-                    for g, bw in enumerate(self.tq_group_bits):
-                        gs = g * self.tq_group_size
-                        ge = min(gs + self.tq_group_size, self.kv_lora_rank)
-                        self._tq_group_offsets.append(
-                            self._tq_group_offsets[-1] + packed_bytes_per_dim(ge - gs, bw)
-                        )
-                    self._tq_packed_end = self._tq_group_offsets[-1]
-                else:
-                    packed_bytes = packed_bytes_per_dim(self.kv_lora_rank, self.tq_bit_width)
-                    self._tq_packed_end = packed_bytes
-
-                # RoPE: quantized or FP16
-                if self.tq_quant_rope and self.qk_rope_head_dim > 0:
-                    rope_packed = packed_bytes_per_dim(self.qk_rope_head_dim, self.tq_bit_width)
-                    rope_norm = 2  # FP16 norm for rope group
-                    rope_bytes = rope_packed + rope_norm
-                else:
-                    rope_packed = 0
-                    rope_norm = 0
-                    rope_bytes = self.qk_rope_head_dim * 2  # FP16
-
-                self._tq_rope_packed = rope_packed
-                self._tq_rope_norm = rope_norm
-
-                norms_bytes = self.tq_n_groups * 2  # latent group norms
-                qjl_signs_bytes = self.kv_lora_rank // 8 if self.tq_use_qjl else 0
-                qjl_rnorm_bytes = 2 if self.tq_use_qjl else 0
-
-                if not self.tq_mixed:
-                    self.tq_compressed_bytes = (
-                        self._tq_packed_end + norms_bytes + qjl_signs_bytes + qjl_rnorm_bytes + rope_bytes
-                    )
-                self._tq_norms_end = self._tq_packed_end + norms_bytes
-                self._tq_signs_end = self._tq_norms_end + qjl_signs_bytes
-                self._tq_rnorm_end = self._tq_signs_end + qjl_rnorm_bytes
-
-                # Store as uint8 for maximum flexibility
-                self.store_dtype = torch.uint8
-                self.kv_buffer = [
-                    torch.zeros(
-                        (m, 1, self.tq_compressed_bytes),
-                        dtype=self.store_dtype,
-                        device=self.device,
-                    )
-                    for _ in range(self.layer_num)
-                ]
-
-                self._deq_buffer = torch.zeros(
-                    (m, 1, self.kv_cache_dim),
-                    dtype=self.dtype,
-                    device=self.device,
-                )
-
-        # O1: per-layer dirty tracking — skip decompress when nothing changed
-        self._deq_dirty = [True] * self.layer_num
-        # O2: track max populated slot per layer — decompress only active rows
-        self._tq_active = [0] * self.layer_num
-
-        qjl_str = "+QJL" if self.tq_use_qjl else ""
-        rope_str = "+ropeQ" if self.tq_quant_rope else ""
-        bits_str = f"{self.tq_effective_bits}-bit" if self.tq_mixed else f"{self.tq_bit_width}-bit"
-        logger.info(
-            f"TurboQuant MLA KV Pool: {bits_str}{rope_str}{qjl_str}, "
-            f"{self.tq_compressed_bytes} bytes/token "
-            f"(vs {self.kv_cache_dim * 2} FP16), "
-            f"{self.kv_cache_dim * 2 / self.tq_compressed_bytes:.2f}x compression"
-        )
-
-    @staticmethod
-    def _load_tq_gpu_kernel():
-        """Try to load pre-compiled .so or JIT-compile from .hip source."""
-        import importlib
-        import os
-
-        so_candidates = [
-            os.path.join(os.path.dirname(__file__), "tq_kv_compress.so"),
-        ]
-        so_path = next((s for s in so_candidates if os.path.exists(s)), None)
-        if so_path:
-            spec = importlib.util.spec_from_file_location("tq_kv_compress", so_path)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            logger.info(f"TurboQuant GPU kernel loaded from {so_path}")
-            return mod
-
-        try:
-            import aiter
-            aiter_root = os.path.dirname(os.path.dirname(aiter.__file__))
-        except ImportError:
-            return None
-
-        src = os.path.join(aiter_root, "csrc/turboquant/turboquant_kv_compress.hip")
-        if os.path.exists(src):
-            from torch.utils.cpp_extension import load
-            ck_inc = os.path.join(os.path.dirname(src), "../../3rdparty/composable_kernel/include")
-            mod = load(
-                name="tq_kv_compress", sources=[src],
-                extra_include_paths=[os.path.dirname(src), ck_inc],
-                extra_cuda_cflags=["-O3", "--offload-arch=gfx950", "-DUSE_ROCM", "-std=c++17"],
-                verbose=False,
-            )
-            logger.info("TurboQuant GPU kernel JIT-compiled from aiter source")
-            return mod
-
-        return None
-
-    def _tq_compress(self, kv_data: torch.Tensor) -> torch.Tensor:
-        """Compress KV data to packed format (2/3/4-bit), optionally with QJL or mixed-bit."""
-        import math
-        from sglang.srt.layers.quantization.turboquant_engine import (
-            pack_indices, pad_for_packing,
-        )
-
-        T = kv_data.shape[0]
-        flat = kv_data.reshape(T, self.kv_cache_dim)
-
-        # Mixed-bit path (2.5/3.5-bit outlier treatment)
-        if self.tq_mixed:
-            from sglang.srt.layers.quantization.turboquant_engine import mixed_compress_latent
-            flat_f = flat.float()
-            latent = flat_f[:, :self.kv_lora_rank]
-            rope = flat_f[:, self.kv_lora_rank:]
-
-            all_packed, norms_tensor, _ = mixed_compress_latent(
-                latent, self.tq_group_bits, self.tq_group_size,
-                self.tq_rotations, flat.device,
-            )
-
-            result = torch.zeros(T, 1, self.tq_compressed_bytes, dtype=torch.uint8, device=flat.device)
-            for g, packed in enumerate(all_packed):
-                off_start = self._tq_group_offsets[g]
-                off_end = self._tq_group_offsets[g + 1]
-                result[:, 0, off_start:off_end] = packed
-            result[:, 0, self._tq_packed_end:self._tq_norms_end] = (
-                norms_tensor.view(torch.uint8).reshape(T, -1)
-            )
-            result[:, 0, self._tq_rnorm_end:] = (
-                rope.half().contiguous().view(torch.uint8).reshape(T, -1)
-            )
-            return result
-
-        if self._tq_gpu_kernel is not None and not self.tq_use_qjl:
-            flat_bf16 = flat.to(torch.bfloat16) if flat.dtype != torch.bfloat16 else flat
-            buf = torch.empty(T, self.tq_compressed_bytes, dtype=torch.uint8, device=flat.device)
-            self._tq_gpu_kernel.turboquant_kv_compress_inplace(
-                flat_bf16, self.tq_Pi_all, self.tq_boundaries,
-                buf, self.tq_n_groups, self.tq_group_size, self.tq_bit_width,
-            )
-            return buf.unsqueeze(1)
-
-        flat = flat.float()
-        latent = flat[:, :self.kv_lora_rank]
-        rope = flat[:, self.kv_lora_rank:]
-        n_levels = 2 ** self.tq_bit_width
-
-        all_indices = []
-        all_norms = []
-        latent_mse = torch.zeros_like(latent) if self.tq_use_qjl else None
-
-        for g in range(self.tq_n_groups):
-            g_start = g * self.tq_group_size
-            g_end = min(g_start + self.tq_group_size, self.kv_lora_rank)
-            g_dim = g_end - g_start
-
-            L_g = latent[:, g_start:g_end]
-            norms = L_g.norm(dim=1, keepdim=True).clamp(min=1e-8)
-            L_norm = L_g / norms
-            all_norms.append(norms.squeeze(1))
-
-            Pi = self.tq_rotations[g_start]
-            Y = L_norm @ Pi.T * math.sqrt(g_dim)
-
-            indices = torch.searchsorted(self.tq_boundaries, Y.reshape(-1))
-            indices = indices.clamp(0, n_levels - 1).reshape(T, g_dim)
-            all_indices.append(indices)
-
-            if self.tq_use_qjl:
-                Y_hat = self.tq_centroids[indices] / math.sqrt(g_dim)
-                latent_mse[:, g_start:g_end] = (Y_hat @ Pi) * norms
-
-        full_indices = torch.cat(all_indices, dim=1)
-        norms_tensor = torch.stack(all_norms, dim=1).half()
-
-        padded = pad_for_packing(self.kv_lora_rank, self.tq_bit_width)
-        if padded > self.kv_lora_rank:
-            full_indices = torch.nn.functional.pad(
-                full_indices, (0, padded - self.kv_lora_rank), value=0
-            )
-        packed = pack_indices(full_indices, self.tq_bit_width)
-
-        result = torch.zeros(T, 1, self.tq_compressed_bytes, dtype=torch.uint8, device=kv_data.device)
-        result[:, 0, :self._tq_packed_end] = packed
-        result[:, 0, self._tq_packed_end:self._tq_norms_end] = (
-            norms_tensor.view(torch.uint8).reshape(T, -1)
-        )
-
-        if self.tq_use_qjl:
-            residual = latent - latent_mse
-            r_norm = residual.norm(dim=1)  # (T,)
-            projected = residual @ self.tq_S.T  # (T, d)
-            # Bit-pack signs: 1 bit per dim, 8 dims per byte
-            sign_bits = (projected >= 0).to(torch.uint8)  # (T, d)
-            d = self.kv_lora_rank
-            sign_bytes = torch.zeros(T, d // 8, dtype=torch.uint8, device=kv_data.device)
-            for bit in range(8):
-                sign_bytes |= sign_bits[:, bit::8] << bit
-            result[:, 0, self._tq_norms_end:self._tq_signs_end] = sign_bytes
-            # Residual norm as FP16
-            r_norm_h = r_norm.half()
-            result[:, 0, self._tq_signs_end:self._tq_rnorm_end] = (
-                r_norm_h.view(torch.uint8).reshape(T, -1)
-            )
-
-        # RoPE: quantize or store FP16
-        if self.tq_quant_rope and self.tq_rope_Pi is not None:
-            rope_f = rope if rope.dtype == torch.float32 else rope.float()
-            rope_norms = rope_f.norm(dim=1, keepdim=True).clamp(min=1e-8)
-            rope_norm_val = rope_f / rope_norms
-            rope_Y = rope_norm_val @ self.tq_rope_Pi.T * math.sqrt(self.qk_rope_head_dim)
-            rope_idx = torch.searchsorted(self.tq_boundaries, rope_Y.reshape(-1))
-            rope_idx = rope_idx.clamp(0, n_levels - 1).reshape(T, self.qk_rope_head_dim)
-            padded_r = pad_for_packing(self.qk_rope_head_dim, self.tq_bit_width)
-            if padded_r > self.qk_rope_head_dim:
-                rope_idx = torch.nn.functional.pad(rope_idx, (0, padded_r - self.qk_rope_head_dim), value=0)
-            rope_packed = pack_indices(rope_idx, self.tq_bit_width)
-            rope_norm_h = rope_norms.squeeze(1).half()
-            off = self._tq_rnorm_end
-            result[:, 0, off:off + self._tq_rope_packed] = rope_packed
-            result[:, 0, off + self._tq_rope_packed:off + self._tq_rope_packed + self._tq_rope_norm] = (
-                rope_norm_h.view(torch.uint8).reshape(T, -1)
-            )
-        else:
-            result[:, 0, self._tq_rnorm_end:] = (
-                rope.half().contiguous().view(torch.uint8).reshape(T, -1)
-            )
-
-        return result
-
-    def _tq_decompress(self, compressed: torch.Tensor) -> torch.Tensor:
-        """Decompress packed data back to FP16/BF16 (2/3/4-bit), with optional QJL or mixed-bit."""
-        import math
-        from sglang.srt.layers.quantization.turboquant_engine import (
-            unpack_indices, pad_for_packing,
-        )
-
-        T = compressed.shape[0]
-
-        # Mixed-bit path
-        if self.tq_mixed:
-            from sglang.srt.layers.quantization.turboquant_engine import mixed_decompress_latent
-            all_packed = []
-            for g in range(self.tq_n_groups):
-                off_s = self._tq_group_offsets[g]
-                off_e = self._tq_group_offsets[g + 1]
-                all_packed.append(compressed[:, 0, off_s:off_e])
-            norms_raw = compressed[:, 0, self._tq_packed_end:self._tq_norms_end]
-            rope_raw = compressed[:, 0, self._tq_rnorm_end:]
-            norms = norms_raw.view(torch.float16).reshape(T, self.tq_n_groups)
-            rope = rope_raw.view(torch.float16).reshape(T, self.qk_rope_head_dim)
-            latent = mixed_decompress_latent(
-                all_packed, norms, self.tq_group_bits, self.tq_group_size,
-                self.kv_lora_rank, self.tq_rotations, compressed.device,
-            )
-            kv_out = torch.cat([latent.to(self.dtype), rope.to(self.dtype)], dim=-1)
-            return kv_out.reshape(T, 1, self.kv_cache_dim)
-
-        if self._tq_gpu_kernel is not None and not self.tq_use_qjl:
-            flat = compressed[:, 0, :]
-            out = self._deq_buffer[:T, 0, :].reshape(T, self.kv_cache_dim)
-            self._tq_gpu_kernel.turboquant_kv_decompress_inplace(
-                flat, self.tq_Pi_all, self.tq_centroids,
-                out, self.tq_n_groups, self.tq_group_size,
-                self.kv_lora_rank, self.qk_rope_head_dim, self.tq_bit_width,
-            )
-            return self._deq_buffer[:T]
-
-        packed = compressed[:, 0, :self._tq_packed_end]
-        norms_raw = compressed[:, 0, self._tq_packed_end:self._tq_norms_end]
-
-        norms = norms_raw.view(torch.float16).reshape(T, self.tq_n_groups).float()
-
-        # Decompress RoPE
-        rope_start = self._tq_rnorm_end
-        if self.tq_quant_rope and self.tq_rope_Pi is not None:
-            rope_packed = compressed[:, 0, rope_start:rope_start + self._tq_rope_packed]
-            rope_norm_raw = compressed[:, 0, rope_start + self._tq_rope_packed:rope_start + self._tq_rope_packed + self._tq_rope_norm]
-            rope_norms = rope_norm_raw.view(torch.float16).reshape(T).float()
-            padded_r = pad_for_packing(self.qk_rope_head_dim, self.tq_bit_width)
-            rope_idx = unpack_indices(rope_packed, padded_r, self.tq_bit_width)[:, :self.qk_rope_head_dim]
-            rope_Y = self.tq_centroids[rope_idx.long()] / math.sqrt(self.qk_rope_head_dim)
-            rope = ((rope_Y @ self.tq_rope_Pi) * rope_norms.unsqueeze(1)).to(self.dtype)
-        else:
-            rope_raw = compressed[:, 0, rope_start:]
-            rope = rope_raw.view(torch.float16).reshape(T, self.qk_rope_head_dim)
-
-        padded = pad_for_packing(self.kv_lora_rank, self.tq_bit_width)
-        indices = unpack_indices(packed, padded, self.tq_bit_width)[:, :self.kv_lora_rank]
-
-        latent = torch.zeros(T, self.kv_lora_rank, dtype=torch.float32, device=compressed.device)
-        for g in range(self.tq_n_groups):
-            g_start = g * self.tq_group_size
-            g_end = min(g_start + self.tq_group_size, self.kv_lora_rank)
-            g_dim = g_end - g_start
-            scale = math.sqrt(g_dim)
-
-            Pi = self.tq_rotations[g_start]
-            Y_g = self.tq_centroids[indices[:, g_start:g_end].long()] / scale
-            L_g = Y_g @ Pi
-
-            if norms.dim() == 1:
-                L_g = L_g * norms.unsqueeze(1)
-            else:
-                L_g = L_g * norms[:, g].unsqueeze(1)
-
-            latent[:, g_start:g_end] = L_g
-
-        # QJL correction: k = k_mse + ‖r‖ · √(π/2)/d · S^T · signs
-        if self.tq_use_qjl:
-            d = self.kv_lora_rank
-            sign_bytes = compressed[:, 0, self._tq_norms_end:self._tq_signs_end]
-            rnorm_raw = compressed[:, 0, self._tq_signs_end:self._tq_rnorm_end]
-
-            # Unpack bit-packed signs to {-1, +1} float
-            signs = torch.zeros(T, d, dtype=torch.float32, device=compressed.device)
-            for bit in range(8):
-                bit_vals = ((sign_bytes >> bit) & 1).float() * 2 - 1  # {0,1} → {-1,+1}
-                signs[:, bit::8] = bit_vals
-
-            r_norm = rnorm_raw.view(torch.float16).reshape(T).float()
-
-            # QJL dequant: √(π/2)/d · ‖r‖ · S^T · signs
-            qjl_correction = self._tq_qjl_scale * (signs @ self.tq_S) * r_norm.unsqueeze(1)
-            latent = latent + qjl_correction
-
-        kv_out = torch.cat([latent.to(self.dtype), rope.to(self.dtype)], dim=-1)
-        return kv_out.reshape(T, 1, self.kv_cache_dim)
-
-    def get_key_buffer(self, layer_id: int):
-        if self.layer_transfer_counter is not None:
-            self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
-
-        layer_idx = layer_id - self.start_layer
-        if self._deq_dirty[layer_idx]:
-            # O2: only decompress rows 0:active_count, not the full pool
-            n = self._tq_active[layer_idx]
-            if n > 0:
-                compressed = self.kv_buffer[layer_idx][:n]
-                decompressed = self._tq_decompress(compressed)
-                self._deq_buffer[:n] = decompressed
-            self._deq_dirty[layer_idx] = False
-        return self._deq_buffer
-
-    def get_value_buffer(self, layer_id: int):
-        if self.layer_transfer_counter is not None:
-            self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
-        key_buf = self.get_key_buffer(layer_id)
-        return key_buf[..., :self.kv_lora_rank]
-
-    def set_kv_buffer(
-        self,
-        layer: "RadixAttention",
-        loc: torch.Tensor,
-        cache_k: torch.Tensor,
-        cache_v: torch.Tensor,
-    ):
-        layer_id = layer.layer_id
-        layer_idx = layer_id - self.start_layer
-        compressed = self._tq_compress(cache_k.unsqueeze(1) if cache_k.dim() == 2 else cache_k)
-        self.kv_buffer[layer_idx][loc] = compressed
-        self._deq_dirty[layer_idx] = True
-        # O2: track max populated slot
-        if loc.numel() > 0:
-            max_loc = loc.max().item() + 1
-            if max_loc > self._tq_active[layer_idx]:
-                self._tq_active[layer_idx] = max_loc
-
-    def set_mla_kv_buffer(
-        self,
-        layer: "RadixAttention",
-        loc: torch.Tensor,
-        cache_k_nope: torch.Tensor,
-        cache_k_rope: torch.Tensor,
-    ):
-        layer_id = layer.layer_id
-        layer_idx = layer_id - self.start_layer
-        if cache_k_nope.dim() == 2:
-            cache_k_nope = cache_k_nope.unsqueeze(1)
-        if cache_k_rope.dim() == 2:
-            cache_k_rope = cache_k_rope.unsqueeze(1)
-        kv_full = torch.cat([cache_k_nope, cache_k_rope], dim=-1)
-        compressed = self._tq_compress(kv_full)
-        self.kv_buffer[layer_idx][loc] = compressed
-        self._deq_dirty[layer_idx] = True
-        if loc.numel() > 0:
-            max_loc = loc.max().item() + 1
-            if max_loc > self._tq_active[layer_idx]:
-                self._tq_active[layer_idx] = max_loc
-
-
-# ========================================================================
-# TurboQuant KV Cache Pool for GQA/MHA
-# ========================================================================
-
-class MHATokenToKVPoolTQ(MHATokenToKVPool):
-    """GQA/MHA KV cache pool with TurboQuant compression (2/3/4-bit).
-
-    Compresses K and V per-head independently using TurboQuant.
-    Each head's head_dim-dimensional vector is quantized separately.
-
-    Args:
-        tq_bit_width: 2, 3, or 4. If None, reads from SGLANG_KV_CACHE_TURBOQUANT env var.
-
-    Supports all standard attention architectures:
-      - MHA (Multi-Head Attention): head_num = num_attention_heads
-      - GQA (Grouped Query Attention): head_num = num_kv_heads
-      - MQA (Multi-Query Attention): head_num = 1
-
-    Activate with: export SGLANG_KV_CACHE_TURBOQUANT=<bit_width>
-    where bit_width is 2, 3, or 4.
-
-    Integration: transparent — get_key_buffer/get_value_buffer return
-    dequantized FP16, so attention backends work unchanged.
-    """
-
-    def __init__(self, *args, tq_bit_width=None, **kwargs):
-        self._tq_bit_width_override = tq_bit_width
-        super().__init__(*args, **kwargs)
-
-    def _create_buffers(self):
-        import math, os
-        from sglang.srt.layers.quantization.turboquant_engine import (
-            get_codebook, generate_rotation_matrix, packed_bytes_per_dim,
-        )
-
-        if self._tq_bit_width_override is not None:
-            self.tq_bit_width = self._tq_bit_width_override
-        else:
-            tq_val = os.environ.get("SGLANG_KV_CACHE_TURBOQUANT", "4")
-            try:
-                self.tq_bit_width = int(float(tq_val)) if tq_val not in ("1", "true", "True") else 4
-            except ValueError:
-                self.tq_bit_width = 4
-        if self.tq_bit_width not in (2, 3, 4):
-            self.tq_bit_width = 4
-
-        centroids, boundaries = get_codebook(self.tq_bit_width)
-        self.tq_centroids = centroids.to(self.device)
-        self.tq_boundaries = boundaries.to(self.device)
-        if _is_hip:
-            # gfx1030 has been faulting in the GPU indexing path used by the
-            # compression routine. Keep CPU mirrors for a functional fallback.
-            self.tq_centroids_cpu = centroids.cpu()
-            self.tq_boundaries_cpu = boundaries.cpu()
-        else:
-            self.tq_centroids_cpu = None
-            self.tq_boundaries_cpu = None
-
-        # One rotation matrix per head_dim (shared across all heads and layers)
-        self.tq_Pi = generate_rotation_matrix(self.head_dim, seed=42).to(self.device)
-        self.tq_Pi_cpu = self.tq_Pi.cpu() if _is_hip else None
-        self.tq_scale = math.sqrt(self.head_dim)
-
-        pb = packed_bytes_per_dim(self.head_dim, self.tq_bit_width)
-        self.tq_packed_per_head = pb
-        # Per head: packed indices + 1 FP16 norm = pb + 2 bytes
-        self.tq_bytes_per_head = pb + 2
-
-        self._use_split_tq_storage = _is_hip
-
-        with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
-            with (
-                torch.cuda.use_mem_pool(self.custom_mem_pool)
-                if self.enable_custom_mem_pool
-                else nullcontext()
-            ):
-                m = self.size + self.page_size
-                if self._use_split_tq_storage:
-                    self.k_buffer = [
-                        torch.zeros(
-                            (m, self.head_num, self.tq_packed_per_head),
-                            dtype=torch.uint8,
-                            device=self.device,
-                        )
-                        for _ in range(self.layer_num)
-                    ]
-                    self.v_buffer = [
-                        torch.zeros(
-                            (m, self.head_num, self.tq_packed_per_head),
-                            dtype=torch.uint8,
-                            device=self.device,
-                        )
-                        for _ in range(self.layer_num)
-                    ]
-                    self.k_norm_buffer = [
-                        torch.zeros(
-                            (m, self.head_num, 1),
-                            dtype=torch.float16,
-                            device=self.device,
-                        )
-                        for _ in range(self.layer_num)
-                    ]
-                    self.v_norm_buffer = [
-                        torch.zeros(
-                            (m, self.head_num, 1),
-                            dtype=torch.float16,
-                            device=self.device,
-                        )
-                        for _ in range(self.layer_num)
-                    ]
-                else:
-                    # Store compressed K and V as uint8 flat buffers
-                    # Each: (m, head_num * tq_bytes_per_head)
-                    self.k_buffer = [
-                        torch.zeros((m, self.head_num * self.tq_bytes_per_head),
-                                    dtype=torch.uint8, device=self.device)
-                        for _ in range(self.layer_num)
-                    ]
-                    self.v_buffer = [
-                        torch.zeros((m, self.head_num * self.tq_bytes_per_head),
-                                    dtype=torch.uint8, device=self.device)
-                        for _ in range(self.layer_num)
-                    ]
-
-                # Decompressed FP16 buffers for attention
-                self._k_deq = [
-                    torch.zeros((m, self.head_num, self.head_dim),
-                                dtype=self.dtype, device=self.device)
-                    for _ in range(self.layer_num)
-                ]
-                self._v_deq = [
-                    torch.zeros((m, self.head_num, self.v_head_dim),
-                                dtype=self.dtype, device=self.device)
-                    for _ in range(self.layer_num)
-                ]
-
-        self._deq_dirty_k = [True] * self.layer_num
-        self._deq_dirty_v = [True] * self.layer_num
-        self._tq_active = [0] * self.layer_num
-
-        # For data_ptrs / data_strides (used by kv copy kernels)
-        self.k_data_ptrs = torch.tensor(
-            [x.data_ptr() for x in self._k_deq], dtype=torch.uint64, device=self.device)
-        self.v_data_ptrs = torch.tensor(
-            [x.data_ptr() for x in self._v_deq], dtype=torch.uint64, device=self.device)
-        self.data_ptrs = torch.cat([self.k_data_ptrs, self.v_data_ptrs])
-        import numpy as np
-        self.data_strides = torch.tensor(
-            [np.prod(x.shape[1:]) * x.dtype.itemsize for x in self._k_deq + self._v_deq],
-            device=self.device,
-        )
-        self.row_dim = self.head_num * self.head_dim
-        self.same_kv_dim = self.head_dim == self.v_head_dim
-
-        orig_k = self.head_num * self.head_dim * 2  # FP16
-        comp_k = self.head_num * self.tq_bytes_per_head
-        logger.info(
-            f"TurboQuant MHA KV Pool: {self.tq_bit_width}-bit, "
-            f"head_num={self.head_num}, head_dim={self.head_dim}, "
-            f"{comp_k} bytes/token K (vs {orig_k} FP16), "
-            f"{orig_k / comp_k:.2f}x compression"
-        )
-
-    def _compress_gpu(
-        self, data: torch.Tensor, dim: int
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """GPU-vectorized TQ compress — no CPU round-trips, no Python head loop.
-
-        Processes all heads simultaneously as a single batched operation:
-          [T, H, dim] -> packed [T, H, packed_per_head] uint8 + norms [T, H, 1] fp16
-        """
-        T = data.shape[0]
-        H = self.head_num
-        n_levels = 2 ** self.tq_bit_width
-
-        x = data[:, :H, :dim].float()          # [T, H, dim]
-
-        # Normalize per-head vector
-        norms = x.norm(dim=2, keepdim=True).clamp(min=1e-8)   # [T, H, 1]
-        x_norm = x / norms                                       # [T, H, dim]
-
-        # Rotate: [T*H, dim] @ Pi^T  (Pi is orthogonal, Pi^T = Pi^{-1})
-        x_flat = x_norm.reshape(T * H, dim)
-        Y = torch.mm(x_flat, self.tq_Pi.T) * self.tq_scale     # [T*H, dim]
-
-        # Quantize via searchsorted (sorted boundaries on GPU)
-        Y_flat = Y.reshape(-1)
-        indices = torch.searchsorted(self.tq_boundaries.contiguous(), Y_flat.contiguous())
-        indices = indices.clamp(0, n_levels - 1).to(torch.int32).reshape(T, H, dim)
-
-        # Pack: 4-bit layout — lo nibble = even positions, hi nibble = odd positions
-        # Mirrors pack_4bit: byte = lo | (hi << 4)
-        if self.tq_bit_width == 4:
-            lo = indices[..., 0::2].to(torch.uint8)
-            hi = indices[..., 1::2].to(torch.uint8)
-            packed = lo | (hi << 4)                             # [T, H, dim//2]
-        elif self.tq_bit_width == 3:
-            # 3-bit: 8 indices per 3 bytes (indices stored as lo/mid/hi nibbles)
-            # Fall back to CPU for non-4-bit
-            return self._compress_cpu_vectorized(data, dim)
-        else:
-            # 2-bit: 4 per byte
-            idx = indices.to(torch.uint8)
-            packed = (idx[..., 0::4]
-                      | (idx[..., 1::4] << 2)
-                      | (idx[..., 2::4] << 4)
-                      | (idx[..., 3::4] << 6))                  # [T, H, dim//4]
-
-        norms_out = norms.to(torch.float16)                      # [T, H, 1]
-        return packed, norms_out
-
-    def _compress_cpu_vectorized(
-        self, data: torch.Tensor, dim: int
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """CPU vectorized compress for non-4-bit widths (fallback)."""
-        from sglang.srt.layers.quantization.turboquant_engine import (
-            pack_indices, pad_for_packing,
-        )
-        T = data.shape[0]
-        n_levels = 2 ** self.tq_bit_width
-        dev = data.device
-
-        cpu_data = data.detach().contiguous().to("cpu", dtype=torch.float32)
-        tq_pi = self.tq_Pi_cpu if _is_hip else self.tq_Pi.cpu()
-        tq_bnd = self.tq_boundaries_cpu if _is_hip else self.tq_boundaries.cpu()
-
-        x = cpu_data[:, :self.head_num, :dim]               # [T, H, dim]
-        norms = x.norm(dim=2, keepdim=True).clamp(min=1e-8)
-        x_norm = x / norms
-        x_flat = x_norm.reshape(T * self.head_num, dim)
-        Y = torch.mm(x_flat, tq_pi.T) * self.tq_scale
-        Y_flat = Y.reshape(-1)
-        idx = torch.searchsorted(tq_bnd, Y_flat)
-        idx = idx.clamp(0, n_levels - 1).to(torch.int32).reshape(T * self.head_num, dim)
-
-        padded = pad_for_packing(dim, self.tq_bit_width)
-        if padded > dim:
-            idx = torch.nn.functional.pad(idx, (0, padded - dim), value=0)
-
-        packed_rows = pack_indices(idx, self.tq_bit_width)    # [T*H, packed_per_head]
-        packed = packed_rows.reshape(T, self.head_num, -1)
-        norms_out = norms.to(torch.float16)
-
-        return (
-            packed.to(device=dev, non_blocking=False),
-            norms_out.to(device=dev, non_blocking=False),
-        )
-
-    def _compress_heads_split(
-        self, data: torch.Tensor, dim: int
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compress (T, head_num, dim) into packed indices + fp16 norms.
-
-        On CUDA: GPU-vectorized (searchsorted + bitpack).
-        On HIP/ROCm: CPU-vectorized — gfx1030 segfaults on float32 GEMM,
-        searchsorted, and uint8 bitwise ops in the TQ4 compress pipeline.
-        CPU path uses pre-cached mirrors of Pi/boundaries (~0.1ms per layer).
-        """
-        if _is_hip:
-            return self._compress_cpu_vectorized(data, dim)
-        return self._compress_gpu(data, dim)
-
-    def _compress_heads(self, data: torch.Tensor, dim: int) -> torch.Tensor:
-        """Compress (T, head_num, dim) -> (T, head_num * tq_bytes_per_head) uint8."""
-        packed, norms = self._compress_heads_split(data, dim)
-        if self._use_split_tq_storage:
-            return packed
-
-        result = torch.empty(
-            packed.shape[0],
-            self.head_num * self.tq_bytes_per_head,
-            dtype=torch.uint8,
-            device=packed.device,
-        )
-        for h in range(self.head_num):
-            off = h * self.tq_bytes_per_head
-            result[:, off : off + self.tq_packed_per_head] = packed[:, h, :]
-            result[
-                :, off + self.tq_packed_per_head : off + self.tq_bytes_per_head
-            ] = norms[:, h, :].view(torch.uint8).reshape(packed.shape[0], 2)
-        return result
-
-    def _clear_buffers(self):
-        del self.k_buffer
-        del self.v_buffer
-        if self._use_split_tq_storage:
-            del self.k_norm_buffer
-            del self.v_norm_buffer
-
-    def _rocm_debug_enabled(self) -> bool:
-        import os
-
-        return _is_hip and os.environ.get("SGLANG_ROCM_DEBUG_KV", "0") == "1"
-
-    def _validate_hip_kv_write(
-        self,
-        layer_idx: int,
-        loc: torch.Tensor,
-        k_comp: torch.Tensor,
-        v_comp: torch.Tensor,
-        cache_k: torch.Tensor,
-        cache_v: torch.Tensor,
-    ) -> torch.Tensor:
-        loc = loc.to(device=self.k_buffer[layer_idx].device, dtype=torch.long).contiguous()
-
-        errors = []
-        if loc.ndim != 1:
-            errors.append(f"loc.ndim={loc.ndim}")
-        if loc.numel() != k_comp.shape[0] or loc.numel() != v_comp.shape[0]:
-            errors.append(
-                "row_count_mismatch="
-                f"loc={loc.numel()} k_comp={k_comp.shape[0]} v_comp={v_comp.shape[0]}"
-            )
-        if loc.numel() > 0:
-            min_loc = int(loc.min().item())
-            max_loc = int(loc.max().item())
-            if min_loc < 0:
-                errors.append(f"min_loc={min_loc}")
-            if max_loc >= self.k_buffer[layer_idx].shape[0]:
-                errors.append(
-                    f"max_loc={max_loc} buffer_rows={self.k_buffer[layer_idx].shape[0]}"
-                )
-        else:
-            min_loc = max_loc = -1
-
-        if self._rocm_debug_enabled():
-            unique_locs = int(torch.unique(loc).numel()) if loc.numel() > 0 else 0
-            logger.info(
-                "ROCM KV debug layer=%s loc_shape=%s min_loc=%s max_loc=%s "
-                "cache_k_shape=%s cache_v_shape=%s cache_k_dtype=%s cache_v_dtype=%s "
-                "cache_k_contig=%s cache_v_contig=%s k_comp_shape=%s v_comp_shape=%s "
-                "unique_locs=%s",
-                layer_idx,
-                tuple(loc.shape),
-                min_loc,
-                max_loc,
-                tuple(cache_k.shape),
-                tuple(cache_v.shape),
-                cache_k.dtype,
-                cache_v.dtype,
-                cache_k.is_contiguous(),
-                cache_v.is_contiguous(),
-                tuple(k_comp.shape),
-                tuple(v_comp.shape),
-                unique_locs,
-            )
-
-        if errors:
-            raise RuntimeError(
-                "ROCm TurboQuant KV write validation failed: " + ", ".join(errors)
-            )
-
-        return loc
-
-    def _decompress_heads_split(
-        self,
-        packed: torch.Tensor,
-        norms: torch.Tensor,
-        dim: int,
-        out: torch.Tensor,
-        n_active: int,
-    ):
-        """Decompress packed indices + norms into out[:n_active, head_num, dim].
-
-        On CUDA: GPU-vectorized — all heads simultaneously, no CPU round-trips.
-        On HIP/ROCm: CPU-vectorized — gfx1030 segfaults on uint8 bitwise unpack,
-        float32 GEMM rotation, and codebook indexing with TQ4 buffer shapes.
-        CPU path uses pre-cached mirrors (~0.2ms per layer for typical decode).
-        """
-        if n_active <= 0:
-            return
-
-        if _is_hip:
-            return self._decompress_heads_split_cpu(
-                packed, norms, dim, out, n_active
-            )
-
-        T = n_active
-        H = self.head_num
-
-        # --- Unpack bit-packed indices to [T, H, dim] int64 ---
-        p = packed[:T]   # [T, H, packed_per_head] uint8
-
-        if self.tq_bit_width == 4:
-            # layout: byte[i] = lo_nibble | (hi_nibble << 4)
-            # index[2i] = lo, index[2i+1] = hi
-            lo = (p & 0x0F).to(torch.int64)
-            hi = ((p >> 4) & 0x0F).to(torch.int64)
-            indices = torch.stack([lo, hi], dim=-1).reshape(T, H, dim)  # [T, H, dim]
-        elif self.tq_bit_width == 2:
-            # layout: byte[i] = b0 | (b1<<2) | (b2<<4) | (b3<<6)
-            b0 = (p & 0x03).to(torch.int64)
-            b1 = ((p >> 2) & 0x03).to(torch.int64)
-            b2 = ((p >> 4) & 0x03).to(torch.int64)
-            b3 = ((p >> 6) & 0x03).to(torch.int64)
-            indices = torch.stack([b0, b1, b2, b3], dim=-1).reshape(T, H, dim)
-        else:
-            # 3-bit or other: fall back to CPU helper (rare path)
-            from sglang.srt.layers.quantization.turboquant_engine import (
-                unpack_indices,
-            )
-            centroids_dev = self.tq_centroids
-            p_dev = p.contiguous()
-            indices_list = []
-            for h in range(H):
-                idx_h = unpack_indices(p_dev[:, h, :].cpu(), dim, self.tq_bit_width)[:, :dim]
-                indices_list.append(idx_h)
-            indices = torch.stack(indices_list, dim=1).to(p.device)
-
-        # --- Codebook lookup: [T, H, dim] int64 -> [T, H, dim] float32 ---
-        # centroids is [n_levels] float32 on same device as packed
-        centroids_dev = self.tq_centroids
-        y_hat = centroids_dev[indices.reshape(-1)].reshape(T, H, dim) / self.tq_scale
-
-        # --- Rotate back: [T*H, dim] @ Pi [dim, dim] ---
-        y_flat = y_hat.reshape(T * H, dim)
-        restored = torch.mm(y_flat, self.tq_Pi)     # [T*H, dim] float32
-
-        # --- Scale by norms and write to output ---
-        norm_flat = norms[:T].reshape(T * H, 1).float()
-        restored = (restored * norm_flat).reshape(T, H, dim)
-        out[:T, :, :dim].copy_(restored.to(out.dtype))
-
-    def _decompress_heads_split_cpu(
-        self,
-        packed: torch.Tensor,
-        norms: torch.Tensor,
-        dim: int,
-        out: torch.Tensor,
-        n_active: int,
-    ):
-        """CPU decompress for HIP/ROCm — avoids gfx1030 GPU segfaults.
-
-        Moves packed+norms to CPU, unpacks, looks up centroids, rotates back,
-        then copies the result to the GPU output tensor.
-        """
-        T = n_active
-        H = self.head_num
-
-        p = packed[:T].cpu()
-        n = norms[:T].cpu().float()
-        tq_pi = self.tq_Pi_cpu
-        centroids_cpu = self.tq_centroids_cpu
-
-        if self.tq_bit_width == 4:
-            lo = (p & 0x0F).to(torch.int64)
-            hi = ((p >> 4) & 0x0F).to(torch.int64)
-            indices = torch.stack([lo, hi], dim=-1).reshape(T, H, dim)
-        elif self.tq_bit_width == 2:
-            b0 = (p & 0x03).to(torch.int64)
-            b1 = ((p >> 2) & 0x03).to(torch.int64)
-            b2 = ((p >> 4) & 0x03).to(torch.int64)
-            b3 = ((p >> 6) & 0x03).to(torch.int64)
-            indices = torch.stack([b0, b1, b2, b3], dim=-1).reshape(T, H, dim)
-        else:
-            from sglang.srt.layers.quantization.turboquant_engine import (
-                unpack_indices,
-            )
-            indices_list = []
-            for h in range(H):
-                idx_h = unpack_indices(p[:, h, :], dim, self.tq_bit_width)[:, :dim]
-                indices_list.append(idx_h)
-            indices = torch.stack(indices_list, dim=1)
-
-        y_hat = centroids_cpu[indices.reshape(-1)].reshape(T, H, dim) / self.tq_scale
-        y_flat = y_hat.reshape(T * H, dim)
-        restored = torch.mm(y_flat, tq_pi)
-
-        norm_flat = n.reshape(T * H, 1)
-        restored = (restored * norm_flat).reshape(T, H, dim)
-        out[:T, :, :dim].copy_(restored.to(out.dtype))
-
-    def _decompress_heads(self, compressed: torch.Tensor, dim: int,
-                          out: torch.Tensor, n_active: int):
-        """Decompress (n_active, head_num * bytes) -> out[:n_active, head_num, dim]."""
-        if self._use_split_tq_storage:
-            raise RuntimeError("_decompress_heads should not be used with split tq storage")
-        comp = compressed[:n_active]
-        packed = torch.empty(
-            n_active,
-            self.head_num,
-            self.tq_packed_per_head,
-            dtype=torch.uint8,
-            device=comp.device,
-        )
-        norms = torch.empty(
-            n_active,
-            self.head_num,
-            1,
-            dtype=torch.float16,
-            device=comp.device,
-        )
-        for h in range(self.head_num):
-            off = h * self.tq_bytes_per_head
-            packed[:, h, :] = comp[:, off : off + self.tq_packed_per_head]
-            norms[:, h, 0] = comp[
-                :, off + self.tq_packed_per_head : off + self.tq_bytes_per_head
-            ].view(torch.float16).reshape(n_active)
-        return self._decompress_heads_split(packed, norms, dim, out, n_active)
-
-    def _reorder_rows_hip_safe(
-        self, tensor: torch.Tensor, perm_cpu: torch.Tensor
-    ) -> torch.Tensor:
-        cpu_tensor = tensor.detach().to("cpu", non_blocking=False)
-        reordered = cpu_tensor.index_select(0, perm_cpu)
-        return reordered.to(device=tensor.device, non_blocking=False)
-
-    def get_key_buffer(self, layer_id: int):
-        if self.layer_transfer_counter is not None:
-            self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
-        layer_idx = layer_id - self.start_layer
-        if self._deq_dirty_k[layer_idx]:
-            n = self._tq_active[layer_idx]
-            if self._use_split_tq_storage:
-                self._decompress_heads_split(
-                    self.k_buffer[layer_idx],
-                    self.k_norm_buffer[layer_idx],
-                    self.head_dim,
-                    self._k_deq[layer_idx],
-                    n,
-                )
-            else:
-                self._decompress_heads(
-                    self.k_buffer[layer_idx], self.head_dim,
-                    self._k_deq[layer_idx], n)
-            self._deq_dirty_k[layer_idx] = False
-        return self._k_deq[layer_idx]
-
-    def get_value_buffer(self, layer_id: int):
-        if self.layer_transfer_counter is not None:
-            self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
-        layer_idx = layer_id - self.start_layer
-        if self._deq_dirty_v[layer_idx]:
-            n = self._tq_active[layer_idx]
-            if self._use_split_tq_storage:
-                self._decompress_heads_split(
-                    self.v_buffer[layer_idx],
-                    self.v_norm_buffer[layer_idx],
-                    self.v_head_dim,
-                    self._v_deq[layer_idx],
-                    n,
-                )
-            else:
-                self._decompress_heads(
-                    self.v_buffer[layer_idx], self.v_head_dim,
-                    self._v_deq[layer_idx], n)
-            self._deq_dirty_v[layer_idx] = False
-        return self._v_deq[layer_idx]
-
-    def set_kv_buffer(
-        self,
-        layer: "RadixAttention",
-        loc: torch.Tensor,
-        cache_k: torch.Tensor,
-        cache_v: torch.Tensor,
-        k_scale=None, v_scale=None, layer_id_override=None,
-    ):
-        layer_id = layer_id_override if layer_id_override is not None else layer.layer_id
-        layer_idx = layer_id - self.start_layer
-
-        if cache_k.dtype != self.dtype:
-            cache_k = cache_k.to(self.dtype)
-            cache_v = cache_v.to(self.dtype)
-        cache_k = cache_k.contiguous()
-        cache_v = cache_v.contiguous()
-
-        if self._use_split_tq_storage:
-            k_comp, k_norm = self._compress_heads_split(cache_k, self.head_dim)
-            v_comp, v_norm = self._compress_heads_split(cache_v, self.v_head_dim)
-        else:
-            k_comp = self._compress_heads(cache_k, self.head_dim)
-            v_comp = self._compress_heads(cache_v, self.v_head_dim)
-            k_norm = v_norm = None
-
-        if _is_hip:
-            # HIP has been faulting on advanced-index writes into the packed uint8
-            # TurboQuant buffers; use index_copy_ on the row axis instead.
-            loc = self._validate_hip_kv_write(
-                layer_idx, loc, k_comp, v_comp, cache_k, cache_v
-            )
-            if loc.numel() > 0:
-                loc_cpu = loc.detach().to("cpu", dtype=torch.long)
-                perm_cpu = torch.argsort(loc_cpu)
-                sorted_loc_cpu = loc_cpu.index_select(0, perm_cpu)
-                sorted_loc = sorted_loc_cpu.to(device=loc.device, dtype=loc.dtype)
-                if torch.equal(
-                    perm_cpu,
-                    torch.arange(loc_cpu.numel(), dtype=perm_cpu.dtype),
-                ):
-                    k_sorted = k_comp.contiguous()
-                    v_sorted = v_comp.contiguous()
-                    k_norm_sorted = (
-                        k_norm.contiguous() if self._use_split_tq_storage else None
-                    )
-                    v_norm_sorted = (
-                        v_norm.contiguous() if self._use_split_tq_storage else None
-                    )
-                    ck_sorted = cache_k.contiguous()
-                    cv_sorted = cache_v.contiguous()
-                else:
-                    k_sorted = self._reorder_rows_hip_safe(k_comp, perm_cpu).contiguous()
-                    v_sorted = self._reorder_rows_hip_safe(v_comp, perm_cpu).contiguous()
-                    k_norm_sorted = (
-                        self._reorder_rows_hip_safe(k_norm, perm_cpu).contiguous()
-                        if self._use_split_tq_storage
-                        else None
-                    )
-                    v_norm_sorted = (
-                        self._reorder_rows_hip_safe(v_norm, perm_cpu).contiguous()
-                        if self._use_split_tq_storage
-                        else None
-                    )
-                    ck_sorted = self._reorder_rows_hip_safe(cache_k, perm_cpu).contiguous()
-                    cv_sorted = self._reorder_rows_hip_safe(cache_v, perm_cpu).contiguous()
-                row_start = int(sorted_loc[0].item())
-                row_stop = int(sorted_loc[-1].item()) + 1
-                is_dense_run = (
-                    sorted_loc.numel() == (row_stop - row_start)
-                    and torch.equal(
-                        sorted_loc_cpu,
-                        torch.arange(
-                            row_start,
-                            row_stop,
-                            dtype=sorted_loc_cpu.dtype,
-                        ),
-                    )
-                )
-                if is_dense_run:
-                    if self._rocm_debug_enabled():
-                        logger.info(
-                            "ROCM KV dense-row write layer=%s row_start=%s row_stop=%s rows=%s",
-                            layer_idx,
-                            row_start,
-                            row_stop,
-                            sorted_loc.numel(),
-                        )
-                    self.k_buffer[layer_idx][row_start:row_stop].copy_(k_sorted)
-                    self.v_buffer[layer_idx][row_start:row_stop].copy_(v_sorted)
-                    if self._use_split_tq_storage:
-                        self.k_norm_buffer[layer_idx][row_start:row_stop].copy_(k_norm_sorted)
-                        self.v_norm_buffer[layer_idx][row_start:row_stop].copy_(v_norm_sorted)
-                    # Direct write decompressed FP16 — avoids full O(n_active) decompress on read
-                    self._k_deq[layer_idx][row_start:row_stop].copy_(ck_sorted)
-                    self._v_deq[layer_idx][row_start:row_stop].copy_(cv_sorted)
-                else:
-                    self.k_buffer[layer_idx].index_copy_(0, sorted_loc, k_sorted)
-                    self.v_buffer[layer_idx].index_copy_(0, sorted_loc, v_sorted)
-                    if self._use_split_tq_storage:
-                        self.k_norm_buffer[layer_idx].index_copy_(
-                            0, sorted_loc, k_norm_sorted
-                        )
-                        self.v_norm_buffer[layer_idx].index_copy_(
-                            0, sorted_loc, v_norm_sorted
-                        )
-                    # Direct write decompressed FP16
-                    self._k_deq[layer_idx].index_copy_(0, sorted_loc, ck_sorted)
-                    self._v_deq[layer_idx].index_copy_(0, sorted_loc, cv_sorted)
-                # Decompressed buffer is now up-to-date; no full re-decompress needed
-                self._deq_dirty_k[layer_idx] = False
-                self._deq_dirty_v[layer_idx] = False
-        else:
-            self.k_buffer[layer_idx][loc] = k_comp
-            self.v_buffer[layer_idx][loc] = v_comp
-            # Direct write decompressed FP16 to avoid full O(n_active) decompress on read
-            self._k_deq[layer_idx][loc] = cache_k
-            self._v_deq[layer_idx][loc] = cache_v
-            self._deq_dirty_k[layer_idx] = False
-            self._deq_dirty_v[layer_idx] = False
-
-        if loc.numel() > 0:
-            max_loc = loc.max().item() + 1
-            if max_loc > self._tq_active[layer_idx]:
-                self._tq_active[layer_idx] = max_loc
-
-    def get_kv_size_bytes(self):
-        k_size_bytes, v_size_bytes = super().get_kv_size_bytes()
-        if self._use_split_tq_storage:
-            for k_norm_cache in self.k_norm_buffer:
-                k_size_bytes += get_tensor_size_bytes(k_norm_cache)
-            for v_norm_cache in self.v_norm_buffer:
-                v_size_bytes += get_tensor_size_bytes(v_norm_cache)
-        return k_size_bytes, v_size_bytes
-
-    def get_cpu_copy(self, indices):
-        torch.cuda.synchronize()
-        kv_cache_cpu = []
-        chunk_size = self.cpu_offloading_chunk_size
-        for layer_id in range(self.layer_num):
-            kv_cache_cpu.append([])
-            for i in range(0, len(indices), chunk_size):
-                chunk_indices = indices[i : i + chunk_size]
-                entry = [
-                    self.k_buffer[layer_id][chunk_indices].to("cpu", non_blocking=True),
-                    self.v_buffer[layer_id][chunk_indices].to("cpu", non_blocking=True),
-                ]
-                if self._use_split_tq_storage:
-                    entry.extend(
-                        [
-                            self.k_norm_buffer[layer_id][chunk_indices].to(
-                                "cpu", non_blocking=True
-                            ),
-                            self.v_norm_buffer[layer_id][chunk_indices].to(
-                                "cpu", non_blocking=True
-                            ),
-                        ]
-                    )
-                kv_cache_cpu[-1].append(entry)
-        torch.cuda.synchronize()
-        return kv_cache_cpu
-
-    def load_cpu_copy(self, kv_cache_cpu, indices):
-        torch.cuda.synchronize()
-        chunk_size = self.cpu_offloading_chunk_size
-        for layer_id in range(self.layer_num):
-            for i in range(0, len(indices), chunk_size):
-                chunk_indices = indices[i : i + chunk_size]
-                entry = kv_cache_cpu[layer_id][i // chunk_size]
-                k_chunk = entry[0].to(self.k_buffer[0].device, non_blocking=True)
-                v_chunk = entry[1].to(self.v_buffer[0].device, non_blocking=True)
-                self.k_buffer[layer_id][chunk_indices] = k_chunk
-                self.v_buffer[layer_id][chunk_indices] = v_chunk
-                if self._use_split_tq_storage:
-                    self.k_norm_buffer[layer_id][chunk_indices] = entry[2].to(
-                        self.k_norm_buffer[0].device, non_blocking=True
-                    )
-                    self.v_norm_buffer[layer_id][chunk_indices] = entry[3].to(
-                        self.v_norm_buffer[0].device, non_blocking=True
-                    )
-        # load_cpu_copy only writes the compressed buffers; mark decompressed buffers
-        # dirty so they will be regenerated on next get_key/value_buffer call.
-        for layer_id in range(self.layer_num):
-            self._deq_dirty_k[layer_id] = True
-            self._deq_dirty_v[layer_id] = True
-        torch.cuda.synchronize()
-
-    def move_kv_cache(self, tgt_loc: torch.Tensor, src_loc: torch.Tensor):
-        if not self._use_split_tq_storage:
-            return super().move_kv_cache(tgt_loc, src_loc)
-
-        if tgt_loc.numel() == 0:
-            return
-
-        sorted_tgt, perm = torch.sort(tgt_loc.to(device=self.device, dtype=torch.long))
-        sorted_src = src_loc.to(device=self.device, dtype=torch.long).index_select(0, perm)
-        for layer_idx in range(self.layer_num):
-            self.k_buffer[layer_idx].index_copy_(
-                0, sorted_tgt, self.k_buffer[layer_idx].index_select(0, sorted_src)
-            )
-            self.v_buffer[layer_idx].index_copy_(
-                0, sorted_tgt, self.v_buffer[layer_idx].index_select(0, sorted_src)
-            )
-            self.k_norm_buffer[layer_idx].index_copy_(
-                0,
-                sorted_tgt,
-                self.k_norm_buffer[layer_idx].index_select(0, sorted_src),
-            )
-            self.v_norm_buffer[layer_idx].index_copy_(
-                0,
-                sorted_tgt,
-                self.v_norm_buffer[layer_idx].index_select(0, sorted_src),
-            )
-            # Also move decompressed buffers so get_key/value_buffer is correct after move
-            self._k_deq[layer_idx].index_copy_(
-                0, sorted_tgt, self._k_deq[layer_idx].index_select(0, sorted_src)
-            )
-            self._v_deq[layer_idx].index_copy_(
-                0, sorted_tgt, self._v_deq[layer_idx].index_select(0, sorted_src)
-            )
-
-
-class MHATokenToKVPoolRQ(MHATokenToKVPool):
-    """GQA/MHA KV cache pool with RotorQuant compression (3/4-bit).
-
-    Compresses K and V per-head using RotorQuant PlanarQuant or IsoQuant.
-    PlanarQuant uses 2D Givens rotations (256 FMAs/vec, fastest).
-    IsoQuant uses 4D quaternion rotations (512 FMAs/vec, best quality).
-
-    Args:
-        rq_method: 'planar' or 'iso'
-        rq_bit_width: 3 or 4
-
-    Activate with: --kv-cache-dtype rq3_planar / rq4_planar / rq3_iso / rq4_iso
-
-    Integration: transparent — get_key_buffer/get_value_buffer return
-    dequantized FP16, so attention backends work unchanged.
-    """
-
-    _RQ_VALID_METHODS = ("planar", "iso")
-    _RQ_VALID_BITS = (3, 4)
-
-    def __init__(self, *args, rq_method: str = "planar", rq_bit_width: int = 4, **kwargs):
-        if rq_method not in self._RQ_VALID_METHODS:
-            raise ValueError(f"rq_method must be one of {self._RQ_VALID_METHODS}, got {rq_method!r}")
-        if rq_bit_width not in self._RQ_VALID_BITS:
-            raise ValueError(f"rq_bit_width must be one of {self._RQ_VALID_BITS}, got {rq_bit_width}")
-        self._rq_method = rq_method
-        self._rq_bit_width = rq_bit_width
-        super().__init__(*args, **kwargs)
-
-    def _create_buffers(self):
-        import math
-        from sglang.srt.layers.quantization.rotorquant_engine import (
-            get_codebook,
-            generate_givens_rotations,
-            generate_quaternion_rotations,
-            packed_bytes_per_dim,
-        )
-
-        # Codebook (shared between planar and iso)
-        centroids, boundaries = get_codebook(self._rq_bit_width)
-        self._rq_codebook = {
-            "centroids": centroids.to(self.device),
-            "boundaries": boundaries.to(self.device),
-        }
-        if _is_hip:
-            self._rq_codebook_cpu = {
-                "centroids": centroids.cpu(),
-                "boundaries": boundaries.cpu(),
-            }
-        else:
-            self._rq_codebook_cpu = None
-
-        # Rotation parameters
-        if self._rq_method == "planar":
-            rot2 = generate_givens_rotations(self.head_dim, seed=42)
-            self._rq_rotations = {"rot2": rot2.to(self.device)}
-            if _is_hip:
-                self._rq_rotations_cpu = {"rot2": rot2.cpu()}
-            else:
-                self._rq_rotations_cpu = None
-        else:
-            q_L, q_R = generate_quaternion_rotations(self.head_dim, seed=42)
-            self._rq_rotations = {
-                "q_L": q_L.to(self.device),
-                "q_R": q_R.to(self.device),
-            }
-            if _is_hip:
-                self._rq_rotations_cpu = {
-                    "q_L": q_L.cpu(),
-                    "q_R": q_R.cpu(),
-                }
-            else:
-                self._rq_rotations_cpu = None
-
-        # For iso, effective dim is padded to multiple of 4
-        if self._rq_method == "iso":
-            n_groups = (self.head_dim + 3) // 4
-            self._rq_eff_dim = n_groups * 4
-        else:
-            self._rq_eff_dim = self.head_dim
-
-        pb = packed_bytes_per_dim(self._rq_eff_dim, self._rq_bit_width)
-        self._rq_packed_per_head = pb
-        self._rq_bytes_per_head = pb + 2  # + 2 for FP16 norm
-
-        # Always use split storage (packed indices + norms separate)
-        self._use_split_rq_storage = True
-
-        with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
-            with (
-                torch.cuda.use_mem_pool(self.custom_mem_pool)
-                if self.enable_custom_mem_pool
-                else nullcontext()
-            ):
-                m = self.size + self.page_size
-                self.k_buffer = [
-                    torch.zeros(
-                        (m, self.head_num, self._rq_packed_per_head),
-                        dtype=torch.uint8,
-                        device=self.device,
-                    )
-                    for _ in range(self.layer_num)
-                ]
-                self.v_buffer = [
-                    torch.zeros(
-                        (m, self.head_num, self._rq_packed_per_head),
-                        dtype=torch.uint8,
-                        device=self.device,
-                    )
-                    for _ in range(self.layer_num)
-                ]
-                self.k_norm_buffer = [
-                    torch.zeros(
-                        (m, self.head_num, 1),
-                        dtype=torch.float16,
-                        device=self.device,
-                    )
-                    for _ in range(self.layer_num)
-                ]
-                self.v_norm_buffer = [
-                    torch.zeros(
-                        (m, self.head_num, 1),
-                        dtype=torch.float16,
-                        device=self.device,
-                    )
-                    for _ in range(self.layer_num)
-                ]
-
-                # Decompressed FP16 buffers for attention
-                self._k_deq = [
-                    torch.zeros(
-                        (m, self.head_num, self.head_dim),
-                        dtype=self.dtype,
-                        device=self.device,
-                    )
-                    for _ in range(self.layer_num)
-                ]
-                self._v_deq = [
-                    torch.zeros(
-                        (m, self.head_num, self.v_head_dim),
-                        dtype=self.dtype,
-                        device=self.device,
-                    )
-                    for _ in range(self.layer_num)
-                ]
-
-        self._deq_dirty_k = [True] * self.layer_num
-        self._deq_dirty_v = [True] * self.layer_num
-        self._rq_active = [0] * self.layer_num
-
-        # Per-position packed-buffer dirty tracking for lazy compression.
-        # During decode, we skip compression and only store FP16 to deq buffers.
-        # Packed buffers are lazily compressed before eviction/transfer/checkpoint.
-        self._packed_dirty = [
-            torch.zeros(m, dtype=torch.bool, device=self.device)
-            for _ in range(self.layer_num)
-        ]
-
-        # data_ptrs / data_strides for kv copy kernels
-        self.k_data_ptrs = torch.tensor(
-            [x.data_ptr() for x in self._k_deq], dtype=torch.uint64, device=self.device
-        )
-        self.v_data_ptrs = torch.tensor(
-            [x.data_ptr() for x in self._v_deq], dtype=torch.uint64, device=self.device
-        )
-        self.data_ptrs = torch.cat([self.k_data_ptrs, self.v_data_ptrs])
-        self.data_strides = torch.tensor(
-            [np.prod(x.shape[1:]) * x.dtype.itemsize for x in self._k_deq + self._v_deq],
-            device=self.device,
-        )
-        self.row_dim = self.head_num * self.head_dim
-        self.same_kv_dim = self.head_dim == self.v_head_dim
-
-        orig_k = self.head_num * self.head_dim * 2  # FP16
-        comp_k = self.head_num * self._rq_bytes_per_head
-        logger.info(
-            f"RotorQuant MHA KV Pool: {self._rq_method} {self._rq_bit_width}-bit, "
-            f"head_num={self.head_num}, head_dim={self.head_dim}, "
-            f"{comp_k} bytes/token K (vs {orig_k} FP16), "
-            f"{orig_k / comp_k:.2f}x compression"
-        )
-
-    def _compress_heads(
-        self, data: torch.Tensor, dim: int
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compress (T, head_num, dim) -> packed (T, H, packed_per_head) + norms (T, H, 1).
-
-        Uses GPU Triton kernels when available (including HIP/ROCm with validated fused kernels).
-        Falls back to CPU only when Triton is not available.
-        """
-        from sglang.srt.layers.quantization.rotorquant_engine import compress_kv_head, _triton_available
-
-        T = data.shape[0]
-        H = self.head_num
-        # Use GPU path when Triton kernels are available and validated
-        use_cpu = _is_hip and not _triton_available
-        dev = data.device
-
-        if use_cpu:
-            data_cpu = data.detach().cpu().float()
-            rotations = self._rq_rotations_cpu
-            codebook = self._rq_codebook_cpu
-            target_dev = torch.device("cpu")
-        else:
-            data_cpu = data.float()
-            rotations = self._rq_rotations
-            codebook = self._rq_codebook
-            target_dev = dev
-
-        all_packed = []
-        all_norms = []
-        if not use_cpu and self._rq_bit_width == 4:
-            # Batched GPU path: reshape (T, H, dim) → (T*H, dim), one kernel call
-            flat = data[:, :, :dim].reshape(T * H, dim)
-            packed_flat, norms_flat = compress_kv_head(
-                flat, self._rq_method, self._rq_bit_width,
-                rotations, codebook, dev, use_triton=True,
-            )
-            packed_per_head = packed_flat.shape[-1]
-            packed = packed_flat.reshape(T, H, packed_per_head)
-            norms = norms_flat.reshape(T, H).unsqueeze(-1)
-            return packed, norms.to(torch.float16)
-
-        for h in range(H):
-            head_data = data_cpu[:, h, :dim]
-            packed_h, norms_h = compress_kv_head(
-                head_data.to(target_dev),
-                self._rq_method,
-                self._rq_bit_width,
-                rotations,
-                codebook,
-                target_dev,
-                use_triton=(not use_cpu),
-            )
-            all_packed.append(packed_h)  # (T, packed_per_head)
-            all_norms.append(norms_h)    # (T,)
-
-        packed = torch.stack(all_packed, dim=1)  # (T, H, packed_per_head)
-        norms = torch.stack(all_norms, dim=1).unsqueeze(-1)  # (T, H, 1)
-
-        if use_cpu:
-            packed = packed.to(device=dev, non_blocking=False)
-            norms = norms.to(device=dev, non_blocking=False)
-
-        return packed, norms.to(torch.float16)
-
-    def _decompress_heads(
-        self,
-        packed: torch.Tensor,
-        norms: torch.Tensor,
-        dim: int,
-        out: torch.Tensor,
-        n_active: int,
-    ):
-        """Decompress packed+norms -> out[:n_active, head_num, dim]."""
-        if n_active <= 0:
-            return
-
-        from sglang.srt.layers.quantization.rotorquant_engine import decompress_kv_head, _triton_available
-
-        T = n_active
-        H = self.head_num
-        # Use GPU path when Triton kernels are available and validated
-        use_cpu = _is_hip and not _triton_available
-        dev = out.device
-
-        p = packed[:T]  # (T, H, packed_per_head)
-        n = norms[:T]   # (T, H, 1)
-
-        if use_cpu:
-            p = p.cpu()
-            n_flat = n.squeeze(-1).cpu()
-            rotations = self._rq_rotations_cpu
-            codebook = self._rq_codebook_cpu
-            target_dev = torch.device("cpu")
-        else:
-            n_flat = n.squeeze(-1)
-            rotations = self._rq_rotations
-            codebook = self._rq_codebook
-            target_dev = dev
-
-        heads = []
-        if not use_cpu and self._rq_bit_width == 4:
-            # Batched GPU path: reshape (T, H, packed) → (T*H, packed), one kernel call
-            packed_flat = p.reshape(T * H, -1).contiguous()
-            norms_flat = n_flat.reshape(T * H).contiguous()
-            x_hat_flat = decompress_kv_head(
-                packed_flat, norms_flat,
-                self._rq_method, self._rq_bit_width, dim,
-                rotations, codebook, dev, use_triton=True,
-            )
-            restored = x_hat_flat.reshape(T, H, dim)
-            out[:T, :, :dim].copy_(restored.to(out.dtype))
-            return
-
-        for h in range(H):
-            x_hat = decompress_kv_head(
-                p[:, h, :].contiguous().to(target_dev),
-                n_flat[:, h].contiguous().to(target_dev),
-                self._rq_method,
-                self._rq_bit_width,
-                dim,
-                rotations,
-                codebook,
-                target_dev,
-                use_triton=(not use_cpu),
-            )
-            heads.append(x_hat)  # (T, dim)
-
-        restored = torch.stack(heads, dim=1)  # (T, H, dim)
-        if use_cpu:
-            restored = restored.to(device=dev, non_blocking=False)
-        out[:T, :, :dim].copy_(restored.to(out.dtype))
-
-    def _clear_buffers(self):
-        del self.k_buffer
-        del self.v_buffer
-        del self.k_norm_buffer
-        del self.v_norm_buffer
-
-    def _ensure_packed(self, layer_idx: int, indices: torch.Tensor = None):
-        """Lazily compress dirty positions in packed buffers.
-
-        Called before eviction, CPU offload, or transfer operations that
-        read from packed/norm buffers. During decode, set_kv_buffer skips
-        compression for small batches and marks positions dirty here.
-
-        Args:
-            layer_idx: layer index (0-based, relative to start_layer)
-            indices: optional specific positions to compress. If None,
-                     compresses ALL dirty positions for the layer.
-        """
-        dirty = self._packed_dirty[layer_idx]
-        if indices is not None:
-            mask = dirty[indices]
-            if not mask.any():
-                return
-            dirty_indices = indices[mask]
-        else:
-            dirty_indices = dirty.nonzero(as_tuple=False).squeeze(-1)
-            if dirty_indices.numel() == 0:
-                return
-
-        # Read FP16 from deq buffers and compress
-        k_fp16 = self._k_deq[layer_idx][dirty_indices]  # (N, H, head_dim)
-        v_fp16 = self._v_deq[layer_idx][dirty_indices]   # (N, H, v_head_dim)
-
-        k_comp, k_norm = self._compress_heads(k_fp16, self.head_dim)
-        v_comp, v_norm = self._compress_heads(v_fp16, self.v_head_dim)
-
-        self.k_buffer[layer_idx].index_copy_(0, dirty_indices, k_comp.contiguous())
-        self.v_buffer[layer_idx].index_copy_(0, dirty_indices, v_comp.contiguous())
-        self.k_norm_buffer[layer_idx].index_copy_(0, dirty_indices, k_norm.contiguous())
-        self.v_norm_buffer[layer_idx].index_copy_(0, dirty_indices, v_norm.contiguous())
-
-        # Clear dirty flags
-        if indices is not None:
-            dirty[indices] = False
-        else:
-            dirty.zero_()
-
-    def get_key_buffer(self, layer_id: int):
-        if self.layer_transfer_counter is not None:
-            self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
-        layer_idx = layer_id - self.start_layer
-        if self._deq_dirty_k[layer_idx]:
-            n = self._rq_active[layer_idx]
-            self._decompress_heads(
-                self.k_buffer[layer_idx],
-                self.k_norm_buffer[layer_idx],
-                self.head_dim,
-                self._k_deq[layer_idx],
-                n,
-            )
-            self._deq_dirty_k[layer_idx] = False
-        return self._k_deq[layer_idx]
-
-    def get_value_buffer(self, layer_id: int):
-        if self.layer_transfer_counter is not None:
-            self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
-        layer_idx = layer_id - self.start_layer
-        if self._deq_dirty_v[layer_idx]:
-            n = self._rq_active[layer_idx]
-            self._decompress_heads(
-                self.v_buffer[layer_idx],
-                self.v_norm_buffer[layer_idx],
-                self.v_head_dim,
-                self._v_deq[layer_idx],
-                n,
-            )
-            self._deq_dirty_v[layer_idx] = False
-        return self._v_deq[layer_idx]
-
-    def set_kv_buffer(
-        self,
-        layer: "RadixAttention",
-        loc: torch.Tensor,
-        cache_k: torch.Tensor,
-        cache_v: torch.Tensor,
-        k_scale=None,
-        v_scale=None,
-        layer_id_override=None,
-    ):
-        layer_id = layer_id_override if layer_id_override is not None else layer.layer_id
-        layer_idx = layer_id - self.start_layer
-
-        if cache_k.dtype != self.dtype:
-            cache_k = cache_k.to(self.dtype)
-            cache_v = cache_v.to(self.dtype)
-
-        loc = loc.to(device=self.k_buffer[layer_idx].device, dtype=torch.long)
-        n_tokens = loc.numel()
-        if n_tokens == 0:
-            return
-
-        cache_k = cache_k.contiguous()
-        cache_v = cache_v.contiguous()
-
-        # Fast path for small token counts (decode): skip compression entirely.
-        # Store FP16 to deq buffers (what attention reads) and mark packed dirty.
-        # Packed buffers are lazily compressed before eviction/transfer/checkpoint.
-        if n_tokens <= 8:
-            self._k_deq[layer_idx].index_copy_(0, loc, cache_k)
-            self._v_deq[layer_idx].index_copy_(0, loc, cache_v)
-            self._deq_dirty_k[layer_idx] = False
-            self._deq_dirty_v[layer_idx] = False
-            self._packed_dirty[layer_idx][loc] = True
-            max_loc = loc.max().item() + 1
-            if max_loc > self._rq_active[layer_idx]:
-                self._rq_active[layer_idx] = max_loc
-            return
-
-        # Compress K and V (only for prefill / large batches)
-        k_comp, k_norm = self._compress_heads(cache_k, self.head_dim)
-        v_comp, v_norm = self._compress_heads(cache_v, self.v_head_dim)
-
-        if _is_hip:
-            loc_cpu = loc.detach().to("cpu", dtype=torch.long)
-            perm_cpu = torch.argsort(loc_cpu)
-            sorted_loc_cpu = loc_cpu.index_select(0, perm_cpu)
-            sorted_loc = sorted_loc_cpu.to(device=loc.device, dtype=loc.dtype)
-
-            is_identity = torch.equal(perm_cpu, torch.arange(loc_cpu.numel(), dtype=perm_cpu.dtype))
-            if is_identity:
-                k_sorted, v_sorted = k_comp.contiguous(), v_comp.contiguous()
-                kn_sorted, vn_sorted = k_norm.contiguous(), v_norm.contiguous()
-                ck_sorted, cv_sorted = cache_k.contiguous(), cache_v.contiguous()
-            else:
-                k_sorted = k_comp.index_select(0, perm_cpu.to(k_comp.device)).contiguous()
-                v_sorted = v_comp.index_select(0, perm_cpu.to(v_comp.device)).contiguous()
-                kn_sorted = k_norm.index_select(0, perm_cpu.to(k_norm.device)).contiguous()
-                vn_sorted = v_norm.index_select(0, perm_cpu.to(v_norm.device)).contiguous()
-                ck_sorted = cache_k.index_select(0, perm_cpu.to(cache_k.device)).contiguous()
-                cv_sorted = cache_v.index_select(0, perm_cpu.to(cache_v.device)).contiguous()
-
-            row_start = int(sorted_loc[0].item())
-            row_stop = int(sorted_loc[-1].item()) + 1
-            is_dense = (
-                sorted_loc.numel() == (row_stop - row_start)
-                and torch.equal(
-                    sorted_loc_cpu,
-                    torch.arange(row_start, row_stop, dtype=sorted_loc_cpu.dtype),
-                )
-            )
-
-            if is_dense:
-                self.k_buffer[layer_idx][row_start:row_stop].copy_(k_sorted)
-                self.v_buffer[layer_idx][row_start:row_stop].copy_(v_sorted)
-                self.k_norm_buffer[layer_idx][row_start:row_stop].copy_(kn_sorted)
-                self.v_norm_buffer[layer_idx][row_start:row_stop].copy_(vn_sorted)
-                self._k_deq[layer_idx][row_start:row_stop].copy_(ck_sorted)
-                self._v_deq[layer_idx][row_start:row_stop].copy_(cv_sorted)
-            else:
-                self.k_buffer[layer_idx].index_copy_(0, sorted_loc, k_sorted)
-                self.v_buffer[layer_idx].index_copy_(0, sorted_loc, v_sorted)
-                self.k_norm_buffer[layer_idx].index_copy_(0, sorted_loc, kn_sorted)
-                self.v_norm_buffer[layer_idx].index_copy_(0, sorted_loc, vn_sorted)
-                self._k_deq[layer_idx].index_copy_(0, sorted_loc, ck_sorted)
-                self._v_deq[layer_idx].index_copy_(0, sorted_loc, cv_sorted)
-
-            self._deq_dirty_k[layer_idx] = False
-            self._deq_dirty_v[layer_idx] = False
-        else:
-            self.k_buffer[layer_idx][loc] = k_comp
-            self.v_buffer[layer_idx][loc] = v_comp
-            self.k_norm_buffer[layer_idx][loc] = k_norm
-            self.v_norm_buffer[layer_idx][loc] = v_norm
-            self._k_deq[layer_idx][loc] = cache_k
-            self._v_deq[layer_idx][loc] = cache_v
-            self._deq_dirty_k[layer_idx] = False
-            self._deq_dirty_v[layer_idx] = False
-
-        # Packed buffers are fresh for prefill paths (compression done above)
-        self._packed_dirty[layer_idx][loc] = False
-        max_loc = loc.max().item() + 1
-        if max_loc > self._rq_active[layer_idx]:
-            self._rq_active[layer_idx] = max_loc
-
-    def get_kv_size_bytes(self):
-        k_size_bytes, v_size_bytes = super().get_kv_size_bytes()
-        for k_norm_cache in self.k_norm_buffer:
-            k_size_bytes += get_tensor_size_bytes(k_norm_cache)
-        for v_norm_cache in self.v_norm_buffer:
-            v_size_bytes += get_tensor_size_bytes(v_norm_cache)
-        return k_size_bytes, v_size_bytes
-
-    def get_cpu_copy(self, indices):
-        # Ensure packed buffers are up-to-date for positions being offloaded
-        indices_t = torch.as_tensor(indices, device=self.device, dtype=torch.long)
-        for layer_id in range(self.layer_num):
-            self._ensure_packed(layer_id, indices_t)
-        torch.cuda.synchronize()
-        kv_cache_cpu = []
-        chunk_size = self.cpu_offloading_chunk_size
-        for layer_id in range(self.layer_num):
-            kv_cache_cpu.append([])
-            for i in range(0, len(indices), chunk_size):
-                chunk_indices = indices[i : i + chunk_size]
-                entry = [
-                    self.k_buffer[layer_id][chunk_indices].to("cpu", non_blocking=True),
-                    self.v_buffer[layer_id][chunk_indices].to("cpu", non_blocking=True),
-                    self.k_norm_buffer[layer_id][chunk_indices].to("cpu", non_blocking=True),
-                    self.v_norm_buffer[layer_id][chunk_indices].to("cpu", non_blocking=True),
-                ]
-                kv_cache_cpu[-1].append(entry)
-        torch.cuda.synchronize()
-        return kv_cache_cpu
-
-    def load_cpu_copy(self, kv_cache_cpu, indices):
-        torch.cuda.synchronize()
-        chunk_size = self.cpu_offloading_chunk_size
-        for layer_id in range(self.layer_num):
-            for i in range(0, len(indices), chunk_size):
-                chunk_indices = indices[i : i + chunk_size]
-                entry = kv_cache_cpu[layer_id][i // chunk_size]
-                self.k_buffer[layer_id][chunk_indices] = entry[0].to(
-                    self.k_buffer[0].device, non_blocking=True
-                )
-                self.v_buffer[layer_id][chunk_indices] = entry[1].to(
-                    self.v_buffer[0].device, non_blocking=True
-                )
-                self.k_norm_buffer[layer_id][chunk_indices] = entry[2].to(
-                    self.k_norm_buffer[0].device, non_blocking=True
-                )
-                self.v_norm_buffer[layer_id][chunk_indices] = entry[3].to(
-                    self.v_norm_buffer[0].device, non_blocking=True
-                )
-        for layer_id in range(self.layer_num):
-            self._deq_dirty_k[layer_id] = True
-            self._deq_dirty_v[layer_id] = True
-        torch.cuda.synchronize()
-
-    def move_kv_cache(self, tgt_loc: torch.Tensor, src_loc: torch.Tensor):
-        if tgt_loc.numel() == 0:
-            return
-
-        sorted_tgt, perm = torch.sort(tgt_loc.to(device=self.device, dtype=torch.long))
-        sorted_src = src_loc.to(device=self.device, dtype=torch.long).index_select(0, perm)
-        for layer_idx in range(self.layer_num):
-            # Ensure packed buffers are fresh for source positions
-            self._ensure_packed(layer_idx, sorted_src)
-            self.k_buffer[layer_idx].index_copy_(
-                0, sorted_tgt, self.k_buffer[layer_idx].index_select(0, sorted_src)
-            )
-            self.v_buffer[layer_idx].index_copy_(
-                0, sorted_tgt, self.v_buffer[layer_idx].index_select(0, sorted_src)
-            )
-            self.k_norm_buffer[layer_idx].index_copy_(
-                0, sorted_tgt, self.k_norm_buffer[layer_idx].index_select(0, sorted_src)
-            )
-            self.v_norm_buffer[layer_idx].index_copy_(
-                0, sorted_tgt, self.v_norm_buffer[layer_idx].index_select(0, sorted_src)
-            )
-            self._k_deq[layer_idx].index_copy_(
-                0, sorted_tgt, self._k_deq[layer_idx].index_select(0, sorted_src)
-            )
-            self._v_deq[layer_idx].index_copy_(
-                0, sorted_tgt, self._v_deq[layer_idx].index_select(0, sorted_src)
-            )
-            # Target positions now have fresh packed+deq data
-            self._packed_dirty[layer_idx][sorted_tgt] = False
-
-
-class _TQCompressor:
-    """Lightweight TQ codec state + borrowed compress/decompress methods.
-
-    Holds TurboQuant-specific state (codebook, rotation matrix, CPU mirrors)
-    and borrows compress/decompress as unbound methods from MHATokenToKVPoolTQ.
-    When accessed on an instance, Python's descriptor protocol passes the
-    _TQCompressor instance as ``self``, so the borrowed methods resolve their
-    state attributes (tq_centroids, tq_Pi, etc.) from *this* object.
-    Zero code duplication: ~150 LOC of compress/decompress logic is reused.
-    """
-
-    compress = MHATokenToKVPoolTQ._compress_heads_split
-    _compress_cpu_vectorized = MHATokenToKVPoolTQ._compress_cpu_vectorized
-    _compress_gpu = MHATokenToKVPoolTQ._compress_gpu
-    decompress = MHATokenToKVPoolTQ._decompress_heads_split
-    _decompress_heads_split_cpu = MHATokenToKVPoolTQ._decompress_heads_split_cpu
-
-    def __init__(self, head_num: int, head_dim: int, tq_bit_width: int, device):
-        import math
-        from sglang.srt.layers.quantization.turboquant_engine import (
-            get_codebook,
-            generate_rotation_matrix,
-            packed_bytes_per_dim,
-        )
-
-        self.head_num = head_num
-        self.head_dim = head_dim
-        self.tq_bit_width = tq_bit_width
-
-        centroids, boundaries = get_codebook(tq_bit_width)
-        self.tq_centroids = centroids.to(device)
-        self.tq_boundaries = boundaries.to(device)
-        if _is_hip:
-            self.tq_centroids_cpu = centroids.cpu()
-            self.tq_boundaries_cpu = boundaries.cpu()
-        else:
-            self.tq_centroids_cpu = None
-            self.tq_boundaries_cpu = None
-
-        self.tq_Pi = generate_rotation_matrix(head_dim, seed=42).to(device)
-        self.tq_Pi_cpu = self.tq_Pi.cpu() if _is_hip else None
-        self.tq_scale = math.sqrt(head_dim)
-        self.tq_packed_per_head = packed_bytes_per_dim(head_dim, tq_bit_width)
-
-
-class _RQCompressor:
-    """Lightweight RQ codec state + borrowed compress/decompress methods.
-
-    Same pattern as _TQCompressor but for RotorQuant. Holds codebook,
-    rotation matrices, and CPU mirrors; borrows compress/decompress from
-    MHATokenToKVPoolRQ.
-    """
-
-    compress = MHATokenToKVPoolRQ._compress_heads
-    decompress = MHATokenToKVPoolRQ._decompress_heads
-
-    def __init__(
-        self, head_num: int, head_dim: int, rq_method: str, rq_bit_width: int, device
-    ):
-        from sglang.srt.layers.quantization.rotorquant_engine import (
-            get_codebook,
-            generate_givens_rotations,
-            generate_quaternion_rotations,
-            packed_bytes_per_dim,
-        )
-
-        self.head_num = head_num
-        self._rq_method = rq_method
-        self._rq_bit_width = rq_bit_width
-
-        centroids, boundaries = get_codebook(rq_bit_width)
-        self._rq_codebook = {
-            "centroids": centroids.to(device),
-            "boundaries": boundaries.to(device),
-        }
-        if _is_hip:
-            self._rq_codebook_cpu = {
-                "centroids": centroids.cpu(),
-                "boundaries": boundaries.cpu(),
-            }
-        else:
-            self._rq_codebook_cpu = None
-
-        if rq_method == "planar":
-            rot2 = generate_givens_rotations(head_dim, seed=42)
-            self._rq_rotations = {"rot2": rot2.to(device)}
-            self._rq_rotations_cpu = {"rot2": rot2.cpu()} if _is_hip else None
-        else:
-            q_L, q_R = generate_quaternion_rotations(head_dim, seed=42)
-            self._rq_rotations = {"q_L": q_L.to(device), "q_R": q_R.to(device)}
-            self._rq_rotations_cpu = (
-                {"q_L": q_L.cpu(), "q_R": q_R.cpu()} if _is_hip else None
-            )
-
-        if rq_method == "iso":
-            self._rq_eff_dim = ((head_dim + 3) // 4) * 4
-        else:
-            self._rq_eff_dim = head_dim
-        self._rq_packed_per_head = packed_bytes_per_dim(self._rq_eff_dim, rq_bit_width)
-
-
-class MHATokenToKVPoolMixed(MHATokenToKVPool):
-    """Mixed KV cache: TurboQuant for K (precision) + RotorQuant for V (speed).
-
-    Zero-waste buffer layout — each buffer is allocated once with the correct
-    codec shape.  No composition-based sub-pool duplication.  K and V use
-    heterogeneous compression but share identical FP16 decompressed buffers,
-    making kv_copy and attention fully transparent.
-
-    Activate with: --kv-cache-dtype kv_mixed / kv_mixed3 / kv_mixed4
-    """
-
-    def __init__(
-        self,
-        *args,
-        tq_bit_width: int = 4,
-        rq_method: str = "planar",
-        rq_bit_width: int = 4,
-        **kwargs,
-    ):
-        self._mixed_tq_bits = tq_bit_width
-        self._mixed_rq_method = rq_method
-        self._mixed_rq_bits = rq_bit_width
-        super().__init__(*args, **kwargs)
-
-    # ------------------------------------------------------------------
-    # Buffer creation
-    # ------------------------------------------------------------------
-
-    def _create_buffers(self):
-        """Allocate K(TQ) + V(RQ) buffers directly — zero VRAM waste."""
-        self._k_codec = _TQCompressor(
-            self.head_num, self.head_dim, self._mixed_tq_bits, self.device,
-        )
-        self._v_codec = _RQCompressor(
-            self.head_num, self.head_dim, self._mixed_rq_method,
-            self._mixed_rq_bits, self.device,
-        )
-
-        tq_pph = self._k_codec.tq_packed_per_head
-        rq_pph = self._v_codec._rq_packed_per_head
-        m = self.size + self.page_size
-
-        with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
-            with (
-                torch.cuda.use_mem_pool(self.custom_mem_pool)
-                if self.enable_custom_mem_pool
-                else nullcontext()
-            ):
-                # K packed (TQ format)
-                self.k_buffer = [
-                    torch.zeros((m, self.head_num, tq_pph),
-                                dtype=torch.uint8, device=self.device)
-                    for _ in range(self.layer_num)
-                ]
-                # V packed (RQ format)
-                self.v_buffer = [
-                    torch.zeros((m, self.head_num, rq_pph),
-                                dtype=torch.uint8, device=self.device)
-                    for _ in range(self.layer_num)
-                ]
-                # K norms (TQ)
-                self.k_norm_buffer = [
-                    torch.zeros((m, self.head_num, 1),
-                                dtype=torch.float16, device=self.device)
-                    for _ in range(self.layer_num)
-                ]
-                # V norms (RQ)
-                self.v_norm_buffer = [
-                    torch.zeros((m, self.head_num, 1),
-                                dtype=torch.float16, device=self.device)
-                    for _ in range(self.layer_num)
-                ]
-                # Decompressed FP16 for attention readback
-                self._k_deq = [
-                    torch.zeros((m, self.head_num, self.head_dim),
-                                dtype=self.dtype, device=self.device)
-                    for _ in range(self.layer_num)
-                ]
-                self._v_deq = [
-                    torch.zeros((m, self.head_num, self.v_head_dim),
-                                dtype=self.dtype, device=self.device)
-                    for _ in range(self.layer_num)
-                ]
-
-        # Dirty tracking — split K/V (rubber-duck recommendation)
-        self._deq_dirty_k = [True] * self.layer_num
-        self._deq_dirty_v = [True] * self.layer_num
-        self._active = [0] * self.layer_num
-
-        # Per-position packed-dirty for lazy compression (decode fast path)
-        self._packed_dirty_k = [
-            torch.zeros(m, dtype=torch.bool, device=self.device)
-            for _ in range(self.layer_num)
-        ]
-        self._packed_dirty_v = [
-            torch.zeros(m, dtype=torch.bool, device=self.device)
-            for _ in range(self.layer_num)
-        ]
-
-        # data_ptrs / data_strides from deq buffers (for kv_copy kernels)
-        self.k_data_ptrs = torch.tensor(
-            [x.data_ptr() for x in self._k_deq],
-            dtype=torch.uint64, device=self.device,
-        )
-        self.v_data_ptrs = torch.tensor(
-            [x.data_ptr() for x in self._v_deq],
-            dtype=torch.uint64, device=self.device,
-        )
-        self.data_ptrs = torch.cat([self.k_data_ptrs, self.v_data_ptrs])
-        self.data_strides = torch.tensor(
-            [np.prod(x.shape[1:]) * x.dtype.itemsize
-             for x in self._k_deq + self._v_deq],
-            device=self.device,
-        )
-
-        orig_bytes = self.head_num * self.head_dim * 2  # FP16 per token
-        k_bytes = self.head_num * (tq_pph + 2)  # packed + 2-byte norm
-        v_bytes = self.head_num * (rq_pph + 2)
-        logger.info(
-            f"Mixed MHA KV Pool: K=TQ{self._mixed_tq_bits}, "
-            f"V=RQ{self._mixed_rq_bits}_{self._mixed_rq_method}, "
-            f"head_num={self.head_num}, head_dim={self.head_dim}, "
-            f"K: {k_bytes}B/tok ({orig_bytes / k_bytes:.1f}×), "
-            f"V: {v_bytes}B/tok ({orig_bytes / v_bytes:.1f}×)"
-        )
-
-    def _clear_buffers(self):
-        del self.k_buffer
-        del self.v_buffer
-        del self.k_norm_buffer
-        del self.v_norm_buffer
-        del self._k_deq
-        del self._v_deq
-
-    # ------------------------------------------------------------------
-    # Lazy packed compression (decode fast path support)
-    # ------------------------------------------------------------------
-
-    def _ensure_packed_k(self, layer_idx: int, indices: torch.Tensor = None):
-        """Lazily compress dirty K positions via TQ."""
-        dirty = self._packed_dirty_k[layer_idx]
-        if indices is not None:
-            mask = dirty[indices]
-            if not mask.any():
-                return
-            dirty_indices = indices[mask]
-        else:
-            dirty_indices = dirty.nonzero(as_tuple=False).squeeze(-1)
-            if dirty_indices.numel() == 0:
-                return
-
-        k_fp16 = self._k_deq[layer_idx][dirty_indices]
-        k_comp, k_norm = self._k_codec.compress(k_fp16, self.head_dim)
-        self.k_buffer[layer_idx].index_copy_(0, dirty_indices, k_comp.contiguous())
-        self.k_norm_buffer[layer_idx].index_copy_(
-            0, dirty_indices, k_norm.contiguous()
-        )
-
-        if indices is not None:
-            dirty[indices] = False
-        else:
-            dirty.zero_()
-
-    def _ensure_packed_v(self, layer_idx: int, indices: torch.Tensor = None):
-        """Lazily compress dirty V positions via RQ."""
-        dirty = self._packed_dirty_v[layer_idx]
-        if indices is not None:
-            mask = dirty[indices]
-            if not mask.any():
-                return
-            dirty_indices = indices[mask]
-        else:
-            dirty_indices = dirty.nonzero(as_tuple=False).squeeze(-1)
-            if dirty_indices.numel() == 0:
-                return
-
-        v_fp16 = self._v_deq[layer_idx][dirty_indices]
-        v_comp, v_norm = self._v_codec.compress(v_fp16, self.v_head_dim)
-        self.v_buffer[layer_idx].index_copy_(0, dirty_indices, v_comp.contiguous())
-        self.v_norm_buffer[layer_idx].index_copy_(
-            0, dirty_indices, v_norm.contiguous()
-        )
-
-        if indices is not None:
-            dirty[indices] = False
-        else:
-            dirty.zero_()
-
-    # ------------------------------------------------------------------
-    # Get buffers (lazy decompress for attention)
-    # ------------------------------------------------------------------
-
-    def get_key_buffer(self, layer_id: int):
-        if self.layer_transfer_counter is not None:
-            self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
-        layer_idx = layer_id - self.start_layer
-        if self._deq_dirty_k[layer_idx]:
-            n = self._active[layer_idx]
-            self._k_codec.decompress(
-                self.k_buffer[layer_idx],
-                self.k_norm_buffer[layer_idx],
-                self.head_dim,
-                self._k_deq[layer_idx],
-                n,
-            )
-            self._deq_dirty_k[layer_idx] = False
-        return self._k_deq[layer_idx]
-
-    def get_value_buffer(self, layer_id: int):
-        if self.layer_transfer_counter is not None:
-            self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
-        layer_idx = layer_id - self.start_layer
-        if self._deq_dirty_v[layer_idx]:
-            n = self._active[layer_idx]
-            self._v_codec.decompress(
-                self.v_buffer[layer_idx],
-                self.v_norm_buffer[layer_idx],
-                self.v_head_dim,
-                self._v_deq[layer_idx],
-                n,
-            )
-            self._deq_dirty_v[layer_idx] = False
-        return self._v_deq[layer_idx]
-
-    # ------------------------------------------------------------------
-    # Set buffers (compress + store)
-    # ------------------------------------------------------------------
-
-    def set_kv_buffer(
-        self,
-        layer,
-        loc: torch.Tensor,
-        cache_k: torch.Tensor,
-        cache_v: torch.Tensor,
-        k_scale=None,
-        v_scale=None,
-        layer_id_override=None,
-    ):
-        layer_id = (
-            layer_id_override if layer_id_override is not None else layer.layer_id
-        )
-        layer_idx = layer_id - self.start_layer
-
-        if cache_k.dtype != self.dtype:
-            cache_k = cache_k.to(self.dtype)
-            cache_v = cache_v.to(self.dtype)
-
-        loc = loc.to(device=self.k_buffer[layer_idx].device, dtype=torch.long)
-        n_tokens = loc.numel()
-        if n_tokens == 0:
-            return
-
-        cache_k = cache_k.contiguous()
-        cache_v = cache_v.contiguous()
-
-        # Decode fast path (batch≤8): skip compression, store FP16 directly.
-        # Packed buffers lazily compressed via _ensure_packed before eviction.
-        if n_tokens <= 8:
-            self._k_deq[layer_idx].index_copy_(0, loc, cache_k)
-            self._v_deq[layer_idx].index_copy_(0, loc, cache_v)
-            self._deq_dirty_k[layer_idx] = False
-            self._deq_dirty_v[layer_idx] = False
-            self._packed_dirty_k[layer_idx][loc] = True
-            self._packed_dirty_v[layer_idx][loc] = True
-            max_loc = loc.max().item() + 1
-            if max_loc > self._active[layer_idx]:
-                self._active[layer_idx] = max_loc
-            return
-
-        # Prefill / large batch: compress K via TQ, V via RQ
-        k_comp, k_norm = self._k_codec.compress(cache_k, self.head_dim)
-        v_comp, v_norm = self._v_codec.compress(cache_v, self.v_head_dim)
-
-        if _is_hip:
-            # HIP-safe sorted write (gfx1030 fancy-indexing workaround)
-            loc_cpu = loc.detach().to("cpu", dtype=torch.long)
-            perm_cpu = torch.argsort(loc_cpu)
-            sorted_loc_cpu = loc_cpu.index_select(0, perm_cpu)
-            sorted_loc = sorted_loc_cpu.to(device=loc.device, dtype=loc.dtype)
-
-            is_identity = torch.equal(
-                perm_cpu, torch.arange(loc_cpu.numel(), dtype=perm_cpu.dtype)
-            )
-            if is_identity:
-                kc = k_comp.contiguous()
-                vc = v_comp.contiguous()
-                kn = k_norm.contiguous()
-                vn = v_norm.contiguous()
-                ck, cv = cache_k, cache_v
-            else:
-                dev_p = perm_cpu.to(k_comp.device)
-                kc = k_comp.index_select(0, dev_p).contiguous()
-                vc = v_comp.index_select(0, dev_p).contiguous()
-                kn = k_norm.index_select(0, dev_p).contiguous()
-                vn = v_norm.index_select(0, dev_p).contiguous()
-                ck = cache_k.index_select(0, dev_p).contiguous()
-                cv = cache_v.index_select(0, dev_p).contiguous()
-
-            row_start = int(sorted_loc[0].item())
-            row_stop = int(sorted_loc[-1].item()) + 1
-            is_dense = sorted_loc.numel() == (row_stop - row_start) and torch.equal(
-                sorted_loc_cpu,
-                torch.arange(row_start, row_stop, dtype=sorted_loc_cpu.dtype),
-            )
-
-            if is_dense:
-                self.k_buffer[layer_idx][row_start:row_stop].copy_(kc)
-                self.v_buffer[layer_idx][row_start:row_stop].copy_(vc)
-                self.k_norm_buffer[layer_idx][row_start:row_stop].copy_(kn)
-                self.v_norm_buffer[layer_idx][row_start:row_stop].copy_(vn)
-                self._k_deq[layer_idx][row_start:row_stop].copy_(ck)
-                self._v_deq[layer_idx][row_start:row_stop].copy_(cv)
-            else:
-                self.k_buffer[layer_idx].index_copy_(0, sorted_loc, kc)
-                self.v_buffer[layer_idx].index_copy_(0, sorted_loc, vc)
-                self.k_norm_buffer[layer_idx].index_copy_(0, sorted_loc, kn)
-                self.v_norm_buffer[layer_idx].index_copy_(0, sorted_loc, vn)
-                self._k_deq[layer_idx].index_copy_(0, sorted_loc, ck)
-                self._v_deq[layer_idx].index_copy_(0, sorted_loc, cv)
-        else:
-            self.k_buffer[layer_idx][loc] = k_comp
-            self.v_buffer[layer_idx][loc] = v_comp
-            self.k_norm_buffer[layer_idx][loc] = k_norm
-            self.v_norm_buffer[layer_idx][loc] = v_norm
-            self._k_deq[layer_idx][loc] = cache_k
-            self._v_deq[layer_idx][loc] = cache_v
-
-        self._deq_dirty_k[layer_idx] = False
-        self._deq_dirty_v[layer_idx] = False
-        self._packed_dirty_k[layer_idx][loc] = False
-        self._packed_dirty_v[layer_idx][loc] = False
-        max_loc = loc.max().item() + 1
-        if max_loc > self._active[layer_idx]:
-            self._active[layer_idx] = max_loc
-
-    # ------------------------------------------------------------------
-    # Size / info helpers
-    # ------------------------------------------------------------------
-
-    def get_kv_size_bytes(self):
-        k_size_bytes, v_size_bytes = super().get_kv_size_bytes()
-        for buf in self.k_norm_buffer:
-            k_size_bytes += get_tensor_size_bytes(buf)
-        for buf in self.v_norm_buffer:
-            v_size_bytes += get_tensor_size_bytes(buf)
-        # Include persistent deq buffers in VRAM accounting
-        for buf in self._k_deq:
-            k_size_bytes += get_tensor_size_bytes(buf)
-        for buf in self._v_deq:
-            v_size_bytes += get_tensor_size_bytes(buf)
-        return k_size_bytes, v_size_bytes
-
-    def get_contiguous_buf_infos(self):
-        all_bufs = self.k_buffer + self.v_buffer
-        kv_data_ptrs = [buf.data_ptr() for buf in all_bufs]
-        kv_data_lens = [buf.nbytes for buf in all_bufs]
-        kv_item_lens = [buf[0].nbytes * self.page_size for buf in all_bufs]
-        return kv_data_ptrs, kv_data_lens, kv_item_lens
-
-    # ------------------------------------------------------------------
-    # CPU offload / restore / move
-    # ------------------------------------------------------------------
-
-    def get_cpu_copy(self, indices):
-        indices_t = torch.as_tensor(indices, device=self.device, dtype=torch.long)
-        for layer_idx in range(self.layer_num):
-            self._ensure_packed_k(layer_idx, indices_t)
-            self._ensure_packed_v(layer_idx, indices_t)
-        torch.cuda.synchronize()
-
-        kv_cache_cpu = []
-        chunk_size = self.cpu_offloading_chunk_size
-        for layer_idx in range(self.layer_num):
-            kv_cache_cpu.append([])
-            for i in range(0, len(indices), chunk_size):
-                chunk = indices[i : i + chunk_size]
-                entry = [
-                    self.k_buffer[layer_idx][chunk].to("cpu", non_blocking=True),
-                    self.v_buffer[layer_idx][chunk].to("cpu", non_blocking=True),
-                    self.k_norm_buffer[layer_idx][chunk].to("cpu", non_blocking=True),
-                    self.v_norm_buffer[layer_idx][chunk].to("cpu", non_blocking=True),
-                ]
-                kv_cache_cpu[-1].append(entry)
-        torch.cuda.synchronize()
-        return kv_cache_cpu
-
-    def load_cpu_copy(self, kv_cache_cpu, indices):
-        torch.cuda.synchronize()
-        chunk_size = self.cpu_offloading_chunk_size
-        dev = self.k_buffer[0].device
-        for layer_idx in range(self.layer_num):
-            for i in range(0, len(indices), chunk_size):
-                chunk = indices[i : i + chunk_size]
-                entry = kv_cache_cpu[layer_idx][i // chunk_size]
-                self.k_buffer[layer_idx][chunk] = entry[0].to(dev, non_blocking=True)
-                self.v_buffer[layer_idx][chunk] = entry[1].to(dev, non_blocking=True)
-                self.k_norm_buffer[layer_idx][chunk] = entry[2].to(
-                    dev, non_blocking=True
-                )
-                self.v_norm_buffer[layer_idx][chunk] = entry[3].to(
-                    dev, non_blocking=True
-                )
-        # Packed data is fresh from CPU — mark deq dirty, clear packed dirty
-        indices_t = torch.as_tensor(indices, device=self.device, dtype=torch.long)
-        for layer_idx in range(self.layer_num):
-            self._deq_dirty_k[layer_idx] = True
-            self._deq_dirty_v[layer_idx] = True
-            self._packed_dirty_k[layer_idx][indices_t] = False
-            self._packed_dirty_v[layer_idx][indices_t] = False
-        torch.cuda.synchronize()
-
-    def move_kv_cache(self, tgt_loc: torch.Tensor, src_loc: torch.Tensor):
-        if tgt_loc.numel() == 0:
-            return
-
-        sorted_tgt, perm = torch.sort(
-            tgt_loc.to(device=self.device, dtype=torch.long)
-        )
-        sorted_src = (
-            src_loc.to(device=self.device, dtype=torch.long).index_select(0, perm)
-        )
-        for layer_idx in range(self.layer_num):
-            self._ensure_packed_k(layer_idx, sorted_src)
-            self._ensure_packed_v(layer_idx, sorted_src)
-            for buf_list in [
-                self.k_buffer, self.v_buffer,
-                self.k_norm_buffer, self.v_norm_buffer,
-                self._k_deq, self._v_deq,
-            ]:
-                buf_list[layer_idx].index_copy_(
-                    0, sorted_tgt,
-                    buf_list[layer_idx].index_select(0, sorted_src),
-                )
-            self._packed_dirty_k[layer_idx][sorted_tgt] = False
-            self._packed_dirty_v[layer_idx][sorted_tgt] = False

@@ -1,10 +1,5 @@
 #!/bin/bash
 
-# DEPRECATED: This script will be migrated to python/sglang/cli/killall.py.
-# CI mode is already handled there. This script remains for local/non-CI usage.
-#
-# TODO: Migrate remaining modes (rocm, all, gpus) to killall.py and remove this file.
-#
 # Usage:
 #   ./killall_sglang.sh              - Kill SGLang processes only (NVIDIA mode)
 #   ./killall_sglang.sh rocm         - Kill SGLang processes only (ROCm mode)
@@ -29,7 +24,7 @@ elif [ "$1" = "gpus" ] && [ -n "$2" ]; then
     echo "Targeting devices: $devices"
 
     # Kill all processes using specified GPU devices
-    [ -n "$devices" ] && lsof $devices 2>/dev/null | awk 'NR>1 {print $2}' | sort -u | xargs -r kill -9 2>/dev/null
+    lsof $devices 2>/dev/null | awk 'NR>1 {print $2}' | sort -u | xargs -r kill -9 2>/dev/null
 
     # Show GPU status after clean up
     nvidia-smi
