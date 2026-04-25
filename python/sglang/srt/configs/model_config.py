@@ -798,6 +798,12 @@ class ModelConfig:
             ):
                 return {"quant_method": "modelopt_mixed", "quant_algo": quant_algo}
             return {"quant_method": "w4afp8", "quant_algo": quant_algo}
+        elif quant_algo and "AWQ" in quant_algo and "INT4" in quant_algo:
+            return {"quant_method": "modelopt_int4_awq", "quant_algo": quant_algo}
+        elif quant_algo and "AWQ" in quant_algo and "W4A8" in quant_algo:
+            return {"quant_method": "modelopt_w4a8_awq", "quant_algo": quant_algo}
+        elif quant_algo and "AWQ" in quant_algo and "NVFP4" in quant_algo:
+            return {"quant_method": "modelopt_nvfp4_awq", "quant_algo": quant_algo}
         elif quant_algo and ("FP4" in quant_algo or "NVFP4" in quant_algo):
             return {"quant_method": "modelopt_fp4", "quant_algo": quant_algo}
         elif quant_algo and "FP8" in quant_algo:
@@ -846,6 +852,12 @@ class ModelConfig:
             return "fp8"
         elif self.quantization == "modelopt_fp4":
             return "nvfp4"
+        elif self.quantization == "modelopt_int4_awq":
+            return "int4_awq"
+        elif self.quantization == "modelopt_w4a8_awq":
+            return "w4a8_awq"
+        elif self.quantization == "modelopt_nvfp4_awq":
+            return "nvfp4_awq"
         elif self.quantization == "modelopt_mixed":
             raise ValueError(
                 "modelopt_mixed is only supported for pre-quantized checkpoints."
@@ -881,6 +893,12 @@ class ModelConfig:
             "modelopt_fp8",
             "modelopt_fp4",
             "modelopt_mixed",
+            "modelopt_int4_awq",
+            "modelopt_w4a8_awq",
+            "modelopt_nvfp4_awq",
+            "modelopt_int4_awq",
+            "modelopt_w4a8_awq",
+            "modelopt_nvfp4_awq",
         ]
         modelopt_quantization_specified = (
             self.quantization in _MODELOPT_QUANTIZATION_METHODS
@@ -927,6 +945,9 @@ class ModelConfig:
             "modelopt_fp8",
             "modelopt_fp4",
             "modelopt_mixed",
+            "modelopt_int4_awq",
+            "modelopt_w4a8_awq",
+            "modelopt_nvfp4_awq",
             "gptq_marlin_24",
             "gptq_marlin",
             "awq_marlin",
@@ -947,6 +968,9 @@ class ModelConfig:
             "modelopt_fp8": ["modelopt"],
             "modelopt_fp4": ["modelopt"],
             "modelopt_mixed": ["modelopt"],
+            "modelopt_int4_awq": ["modelopt"],
+            "modelopt_w4a8_awq": ["modelopt"],
+            "modelopt_nvfp4_awq": ["modelopt"],
             "petit_nvfp4": ["modelopt"],
             "w8a8_int8": ["compressed-tensors", "compressed_tensors"],
             "w8a8_fp8": ["compressed-tensors", "compressed_tensors"],
