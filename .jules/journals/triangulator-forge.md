@@ -1,0 +1,3 @@
+ 2026-04-24 - Cross-Engine Architectural Deception
+Learning: Popularity does not equate to architectural health. vLLM boasts massive community support and hardware compatibility, but its internal architecture is deeply entangled (monolithic event loop mixed with execution logic), making it brittle and difficult to maintain. Conversely, TGI's strict router/server boundary (Rust/Python over gRPC) provides superior operational stability but is often overlooked due to its opinionated ecosystem lock-in.
+Action: When designing new inference systems, default to TGI's bounded service architecture (separate routing from execution) rather than vLLM's monolithic async approach, but extract vLLM's superior algorithmic concepts (like PagedAttention) as standalone libraries.
