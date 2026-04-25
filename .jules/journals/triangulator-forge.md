@@ -1,3 +1,7 @@
  2026-04-24 - Cross-Engine Architectural Deception
 Learning: Popularity does not equate to architectural health. vLLM boasts massive community support and hardware compatibility, but its internal architecture is deeply entangled (monolithic event loop mixed with execution logic), making it brittle and difficult to maintain. Conversely, TGI's strict router/server boundary (Rust/Python over gRPC) provides superior operational stability but is often overlooked due to its opinionated ecosystem lock-in.
 Action: When designing new inference systems, default to TGI's bounded service architecture (separate routing from execution) rather than vLLM's monolithic async approach, but extract vLLM's superior algorithmic concepts (like PagedAttention) as standalone libraries.
+
+ 2026-04-25 - Extensibility Bloat vs Boundary Enforcement
+Learning: Framework extensibility often degrades into architectural entanglement if service boundaries are not enforced. Repositories like vLLM provide massive plugin ecosystems but suffer from 'framework bloat' because their concurrency model (async event loops) bleeds into execution logic. Conversely, TGI limits extensibility by enforcing strict gRPC boundaries, resulting in higher operational stability at the cost of integration flexibility.
+Action: When evaluating feature-rich repositories for extraction, prioritize extracting stateless mathematical models (e.g., BlockSpaceManager) over orchestrating state machines, and enforce IPC/gRPC boundaries to prevent framework logic from contaminating the core execution engine.
