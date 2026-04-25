@@ -171,7 +171,13 @@ class QuantizationConfig(ABC):
 
         # If user specified generic "modelopt", auto-detect the specific method
         if user_quant == "modelopt":
-            if "FP8" in quant_algo:
+            if "AWQ" in quant_algo and "INT4" in quant_algo:
+                return "modelopt_int4_awq"
+            elif "AWQ" in quant_algo and "W4A8" in quant_algo:
+                return "modelopt_w4a8_awq"
+            elif "AWQ" in quant_algo and "NVFP4" in quant_algo:
+                return "modelopt_nvfp4_awq"
+            elif "FP8" in quant_algo:
                 return "modelopt_fp8"
             elif "NVFP4" in quant_algo or "FP4" in quant_algo:
                 return "modelopt_fp4"
@@ -182,6 +188,12 @@ class QuantizationConfig(ABC):
             return "modelopt_fp8"
         elif hf_quant_config.get("quant_method", "") == "modelopt_fp4":
             return "modelopt_fp4"
+        elif hf_quant_config.get("quant_method", "") == "modelopt_int4_awq":
+            return "modelopt_int4_awq"
+        elif hf_quant_config.get("quant_method", "") == "modelopt_w4a8_awq":
+            return "modelopt_w4a8_awq"
+        elif hf_quant_config.get("quant_method", "") == "modelopt_nvfp4_awq":
+            return "modelopt_nvfp4_awq"
 
         return None
 
