@@ -42,6 +42,7 @@ MODEL_TO_CONFIG = {
     "intfloat/e5-mistral-7b-instruct": (1, 1e-5),
     "marco/mcdse-2b-v1": (1, 1e-5),
     "Qwen/Qwen3-Embedding-8B": (1, 1e-5),
+    "Qwen/Qwen3-Embedding-0.6B": (1, 1e-5),
     # Temporarily disable before this model is fixed
     # "jason9693/Qwen2.5-1.5B-apeach": (1, 1e-5),
 }
@@ -51,7 +52,6 @@ TORCH_DTYPES = [torch.float16]
 
 
 class TestEmbeddingModels(CustomTestCase):
-
     @classmethod
     def setUpClass(cls):
         mp.set_start_method("spawn", force=True)
@@ -116,9 +116,9 @@ class TestEmbeddingModels(CustomTestCase):
             print("similarity diff", abs(similarity - 1))
 
             if len(prompts[i]) <= 1000:
-                assert torch.all(
-                    abs(similarity - 1) < prefill_tolerance
-                ), "embeddings are not all close"
+                assert torch.all(abs(similarity - 1) < prefill_tolerance), (
+                    "embeddings are not all close"
+                )
 
     def test_prefill_logits(self):
         models_to_test = MODELS
