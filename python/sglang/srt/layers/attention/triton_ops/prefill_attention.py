@@ -23,6 +23,7 @@ import triton
 import triton.language as tl
 
 from sglang.srt.utils import is_cuda, is_hip
+from sglang.srt.layers.attention.triton_ops.rocm_arch import is_gfx1030
 
 _is_cuda = is_cuda()
 _is_hip = is_hip()
@@ -181,7 +182,7 @@ def context_attention_fwd(
     else:
         BLOCK = 64
 
-    Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
+    Lq, Lk, _Lv = q.shape[-1], k.shape[-1], v.shape[-1]
 
     sm_scale = 1.0 / (Lq**0.5)
     batch, head = b_seq_len.shape[0], q.shape[1]
@@ -189,6 +190,13 @@ def context_attention_fwd(
 
     grid = (batch, head, triton.cdiv(max_input_len, BLOCK))
     num_warps = 4 if Lk <= 64 else 8
+
+    if _is_hip:
+        if is_gfx1030():
+            # RDNA2 Wave32
+            num_warps = 2 if Lk <= 64 else 4
+        else:
+            pass
 
     _fwd_kernel[grid](
         q,

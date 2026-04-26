@@ -25,6 +25,7 @@ import logging
 import torch
 import triton
 import triton.language as tl
+from sglang.srt.layers.attention.triton_ops.rocm_arch import is_gfx1030
 
 from sglang.srt.utils import is_hip
 
@@ -199,12 +200,7 @@ def _decode_att_m_fwd(
     BLOCK = 64
     if _is_hip:
         # Detect RDNA2 vs CDNA for optimal block size
-        _gcn_mha = ""
-        try:
-            _gcn_mha = torch.cuda.get_device_properties(0).gcnArchName
-        except Exception:
-            pass
-        if "gfx103" in _gcn_mha:
+        if is_gfx1030():
             # RDNA2 (gfx1030/1031): Wave32 can handle BLOCK=32 with head_dim=128
             BLOCK = 32
         else:
@@ -493,12 +489,7 @@ def _decode_grouped_att_m_fwd(
     _decode_num_warps = 4
     if _is_hip:
         # https://rocm.docs.amd.com/en/docs-6.2.0/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
-        _gcn = ""
-        try:
-            _gcn = torch.cuda.get_device_properties(0).gcnArchName
-        except Exception:
-            pass
-        if "gfx103" in _gcn:
+        if is_gfx1030():
             # RDNA2 (gfx1030/1031): Wave32, no matrix instructions
             # num_stages=2 verified +6% faster than 1 on RDNA2 (37.0µs vs 39.4µs)
             extra_kargs = {"waves_per_eu": 1}
@@ -638,12 +629,7 @@ def _decode_softmax_reducev_fwd(
     extra_kargs = {}
     _stage2_warps = 4
     if _is_hip:
-        _gcn2 = ""
-        try:
-            _gcn2 = torch.cuda.get_device_properties(0).gcnArchName
-        except Exception:
-            pass
-        if "gfx103" in _gcn2:
+        if is_gfx1030():
             # RDNA2 (gfx1030): Wave32, no matrix instructions
             extra_kargs = {"waves_per_eu": 4}
         else:

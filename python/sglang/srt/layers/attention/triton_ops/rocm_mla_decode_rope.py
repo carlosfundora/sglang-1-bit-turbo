@@ -22,6 +22,7 @@ It supports page size = 1.
 
 import triton
 import triton.language as tl
+from sglang.srt.layers.attention.triton_ops.rocm_arch import is_gfx1030
 
 from sglang.srt.layers.attention.triton_ops.decode_attention import (
     _decode_softmax_reducev_fwd,
@@ -356,8 +357,12 @@ def _decode_grouped_att_m_fwd_rope(
     if _is_hip:
         # https://rocm.docs.amd.com/en/docs-6.2.0/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
         # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
-        extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
-        num_stages = 1
+        if is_gfx1030():
+            extra_kargs = {"waves_per_eu": 1}
+            num_stages = 2
+        else:
+            extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
+            num_stages = 1
 
     _fwd_grouped_kernel_stage1_rope[grid](
         q,
