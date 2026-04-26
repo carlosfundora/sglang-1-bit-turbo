@@ -388,6 +388,15 @@ def _per_token_group_quant_8bit_raw(
 per_token_group_quant_fp8 = _per_token_group_quant_8bit_raw
 
 
+
+_silu_and_mul_masked_post_quant_fwd = None
+def _get_silu_and_mul_masked_post_quant_fwd():
+    global _silu_and_mul_masked_post_quant_fwd
+    if _silu_and_mul_masked_post_quant_fwd is None:
+        from sglang.srt.layers.moe.ep_moe.kernels import silu_and_mul_masked_post_quant_fwd
+        _silu_and_mul_masked_post_quant_fwd = silu_and_mul_masked_post_quant_fwd
+    return _silu_and_mul_masked_post_quant_fwd
+
 def _per_token_group_quant_8bit_fuse_silu_and_mul(
     x: torch.Tensor,
     group_size: int,
@@ -411,7 +420,7 @@ def _per_token_group_quant_8bit_fuse_silu_and_mul(
 
     # NOTE: silu_and_mul_masked_post_quant_fwd stays as local import to avoid
     # circular dependency with ep_moe/kernels.py which imports from fp8_kernel.
-    from sglang.srt.layers.moe.ep_moe.kernels import silu_and_mul_masked_post_quant_fwd
+    silu_and_mul_masked_post_quant_fwd = _get_silu_and_mul_masked_post_quant_fwd()
 
     assert column_major_scales
     assert scale_tma_aligned
