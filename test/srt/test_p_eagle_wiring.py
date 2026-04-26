@@ -6,6 +6,7 @@ Tests that the P_EAGLE parallel drafting path is correctly wired:
 3. organize_draft_results compatibility with depth-1 tree
 4. EAGLEWorker P_EAGLE detection flag
 """
+
 from __future__ import annotations
 
 import pytest
@@ -13,6 +14,7 @@ import torch
 
 
 # ---- 1. Enum routing tests ----
+
 
 def test_p_eagle_enum_routing():
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
@@ -40,6 +42,7 @@ def test_p_eagle_creates_eagle_worker():
 
 # ---- 2. prepare_p_eagle_inputs shape tests ----
 
+
 def test_prepare_p_eagle_inputs_shapes():
     """Test that prepare_p_eagle_inputs produces correct tensor shapes.
 
@@ -51,6 +54,7 @@ def test_prepare_p_eagle_inputs_shapes():
         def __init__(self, hidden_size=64, target_hidden_size=64, vocab_size=100):
             super().__init__()
             from types import SimpleNamespace
+
             self.config = SimpleNamespace(
                 parallel_drafting=True,
                 mask_token_id=0,
@@ -68,7 +72,9 @@ def test_prepare_p_eagle_inputs_shapes():
             if last_token_ids.dim() == 1:
                 last_token_ids = last_token_ids.unsqueeze(-1)
             if fused_hidden_states.dim() != 3 or fused_hidden_states.shape[1] != 1:
-                raise ValueError("fused_hidden_states must have shape [batch, 1, hidden*3]")
+                raise ValueError(
+                    "fused_hidden_states must have shape [batch, 1, hidden*3]"
+                )
 
             batch = last_token_ids.shape[0]
             device = last_token_ids.device
@@ -77,13 +83,15 @@ def test_prepare_p_eagle_inputs_shapes():
                 all_hidden_states = fused_hidden_states
                 input_ids = last_token_ids
             else:
-                mask_hidden = self.mask_hidden.to(device=device, dtype=hidden_dtype).expand(
-                    batch, k - 1, -1
-                )
+                mask_hidden = self.mask_hidden.to(
+                    device=device, dtype=hidden_dtype
+                ).expand(batch, k - 1, -1)
                 all_hidden_states = torch.cat([fused_hidden_states, mask_hidden], dim=1)
                 mask_token_ids = torch.full(
-                    (batch, k - 1), self.mask_token_id,
-                    dtype=last_token_ids.dtype, device=device,
+                    (batch, k - 1),
+                    self.mask_token_id,
+                    dtype=last_token_ids.dtype,
+                    device=device,
                 )
                 input_ids = torch.cat([last_token_ids, mask_token_ids], dim=1)
 
@@ -147,6 +155,7 @@ def test_prepare_p_eagle_inputs_k1():
 
 # ---- 3. organize_draft_results depth-1 tree compatibility ----
 
+
 def test_organize_draft_results_depth1_tree():
     """Verify organize_draft_results works with single-step (depth-1) P_EAGLE output."""
     from sglang.srt.speculative.eagle_utils import organize_draft_results
@@ -177,6 +186,7 @@ def test_organize_draft_results_depth1_tree():
 
 
 # ---- 4. EAGLEWorker has P_EAGLE flag ----
+
 
 def test_eagle_worker_has_p_eagle_detection():
     """Verify EAGLEWorker has is_p_eagle attribute and draft_forward_p_eagle method."""

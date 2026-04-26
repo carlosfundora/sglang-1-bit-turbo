@@ -9,7 +9,6 @@ Validates:
   f) invalid parent chain graceful handling
 """
 
-import math
 import os
 import unittest
 
@@ -17,11 +16,9 @@ import torch
 
 from sglang.srt.speculative.eagle_utils import (
     TreeMaskMode,
-    _build_tree_pytorch,
     _verify_tree_greedy_pytorch,
     build_tree_kernel_efficient,
     organize_draft_results,
-    use_pytorch_tree_ops,
 )
 from sglang.srt.utils import get_device
 
@@ -103,28 +100,124 @@ def _make_standard_test_inputs(device=None):
         ),
         torch.tensor(
             [
-                [29889, 29974, 29945, 29900, 29974, 29922, 29930, 29958,
-                 29889, 29974, 29930, 29945, 29974, 29922, 29930, 29958],
-                [22550, 4136, 16492, 8439, 29871, 2, 3001, 13,
-                 2, 13, 29906, 29946, 2, 13, 29871, 259],
+                [
+                    29889,
+                    29974,
+                    29945,
+                    29900,
+                    29974,
+                    29922,
+                    29930,
+                    29958,
+                    29889,
+                    29974,
+                    29930,
+                    29945,
+                    29974,
+                    29922,
+                    29930,
+                    29958,
+                ],
+                [
+                    22550,
+                    4136,
+                    16492,
+                    8439,
+                    29871,
+                    2,
+                    3001,
+                    13,
+                    2,
+                    13,
+                    29906,
+                    29946,
+                    2,
+                    13,
+                    29871,
+                    259,
+                ],
             ],
             device=device,
         ),
         torch.tensor(
             [
-                [29946, 29945, 29953, 29906, 29896, 29945, 29900, 29906,
-                 29896, 29945, 29906, 29953, 29896, 29945, 29906, 29946],
-                [29871, 2, 29901, 29889, 29871, 2, 395, 259,
-                 29901, 29871, 2, 29889, 3001, 1234, 7146, 2186],
+                [
+                    29946,
+                    29945,
+                    29953,
+                    29906,
+                    29896,
+                    29945,
+                    29900,
+                    29906,
+                    29896,
+                    29945,
+                    29906,
+                    29953,
+                    29896,
+                    29945,
+                    29906,
+                    29946,
+                ],
+                [
+                    29871,
+                    2,
+                    29901,
+                    29889,
+                    29871,
+                    2,
+                    395,
+                    259,
+                    29901,
+                    29871,
+                    2,
+                    29889,
+                    3001,
+                    1234,
+                    7146,
+                    2186,
+                ],
             ],
             device=device,
         ),
         torch.tensor(
             [
-                [29946, 29974, 29945, 29930, 29889, 29922, 29974, 29930,
-                 29974, 29946, 29930, 29922, 29889, 29974, 29945, 29922],
-                [29941, 29906, 2, 29946, 29871, 450, 319, 14990,
-                 29946, 29941, 2, 29906, 29871, 2, 3001, 13],
+                [
+                    29946,
+                    29974,
+                    29945,
+                    29930,
+                    29889,
+                    29922,
+                    29974,
+                    29930,
+                    29974,
+                    29946,
+                    29930,
+                    29922,
+                    29889,
+                    29974,
+                    29945,
+                    29922,
+                ],
+                [
+                    29941,
+                    29906,
+                    2,
+                    29946,
+                    29871,
+                    450,
+                    319,
+                    14990,
+                    29946,
+                    29941,
+                    2,
+                    29906,
+                    29871,
+                    2,
+                    3001,
+                    13,
+                ],
             ],
             device=device,
         ),
@@ -133,9 +226,7 @@ def _make_standard_test_inputs(device=None):
         torch.tensor(
             [[-1, 0, 1, 2, 3], [-1, 0, 1, 2, 3]], dtype=torch.int64, device=device
         ),
-        torch.tensor(
-            [[4, 8, 9, 10], [4, 5, 6, 7]], dtype=torch.int64, device=device
-        ),
+        torch.tensor([[4, 8, 9, 10], [4, 5, 6, 7]], dtype=torch.int64, device=device),
         torch.tensor(
             [[20, 24, 21, 28], [24, 28, 20, 21]], dtype=torch.int64, device=device
         ),
@@ -145,14 +236,20 @@ def _make_standard_test_inputs(device=None):
     ]
     seq_lens = torch.tensor([5, 10], dtype=torch.int64, device=device)
     return (
-        verified_id, score_list, token_list, parents_list, seq_lens,
+        verified_id,
+        score_list,
+        token_list,
+        parents_list,
+        seq_lens,
         4,  # topk
         4,  # depth
         8,  # num_draft_token
     )
 
 
-def _get_tree_ancestors(retrive_next_token, retrive_next_sibling, draft_token_num, bid, tid):
+def _get_tree_ancestors(
+    retrive_next_token, retrive_next_sibling, draft_token_num, bid, tid
+):
     """Given the retrive tree structure, return the set of ancestor positions
     (0-indexed into the draft region) for draft token `tid`.
 
@@ -189,8 +286,16 @@ class TestBuildTreeMaskFullMask(unittest.TestCase):
 
     def test_tree_mask_consistency(self):
         """Verify tree_mask[tid] has True for ancestors and False for non-ancestors."""
-        (verified_id, score_list, token_list, parents_list, seq_lens,
-         topk, depth, num_draft_token) = _make_standard_test_inputs()
+        (
+            verified_id,
+            score_list,
+            token_list,
+            parents_list,
+            seq_lens,
+            topk,
+            depth,
+            num_draft_token,
+        ) = _make_standard_test_inputs()
 
         parent_list, top_scores_index, draft_tokens = organize_draft_results(
             score_list, token_list, parents_list, num_draft_token
@@ -221,19 +326,18 @@ class TestBuildTreeMaskFullMask(unittest.TestCase):
             row_len = seq_len + dtn
             for tid in range(dtn):
                 row_start = offset + row_len * tid
-                row = tm[row_start: row_start + row_len].tolist()
+                row = tm[row_start : row_start + row_len].tolist()
 
                 # All verified token columns should be True
                 for col in range(seq_len):
                     self.assertTrue(
                         row[col],
-                        f"bid={bid} tid={tid} col={col}: verified token should be True"
+                        f"bid={bid} tid={tid} col={col}: verified token should be True",
                     )
 
                 # Root column (col=seq_len) should always be True
                 self.assertTrue(
-                    row[seq_len],
-                    f"bid={bid} tid={tid}: root column should be True"
+                    row[seq_len], f"bid={bid} tid={tid}: root column should be True"
                 )
 
                 if tid == 0:
@@ -241,7 +345,7 @@ class TestBuildTreeMaskFullMask(unittest.TestCase):
                     for col in range(seq_len + 1, row_len):
                         self.assertFalse(
                             row[col],
-                            f"bid={bid} tid=0 col={col}: root shouldn't attend to draft"
+                            f"bid={bid} tid=0 col={col}: root shouldn't attend to draft",
                         )
                 else:
                     # Non-root: check ancestors
@@ -254,12 +358,12 @@ class TestBuildTreeMaskFullMask(unittest.TestCase):
                         if retrive_pos in ancestors:
                             self.assertTrue(
                                 row[col],
-                                f"bid={bid} tid={tid} col={col}: ancestor {retrive_pos} should be True"
+                                f"bid={bid} tid={tid} col={col}: ancestor {retrive_pos} should be True",
                             )
                         else:
                             self.assertFalse(
                                 row[col],
-                                f"bid={bid} tid={tid} col={col}: non-ancestor {retrive_pos} should be False"
+                                f"bid={bid} tid={tid} col={col}: non-ancestor {retrive_pos} should be False",
                             )
 
             offset += dtn * row_len
@@ -269,8 +373,16 @@ class TestBuildTreeQlenOnly(unittest.TestCase):
     """Test QLEN_ONLY mode."""
 
     def test_qlen_only_mode(self):
-        (verified_id, score_list, token_list, parents_list, seq_lens,
-         topk, depth, num_draft_token) = _make_standard_test_inputs()
+        (
+            verified_id,
+            score_list,
+            token_list,
+            parents_list,
+            seq_lens,
+            topk,
+            depth,
+            num_draft_token,
+        ) = _make_standard_test_inputs()
 
         parent_list, top_scores_index, draft_tokens = organize_draft_results(
             score_list, token_list, parents_list, num_draft_token
@@ -333,7 +445,9 @@ class TestBuildTreeBitpacking(unittest.TestCase):
         depth = 2
         parent_list_cols = topk * (depth - 1) + 1  # 3
 
-        parent_list = torch.zeros(bs, parent_list_cols, dtype=torch.int64, device=device)
+        parent_list = torch.zeros(
+            bs, parent_list_cols, dtype=torch.int64, device=device
+        )
         parent_list[0, 0] = -1
         parent_list[0, 1] = 0
         if parent_list_cols > 2:
@@ -386,7 +500,7 @@ class TestBuildTreeBitpacking(unittest.TestCase):
         # so each tid>0 sets: bit 0 (root) and bit (tid) (itself at cur_position=tid-1, bit=(tid-1+1)=tid)
         for tid in range(1, num_draft_token):
             offset = tid * nbytes
-            token_bytes = tm_bytes[offset:offset + nbytes].cpu().tolist()
+            token_bytes = tm_bytes[offset : offset + nbytes].cpu().tolist()
             # Reconstruct the integer value
             val = 0
             for b_idx in range(nbytes):
@@ -394,8 +508,9 @@ class TestBuildTreeBitpacking(unittest.TestCase):
             # Expected: bit 0 (root) and bit tid (self)
             expected = (1 << 0) | (1 << tid)
             self.assertEqual(
-                val, expected,
-                f"tid={tid}: expected bits 0 and {tid} set, got {val:#x} vs {expected:#x}"
+                val,
+                expected,
+                f"tid={tid}: expected bits 0 and {tid} set, got {val:#x} vs {expected:#x}",
             )
 
     def test_bitpacking_8_tokens(self):
@@ -414,9 +529,17 @@ class TestBuildTreeBitpacking(unittest.TestCase):
 class TestVerifyTreeGreedy(unittest.TestCase):
     """Test _verify_tree_greedy_pytorch with known inputs."""
 
-    def _make_verify_inputs(self, bs, num_draft_tokens, num_spec_tokens,
-                            candidates, target_predict,
-                            retrive_index, retrive_next_token, retrive_next_sibling):
+    def _make_verify_inputs(
+        self,
+        bs,
+        num_draft_tokens,
+        num_spec_tokens,
+        candidates,
+        target_predict,
+        retrive_index,
+        retrive_next_token,
+        retrive_next_sibling,
+    ):
         device = get_device()
         predicts = torch.zeros(bs * num_draft_tokens, dtype=torch.int32, device=device)
         accept_index = torch.full(
@@ -424,7 +547,9 @@ class TestVerifyTreeGreedy(unittest.TestCase):
         )
         accept_token_num = torch.zeros(bs, dtype=torch.int32, device=device)
         return (
-            predicts, accept_index, accept_token_num,
+            predicts,
+            accept_index,
+            accept_token_num,
             torch.tensor(candidates, dtype=torch.int64, device=device),
             torch.tensor(retrive_index, dtype=torch.int64, device=device),
             torch.tensor(retrive_next_token, dtype=torch.int64, device=device),
@@ -436,7 +561,9 @@ class TestVerifyTreeGreedy(unittest.TestCase):
         """All draft tokens accepted in a linear chain."""
         bs, dtn, nst = 1, 4, 4
         inputs = self._make_verify_inputs(
-            bs, dtn, nst,
+            bs,
+            dtn,
+            nst,
             candidates=[[100, 200, 300, 400]],
             target_predict=[[200, 300, 400, 500]],
             retrive_index=[[0, 1, 2, 3]],
@@ -458,7 +585,9 @@ class TestVerifyTreeGreedy(unittest.TestCase):
         """Second draft token rejected → stops early."""
         bs, dtn, nst = 1, 4, 4
         inputs = self._make_verify_inputs(
-            bs, dtn, nst,
+            bs,
+            dtn,
+            nst,
             candidates=[[100, 200, 999, 400]],  # 999 ≠ 300
             target_predict=[[200, 300, 400, 500]],
             retrive_index=[[0, 1, 2, 3]],
@@ -479,7 +608,9 @@ class TestVerifyTreeGreedy(unittest.TestCase):
         """First child rejected, sibling accepted."""
         bs, dtn, nst = 1, 4, 4
         inputs = self._make_verify_inputs(
-            bs, dtn, nst,
+            bs,
+            dtn,
+            nst,
             candidates=[[100, 999, 200, 888]],
             target_predict=[[200, 300, 400, 500]],
             retrive_index=[[0, 1, 2, 3]],
@@ -500,7 +631,9 @@ class TestVerifyTreeGreedy(unittest.TestCase):
         """First child rejected, no siblings → zero accepted."""
         bs, dtn, nst = 1, 4, 4
         inputs = self._make_verify_inputs(
-            bs, dtn, nst,
+            bs,
+            dtn,
+            nst,
             candidates=[[100, 999, 888, 777]],
             target_predict=[[200, 300, 400, 500]],
             retrive_index=[[0, 1, 2, 3]],
@@ -518,7 +651,9 @@ class TestVerifyTreeGreedy(unittest.TestCase):
         """Two batch elements with different acceptance lengths."""
         bs, dtn, nst = 2, 3, 3
         inputs = self._make_verify_inputs(
-            bs, dtn, nst,
+            bs,
+            dtn,
+            nst,
             candidates=[[100, 200, 300], [400, 500, 999]],
             target_predict=[[200, 300, 999], [500, 999, 800]],
             retrive_index=[[0, 1, 2], [3, 4, 5]],
@@ -540,8 +675,16 @@ class TestBufferReuse(unittest.TestCase):
     """Test that pre-allocated tree_mask_buf and position_buf work."""
 
     def test_buffer_reuse_full_mask(self):
-        (verified_id, score_list, token_list, parents_list, seq_lens,
-         topk, depth, num_draft_token) = _make_standard_test_inputs()
+        (
+            verified_id,
+            score_list,
+            token_list,
+            parents_list,
+            seq_lens,
+            topk,
+            depth,
+            num_draft_token,
+        ) = _make_standard_test_inputs()
 
         parent_list, top_scores_index, draft_tokens = organize_draft_results(
             score_list, token_list, parents_list, num_draft_token
@@ -553,10 +696,13 @@ class TestBufferReuse(unittest.TestCase):
         # Pre-allocate buffers
         tree_mask_buf = torch.empty(
             seq_lens_sum * num_draft_token + num_draft_token * num_draft_token * bs,
-            dtype=torch.bool, device=device,
+            dtype=torch.bool,
+            device=device,
         )
         position_buf = torch.empty(
-            bs * num_draft_token, dtype=torch.long, device=device,
+            bs * num_draft_token,
+            dtype=torch.long,
+            device=device,
         )
 
         (tree_mask, pos, ri, rnt, rns, dt) = build_tree_kernel_efficient(
@@ -589,8 +735,16 @@ class TestBufferReuse(unittest.TestCase):
         )
 
     def test_buffer_reuse_bitpacking(self):
-        (verified_id, score_list, token_list, parents_list, seq_lens,
-         topk, depth, num_draft_token) = _make_standard_test_inputs()
+        (
+            verified_id,
+            score_list,
+            token_list,
+            parents_list,
+            seq_lens,
+            topk,
+            depth,
+            num_draft_token,
+        ) = _make_standard_test_inputs()
 
         parent_list, top_scores_index, draft_tokens = organize_draft_results(
             score_list, token_list, parents_list, num_draft_token
@@ -600,7 +754,9 @@ class TestBufferReuse(unittest.TestCase):
 
         # Pre-allocate bitpacking buffer (uint8 for 8 tokens)
         tree_mask_buf = torch.zeros(
-            num_draft_token * bs, dtype=torch.uint8, device=device,
+            num_draft_token * bs,
+            dtype=torch.uint8,
+            device=device,
         )
 
         (tree_mask, pos, ri, rnt, rns, dt) = build_tree_kernel_efficient(
@@ -628,6 +784,7 @@ class TestDispatchBehavior(unittest.TestCase):
 
     def test_env_override_true(self):
         import sglang.srt.speculative.eagle_utils as eu
+
         old = eu._use_pytorch_tree_ops
         try:
             eu._use_pytorch_tree_ops = None
@@ -639,6 +796,7 @@ class TestDispatchBehavior(unittest.TestCase):
 
     def test_env_override_false(self):
         import sglang.srt.speculative.eagle_utils as eu
+
         old = eu._use_pytorch_tree_ops
         try:
             eu._use_pytorch_tree_ops = None
@@ -650,6 +808,7 @@ class TestDispatchBehavior(unittest.TestCase):
 
     def test_env_override_yes_no(self):
         import sglang.srt.speculative.eagle_utils as eu
+
         old = eu._use_pytorch_tree_ops
         try:
             for val in ("yes", "YES", "Yes", "true", "TRUE"):
@@ -659,7 +818,9 @@ class TestDispatchBehavior(unittest.TestCase):
             for val in ("no", "NO", "false", "FALSE"):
                 eu._use_pytorch_tree_ops = None
                 os.environ["SGLANG_USE_PYTORCH_TREE_OPS"] = val
-                self.assertFalse(eu.use_pytorch_tree_ops(), f"Expected False for '{val}'")
+                self.assertFalse(
+                    eu.use_pytorch_tree_ops(), f"Expected False for '{val}'"
+                )
         finally:
             eu._use_pytorch_tree_ops = old
             os.environ.pop("SGLANG_USE_PYTORCH_TREE_OPS", None)
