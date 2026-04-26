@@ -1,6 +1,8 @@
 
 ## [Unreleased]
 ### Documentation
+- Added: `.jules/reports/research/repo-triangulation-20260426-120000.md`
+- Updated: `.jules/journals/triangulator-forge.md`
 - None required.
 
 ### Added
