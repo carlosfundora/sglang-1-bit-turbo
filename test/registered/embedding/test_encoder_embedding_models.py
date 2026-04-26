@@ -31,7 +31,12 @@ from sglang.test.test_utils import CustomTestCase, get_similarities, is_in_ci
 
 register_cuda_ci(est_time=270, suite="stage-b-test-1-gpu-small")
 
-MODELS = [("BAAI/bge-small-en", 1, 1e-5), ("BAAI/bge-m3", 1, 1e-5)]
+MODELS = [
+    ("BAAI/bge-small-en", 1, 1e-5),
+    ("BAAI/bge-m3", 1, 1e-5),
+    ("jinaai/jina-embeddings-v2-base-en", 1, 1e-5),
+    ("jinaai/jina-embeddings-v2-base-code", 1, 1e-5),
+]
 
 ATTENTION_BACKEND = ["torch_native", "triton", "flashinfer"]
 BATCH_SIZE = [1, 2]
@@ -40,7 +45,6 @@ sgl_to_st_ratio = []
 
 
 class TestEncoderEmbeddingModels(CustomTestCase):
-
     @classmethod
     def setUpClass(cls):
         mp.set_start_method("spawn", force=True)
@@ -118,9 +122,9 @@ class TestEncoderEmbeddingModels(CustomTestCase):
             # print("similarity diff", abs(similarity - 1))
 
             if len(truncated_prompts[i]) <= 1000:
-                assert torch.all(
-                    abs(similarity - 1) < prefill_tolerance
-                ), "embeddings are not all close"
+                assert torch.all(abs(similarity - 1) < prefill_tolerance), (
+                    "embeddings are not all close"
+                )
 
     def test_prefill_logits(self):
         models_to_test = MODELS

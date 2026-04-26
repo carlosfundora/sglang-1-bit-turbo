@@ -24,7 +24,6 @@ BertConfig = None
 
 
 class BertEmbedding(nn.Module):
-
     def __init__(self, config: BertConfig):
 
         super().__init__()
@@ -78,7 +77,6 @@ class BertEmbedding(nn.Module):
 
 
 class BertPooler(nn.Module):
-
     def __init__(self, config: BertConfig):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
@@ -97,7 +95,6 @@ class BertPooler(nn.Module):
 
 
 class BertEncoder(nn.Module):
-
     def __init__(
         self,
         config: BertConfig,
@@ -128,7 +125,6 @@ class BertEncoder(nn.Module):
 
 
 class BertLayer(nn.Module):
-
     def __init__(
         self,
         config: BertConfig,
@@ -174,7 +170,6 @@ class BertLayer(nn.Module):
 
 
 class BertAttention(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -209,7 +204,6 @@ class BertAttention(nn.Module):
 
 
 class BertSelfAttention(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -265,7 +259,6 @@ class BertSelfAttention(nn.Module):
 
 
 class BertSelfOutput(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -292,7 +285,6 @@ class BertSelfOutput(nn.Module):
 
 
 class BertIntermediate(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -318,7 +310,6 @@ class BertIntermediate(nn.Module):
 
 
 class BertOutput(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -348,7 +339,6 @@ class BertOutput(nn.Module):
 
 
 class BertModel(nn.Module):
-
     def __init__(
         self,
         *,
@@ -386,7 +376,7 @@ class BertModel(nn.Module):
         input_embeds: torch.Tensor = None,
         get_embedding: bool = False,
     ) -> torch.Tensor:
-        assert get_embedding == True
+        assert get_embedding
         # Your tokenized IDs
 
         hidden_states = self.embeddings(
@@ -416,7 +406,6 @@ class BertModel(nn.Module):
             if not self.use_bert_pooler and "pooler" in name:
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
-
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
@@ -441,7 +430,6 @@ class Contriever(BertModel):
 
 
 class BertForSequenceClassification(nn.Module):
-
     def __init__(
         self,
         *,
@@ -489,7 +477,7 @@ class BertForSequenceClassification(nn.Module):
         input_embeds: torch.Tensor = None,
         get_embedding: bool = False,
     ) -> torch.Tensor:
-        assert get_embedding == True
+        assert get_embedding
 
         hidden_states = self.bert(
             input_ids=input_ids,
@@ -501,4 +489,18 @@ class BertForSequenceClassification(nn.Module):
         return self.pooler(hidden_states, forward_batch)
 
 
-EntryClass = [BertModel, Contriever, BertForSequenceClassification]
+class JinaBertModel(BertModel):
+    pass
+
+
+class JinaBertForMaskedLM(BertModel):
+    pass
+
+
+EntryClass = [
+    BertModel,
+    Contriever,
+    BertForSequenceClassification,
+    JinaBertModel,
+    JinaBertForMaskedLM,
+]
