@@ -1,0 +1,142 @@
+name: amd-local-ci
+
+on:
+  pull_request:
+    paths:
+      - 'python/**'
+      - 'sglang/**'
+      - 'benchmark/**'
+      - 'test/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'pyproject.toml'
+      - 'requirements*.txt'
+      - '.github/workflows/amd-local-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: amd-local-ci-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    name: Detect relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      rocm: ${{ steps.filter.outputs.rocm }}
+      kernel: ${{ steps.filter.outputs.kernel }}
+      quant: ${{ steps.filter.outputs.quant }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+            changed="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")"
+          else
+            changed="$(git diff --name-only HEAD~1...HEAD || true)"
+          fi
+
+          python=false
+          rocm=false
+          kernel=false
+          quant=false
+          while IFS= read -r file; do
+            [[ -z "$file" ]] && continue
+            case "$file" in
+              python/*|python/**|sglang/*|sglang/**|scripts/*|scripts/**|pyproject.toml|requirements*.txt)
+                python=true ;;
+            esac
+            case "$file" in
+              *amd*|*AMD*|*rocm*|*ROCm*|*ROCM*|*hip*|*HIP*|*aiter*|*AITER*)
+                rocm=true; kernel=true ;;
+            esac
+            case "$file" in
+              *triton*|*Triton*|*flash*|*Flash*|*attention*|*Attention*|*radix*|*Radix*)
+                kernel=true ;;
+            esac
+            case "$file" in
+              *quant*|*Quant*|*turboquant*|*TurboQuant*|*rotorquant*|*RotorQuant*|*modelopt*|*awq*|*AWQ*)
+                quant=true ;;
+            esac
+          done <<< "$changed"
+
+          printf '%s\n' "$changed"
+          echo "python=$python" >> "$GITHUB_OUTPUT"
+          echo "rocm=$rocm" >> "$GITHUB_OUTPUT"
+          echo "kernel=$kernel" >> "$GITHUB_OUTPUT"
+          echo "quant=$quant" >> "$GITHUB_OUTPUT"
+
+  python-smoke:
+    name: Python import/config smoke
+    needs: detect
+    if: github.event_name == 'workflow_dispatch' || needs.detect.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile Python sources
+        run: python -m compileall python
+
+  rocm-pytorch-smoke:
+    name: ROCm/PyTorch smoke
+    needs: detect
+    if: github.event_name == 'workflow_dispatch' || needs.detect.outputs.rocm == 'true' || needs.detect.outputs.kernel == 'true' || needs.detect.outputs.quant == 'true'
+    runs-on: [self-hosted, linux, x64, amd, rocm, hip, gfx1030]
+    timeout-minutes: 45
+    env:
+      HSA_OVERRIDE_GFX_VERSION: '10.3.0'
+      AMDGPU_TARGETS: gfx1030
+      PYTORCH_ROCM_ARCH: gfx1030
+      ROCM_PATH: /opt/rocm
+      HIP_PATH: /opt/rocm
+    steps:
+      - uses: actions/checkout@v5
+      - name: Show ROCm environment
+        run: |
+          rocminfo | head -n 80 || true
+          hipconfig || true
+      - name: PyTorch ROCm smoke
+        run: |
+          python - <<'PY'
+          import torch
+          print('torch:', torch.__version__)
+          print('rocm/cuda available:', torch.cuda.is_available())
+          if torch.cuda.is_available():
+              print('device:', torch.cuda.get_device_name(0))
+          PY
+      - name: Optional kernel imports
+        run: |
+          python - <<'PY'
+          import importlib.util
+          for name in ['aiter', 'triton', 'flash_attn']:
+              print(name, bool(importlib.util.find_spec(name)))
+          PY
+
+  quant-kernel-smoke:
+    name: Quant/kernel path smoke
+    needs: detect
+    if: github.event_name == 'workflow_dispatch' || needs.detect.outputs.quant == 'true' || needs.detect.outputs.kernel == 'true'
+    runs-on: [self-hosted, linux, x64, amd, rocm, hip, gfx1030]
+    timeout-minutes: 45
+    env:
+      HSA_OVERRIDE_GFX_VERSION: '10.3.0'
+      AMDGPU_TARGETS: gfx1030
+      PYTORCH_ROCM_ARCH: gfx1030
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compile changed quant/kernel Python modules
+        run: |
+          python -m compileall python/sglang/srt/layers || true
+          python -m compileall python/sglang/srt/model_executor || true
