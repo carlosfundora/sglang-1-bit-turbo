@@ -181,14 +181,15 @@ def context_attention_fwd(
     else:
         BLOCK = 64
 
-    Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
+    Lq, Lk = q.shape[-1], k.shape[-1]
 
     sm_scale = 1.0 / (Lq**0.5)
     batch, head = b_seq_len.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k.shape[1]
 
     grid = (batch, head, triton.cdiv(max_input_len, BLOCK))
-    num_warps = 4 if Lk <= 64 else 8
+    num_warps = 2 if Lk <= 64 else 4
+    extra_kargs = {"waves_per_eu": 1}  # noqa: F841
 
     _fwd_kernel[grid](
         q,

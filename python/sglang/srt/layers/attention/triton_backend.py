@@ -98,14 +98,32 @@ class TritonAttnBackend(AttentionBackend):
         kv_indptr_buf: Optional[torch.Tensor] = None,
     ):
         # Lazy import to avoid the initialization of cuda context
-        from sglang.srt.layers.attention.triton_ops.decode_attention import (
-            decode_attention_fwd,
-        )
-        from sglang.srt.layers.attention.triton_ops.extend_attention import (
-            build_unified_kv_indices,
-            extend_attention_fwd,
-            extend_attention_fwd_unified,
-        )
+        try:
+            import torch
+            _is_gfx1030 = "gfx103" in torch.cuda.get_device_properties(0).gcnArchName
+        except Exception:
+            _is_gfx1030 = False
+
+        if _is_gfx1030:
+            from sglang.srt.layers.attention.triton_ops.rdna2.decode_attention import (
+                decode_attention_fwd,
+            )
+            from sglang.srt.layers.attention.triton_ops.rdna2.extend_attention import (
+                extend_attention_fwd,
+                extend_attention_fwd_unified,
+            )
+            from sglang.srt.layers.attention.triton_ops.extend_attention import (
+                build_unified_kv_indices,
+            )
+        else:
+            from sglang.srt.layers.attention.triton_ops.decode_attention import (
+                decode_attention_fwd,
+            )
+            from sglang.srt.layers.attention.triton_ops.extend_attention import (
+                build_unified_kv_indices,
+                extend_attention_fwd,
+                extend_attention_fwd_unified,
+            )
 
         super().__init__()
 

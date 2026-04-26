@@ -22,7 +22,6 @@ It supports page size = 1.
 
 import logging
 
-import torch
 import triton
 import triton.language as tl
 
@@ -196,20 +195,7 @@ def _decode_att_m_fwd(
     logit_cap,
     xai_temperature_len=-1,
 ):
-    BLOCK = 64
-    if _is_hip:
-        # Detect RDNA2 vs CDNA for optimal block size
-        _gcn_mha = ""
-        try:
-            _gcn_mha = torch.cuda.get_device_properties(0).gcnArchName
-        except Exception:
-            pass
-        if "gfx103" in _gcn_mha:
-            # RDNA2 (gfx1030/1031): Wave32 can handle BLOCK=32 with head_dim=128
-            BLOCK = 32
-        else:
-            # CDNA (MI-series): SGPR-limited, use conservative block
-            BLOCK = 8
+    BLOCK = 32  # RDNA2 (gfx1030/1031): Wave32 can handle BLOCK=32 with head_dim=128
     MAX_KV_SPLITS = max_kv_splits
     Lk = k_buffer.shape[-1]
     Lv = v_buffer.shape[-1]
@@ -222,17 +208,7 @@ def _decode_att_m_fwd(
     if kv_group_num == 1:
         num_warps = 4
     else:
-        num_warps = 2
-        if _is_hip:
-            _gcn_mha2 = ""
-            try:
-                _gcn_mha2 = torch.cuda.get_device_properties(0).gcnArchName
-            except Exception:
-                pass
-            if "gfx103" in _gcn_mha2:
-                num_warps = 2  # RDNA2 Wave32: 2 warps = 64 threads = 1 CU
-            else:
-                num_warps = 1  # CDNA workaround
+        num_warps = 2  # RDNA2 Wave32: 2 warps = 64 threads = 1 CU
 
     BLOCK_DMODEL = triton.next_power_of_2(Lk)
     BLOCK_DV = triton.next_power_of_2(Lv)
@@ -488,25 +464,9 @@ def _decode_grouped_att_m_fwd(
         MAX_KV_SPLITS,
     )
 
-    extra_kargs = {}
+    extra_kargs = {"waves_per_eu": 1}
     num_stages = 2
     _decode_num_warps = 4
-    if _is_hip:
-        # https://rocm.docs.amd.com/en/docs-6.2.0/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
-        _gcn = ""
-        try:
-            _gcn = torch.cuda.get_device_properties(0).gcnArchName
-        except Exception:
-            pass
-        if "gfx103" in _gcn:
-            # RDNA2 (gfx1030/1031): Wave32, no matrix instructions
-            # num_stages=2 verified +6% faster than 1 on RDNA2 (37.0µs vs 39.4µs)
-            extra_kargs = {"waves_per_eu": 1}
-            num_stages = 2
-        else:
-            # CDNA (MI-series): Wave64, matrix instructions available
-            extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
-            num_stages = 1
 
     _fwd_grouped_kernel_stage1[grid](
         q,
@@ -635,19 +595,8 @@ def _decode_softmax_reducev_fwd(
     MAX_KV_SPLITS = max_kv_splits
     HAS_SINK = sinks is not None
 
-    extra_kargs = {}
+    extra_kargs = {"waves_per_eu": 4}
     _stage2_warps = 4
-    if _is_hip:
-        _gcn2 = ""
-        try:
-            _gcn2 = torch.cuda.get_device_properties(0).gcnArchName
-        except Exception:
-            pass
-        if "gfx103" in _gcn2:
-            # RDNA2 (gfx1030): Wave32, no matrix instructions
-            extra_kargs = {"waves_per_eu": 4}
-        else:
-            extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
 
     grid = (batch, head_num)
     _fwd_kernel_stage2[grid](

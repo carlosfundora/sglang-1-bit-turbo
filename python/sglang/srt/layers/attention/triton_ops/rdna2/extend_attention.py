@@ -60,56 +60,8 @@ def _get_block_sizes_for_extend_attention(Lq: int, Lv: int):
     BLOCK_DV = triton.next_power_of_2(Lv)
 
     # Determine BLOCK_M, BLOCK_N, and num_warps based on hardware
-    if _is_hip:
-        _gcn_ext = ""
-        try:
-            _gcn_ext = torch.cuda.get_device_properties(0).gcnArchName
-        except Exception:
-            pass
-        if "gfx103" in _gcn_ext:
-            # RDNA2 (gfx1030/1031): Wave32, 2 warps = 64 threads = 1 CU sweet spot
-            BLOCK_M, BLOCK_N = (64, 64)
-            num_warps = 2
-        else:
-            BLOCK_M, BLOCK_N = (64, 64)
-            num_warps = 4
-    else:
-        if _is_cuda and CUDA_CAPABILITY[0] == 12:
-            # sm120 workstation Blackwell architecture (RTX Pro 6000) has a much smaller shared memory size (100K)
-            if Lq <= 128:
-                BLOCK_M, BLOCK_N = (64, 128)
-            elif Lq <= 256:
-                BLOCK_M, BLOCK_N = (64, 64)
-            else:
-                BLOCK_M, BLOCK_N = (32, 32)
-        elif _is_cuda and CUDA_CAPABILITY[0] >= 9:
-            # Hopper architecture (H100, etc.)
-            if Lq <= 256:
-                BLOCK_M, BLOCK_N = (128, 64)
-            else:
-                BLOCK_M, BLOCK_N = (32, 64)
-        elif _is_cuda and CUDA_CAPABILITY[0] >= 8:
-            # Ampere architecture (A100, etc.)
-            # sm86/sm89 has a much smaller shared memory size (100K) than sm80 (160K)
-            if CUDA_CAPABILITY[1] == 9 or CUDA_CAPABILITY[1] == 6:
-                if Lq <= 128:
-                    BLOCK_M, BLOCK_N = (64, 128)
-                elif Lq <= 256:
-                    BLOCK_M, BLOCK_N = (64, 64)
-                else:
-                    BLOCK_M, BLOCK_N = (32, 32)
-            else:
-                if Lq <= 128:
-                    BLOCK_M, BLOCK_N = (128, 128)
-                elif Lq <= 256:
-                    BLOCK_M, BLOCK_N = (64, 64)
-                else:
-                    BLOCK_M, BLOCK_N = (32, 64)
-        else:
-            # Older architectures
-            BLOCK_M, BLOCK_N = (64, 64) if Lq <= 128 else (32, 32)
-
-        num_warps = 4 if Lq <= 64 else 8
+    BLOCK_M, BLOCK_N = (64, 64)
+    num_warps = 2  # RDNA2 (gfx1030/1031): Wave32, 2 warps = 64 threads = 1 CU sweet spot
 
     return BLOCK_DMODEL, BLOCK_DPE, BLOCK_DV, BLOCK_M, BLOCK_N, num_warps
 
@@ -663,18 +615,7 @@ def extend_attention_fwd(
         # Sync before kernel to ensure any prior async HIP error is caught HERE
         torch.cuda.synchronize()
 
-    extra_kargs = {}
-    if _is_hip:
-        _gcn_ext2 = ""
-        try:
-            _gcn_ext2 = torch.cuda.get_device_properties(0).gcnArchName
-        except Exception:
-            pass
-        if "gfx103" in _gcn_ext2:
-            # RDNA2: Wave32, no matrix instructions
-            extra_kargs = {"waves_per_eu": 1}
-        else:
-            extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
+    extra_kargs = {"waves_per_eu": 1}
 
     # RDNA2 safety: clamp qo_indptr so ext_len never exceeds actual Q tensor rows.
     # PHANTOM TARGET_VERIFY may set ext_len=draft_token_num while the actual
@@ -1124,18 +1065,7 @@ def extend_attention_fwd_unified(
     grid = (batch_size, head_num, triton.cdiv(max_len_extend, BLOCK_M))
     num_stages = 1
 
-    extra_kargs = {}
-    if _is_hip:
-        _gcn_ext3 = ""
-        try:
-            _gcn_ext3 = torch.cuda.get_device_properties(0).gcnArchName
-        except Exception:
-            pass
-        if "gfx103" in _gcn_ext3:
-            # RDNA2: Wave32, no matrix instructions
-            extra_kargs = {"waves_per_eu": 1}
-        else:
-            extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
+    extra_kargs = {"waves_per_eu": 1}
 
     _fwd_kernel_unified[grid](
         q,
