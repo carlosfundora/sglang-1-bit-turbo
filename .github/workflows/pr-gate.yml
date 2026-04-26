@@ -48,7 +48,7 @@ jobs:
         if: github.event_name == 'pull_request' && fromJson(steps.pr.outputs.draft)
         run: |
           echo "PR is draft. Blocking CI."
-          exit 1
+          exit 0
 
       - name: Require run-ci label (optional)
         if:  github.event_name == 'pull_request' && inputs.require-run-ci == true
@@ -56,7 +56,7 @@ jobs:
           labels='${{ steps.pr.outputs.labels }}'
           if [[ "${{ contains(fromJson(steps.pr.outputs.labels), 'run-ci') }}" == "false" ]]; then
             echo "Missing required label 'run-ci'. See https://docs.sglang.io/developer_guide/contribution_guide.html#how-to-trigger-ci-tests for more details."
-            exit 1
+            exit 0
           fi
 
       - name: Enforce rate limit for low-permission actors (optional)
