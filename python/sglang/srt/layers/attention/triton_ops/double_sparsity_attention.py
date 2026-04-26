@@ -1,7 +1,6 @@
 import torch
 import triton
 import triton.language as tl
-from sglang.srt.layers.attention.triton_ops.rocm_arch import is_gfx1030
 
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import is_cuda, is_hip

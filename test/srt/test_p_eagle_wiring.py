@@ -19,7 +19,6 @@ import torch
 def test_p_eagle_enum_routing():
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
-    p = SpeculativeAlgorithm.P_EAGLE
     assert p.is_eagle(), "P_EAGLE must be recognized as EAGLE family"
     assert p.is_eagle3(), "P_EAGLE must be recognized as EAGLE3 variant"
     assert p.is_p_eagle(), "P_EAGLE must identify as P_EAGLE"
@@ -33,7 +32,6 @@ def test_p_eagle_creates_eagle_worker():
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
     from sglang.srt.speculative.eagle_worker import EAGLEWorker
 
-    p = SpeculativeAlgorithm.P_EAGLE
     # create_worker needs a ServerArgs, but we can verify the import path
     # When overlap is disabled, P_EAGLE routes to EAGLEWorker (via is_eagle())
     # Just verify the worker class has the P_EAGLE method

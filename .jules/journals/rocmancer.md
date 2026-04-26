@@ -7,3 +7,10 @@ Triton attention kernels were universally applying CDNA-specific optimizations (
 1. Dynamically check `torch.cuda.get_device_properties(0).gcnArchName` in `extend_attention`, `double_sparsity_attention`, `prefill_attention`, and `rocm_mla_decode_rope` before kernel launches.
 2. If `gfx103` is detected, remove CDNA-specific `extra_kargs` and tune `num_warps` (typically 2 for Wave32) and `waves_per_eu` appropriately.
 3. Update `server_args.py` to properly propagate `mem_fraction_static` and `chunked_prefill_size` from `gfx1031_defaults` when initializing an RDNA2 server.
+
+## 2024-05-24 - CI Docs Advisory Failure Note
+**Learning:**
+SGLang's CI requires a `CHANGELOG.md` update for PRs that modify code files. When the `CHANGELOG.md` is updated, the changes must include a `Documentation` or `Docs` section outlining modified documentation, or explicitly stating `- None required`. The recent `docs-policy` check failed because no `CHANGELOG.md` was updated in the PR.
+
+**Action:**
+Update the `CHANGELOG.md` file under the current unreleased version with a note about the AMD RDNA2 optimizations and the required `- None required` documentation block.
