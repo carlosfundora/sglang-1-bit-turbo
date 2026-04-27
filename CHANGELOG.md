@@ -1,9 +1,9 @@
 
 ## [Unreleased]
 ### Documentation
+- Created: `.jules/reports/research/repo-triangulation-20260427-024844.md`
 - Added: `.jules/reports/research/repo-triangulation-20260426-120000.md`
 - Updated: `.jules/journals/triangulator-forge.md`
-- None required.
 
 ### Added
 - Support for Qwen 0.6B Embedding and Jina embedding models.
