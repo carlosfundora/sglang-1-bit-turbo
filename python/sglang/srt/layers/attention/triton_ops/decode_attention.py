@@ -22,11 +22,13 @@ It supports page size = 1.
 
 import logging
 
-import torch
 import triton
 import triton.language as tl
 
 from sglang.srt.utils import is_hip
+from sglang.srt.hardware_backend.rocm.arch_detection import is_rdna2
+
+_is_rdna2 = is_hip() and is_rdna2()
 
 _is_hip = is_hip()
 
@@ -199,12 +201,7 @@ def _decode_att_m_fwd(
     BLOCK = 64
     if _is_hip:
         # Detect RDNA2 vs CDNA for optimal block size
-        _gcn_mha = ""
-        try:
-            _gcn_mha = torch.cuda.get_device_properties(0).gcnArchName
-        except Exception:
-            pass
-        if "gfx103" in _gcn_mha:
+        if _is_rdna2:
             # RDNA2 (gfx1030/1031): Wave32 can handle BLOCK=32 with head_dim=128
             BLOCK = 32
         else:
@@ -224,12 +221,7 @@ def _decode_att_m_fwd(
     else:
         num_warps = 2
         if _is_hip:
-            _gcn_mha2 = ""
-            try:
-                _gcn_mha2 = torch.cuda.get_device_properties(0).gcnArchName
-            except Exception:
-                pass
-            if "gfx103" in _gcn_mha2:
+            if _is_rdna2:
                 num_warps = 2  # RDNA2 Wave32: 2 warps = 64 threads = 1 CU
             else:
                 num_warps = 1  # CDNA workaround
@@ -493,15 +485,10 @@ def _decode_grouped_att_m_fwd(
     _decode_num_warps = 4
     if _is_hip:
         # https://rocm.docs.amd.com/en/docs-6.2.0/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
-        _gcn = ""
-        try:
-            _gcn = torch.cuda.get_device_properties(0).gcnArchName
-        except Exception:
-            pass
-        if "gfx103" in _gcn:
+        if _is_rdna2:
             # RDNA2 (gfx1030/1031): Wave32, no matrix instructions
             # num_stages=2 verified +6% faster than 1 on RDNA2 (37.0µs vs 39.4µs)
-            extra_kargs = {"waves_per_eu": 1}
+            extra_kargs = {"waves_per_eu": 2}
             num_stages = 2
         else:
             # CDNA (MI-series): Wave64, matrix instructions available
@@ -638,14 +625,9 @@ def _decode_softmax_reducev_fwd(
     extra_kargs = {}
     _stage2_warps = 4
     if _is_hip:
-        _gcn2 = ""
-        try:
-            _gcn2 = torch.cuda.get_device_properties(0).gcnArchName
-        except Exception:
-            pass
-        if "gfx103" in _gcn2:
+        if _is_rdna2:
             # RDNA2 (gfx1030): Wave32, no matrix instructions
-            extra_kargs = {"waves_per_eu": 4}
+            extra_kargs = {"waves_per_eu": 2}
         else:
             extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
 

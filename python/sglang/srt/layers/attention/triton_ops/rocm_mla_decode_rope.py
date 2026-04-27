@@ -23,9 +23,14 @@ It supports page size = 1.
 import triton
 import triton.language as tl
 
+from sglang.srt.hardware_backend.rocm.arch_detection import is_rdna2
 from sglang.srt.layers.attention.triton_ops.decode_attention import (
     _decode_softmax_reducev_fwd,
 )
+from sglang.srt.utils import is_hip
+
+_is_hip = is_hip()
+_is_rdna2 = _is_hip and is_rdna2()
 
 
 def is_hip():
@@ -356,8 +361,12 @@ def _decode_grouped_att_m_fwd_rope(
     if _is_hip:
         # https://rocm.docs.amd.com/en/docs-6.2.0/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
         # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
-        extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
-        num_stages = 1
+        if _is_rdna2:
+            extra_kargs = {"waves_per_eu": 2}
+            num_stages = 2
+        else:
+            extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
+            num_stages = 1
 
     _fwd_grouped_kernel_stage1_rope[grid](
         q,

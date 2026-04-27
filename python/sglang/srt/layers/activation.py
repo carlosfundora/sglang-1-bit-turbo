@@ -13,17 +13,6 @@
 # ==============================================================================
 """Fused operators for activation layers."""
 
-try:
-    from sglang.srt.layers.kernels.rdna2.activations import (
-        gelu_and_mul as rdna2_gelu_and_mul,
-    )
-    from sglang.srt.layers.kernels.rdna2.activations import (
-        silu_and_mul as rdna2_silu_and_mul,
-    )
-    from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
-except ImportError:
-    pass
-
 import logging
 import math
 import os
@@ -43,8 +32,6 @@ from transformers import PretrainedConfig
 try:
     from sglang.srt.layers.kernels.rdna2.activations import (
         gelu_and_mul as rdna2_gelu_and_mul,
-    )
-    from sglang.srt.layers.kernels.rdna2.activations import (
         silu_and_mul as rdna2_silu_and_mul,
     )
     from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
