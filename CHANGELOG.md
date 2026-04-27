@@ -1,5 +1,9 @@
 
 ## [Unreleased]
+### Updated
+- Optimized attention hot loops for RDNA2 hardware.
+### Documentation
+- Updated: `.jules/journals/rocmancer.md`
 ### Documentation
 - Added: `.jules/reports/research/repo-triangulation-20260426-120000.md`
 - Updated: `.jules/journals/triangulator-forge.md`
