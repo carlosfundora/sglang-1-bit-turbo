@@ -22,7 +22,6 @@ It supports page size = 1.
 
 import logging
 
-import torch
 import triton
 import triton.language as tl
 

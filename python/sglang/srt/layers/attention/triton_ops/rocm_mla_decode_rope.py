@@ -23,15 +23,14 @@ It supports page size = 1.
 import triton
 import triton.language as tl
 
-from sglang.srt.utils import is_hip
 from sglang.srt.hardware_backend.rocm.arch_detection import is_rdna2
-
-_is_hip = is_hip()
-_is_rdna2 = is_hip() and is_rdna2()
-
 from sglang.srt.layers.attention.triton_ops.decode_attention import (
     _decode_softmax_reducev_fwd,
 )
+from sglang.srt.utils import is_hip
+
+_is_hip = is_hip()
+_is_rdna2 = _is_hip and is_rdna2()
 
 
 def is_hip():
