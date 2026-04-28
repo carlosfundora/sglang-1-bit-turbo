@@ -14,6 +14,10 @@ SGLang's CI requires a `CHANGELOG.md` update for PRs that modify code files. Whe
 
 **Action:**
 Update the `CHANGELOG.md` file under the current unreleased version with a note about the AMD RDNA2 optimizations and the required `- None required` documentation block.
-## 2026-04-27 - Optimization of Hot-Loop Hardware Checks and Attention Kernels
-**Learning:** Dynamic calls to `torch.cuda.get_device_properties(0)` inside attention hot loops introduce significant CPU overhead. Additionally, the `waves_per_eu` triton kernel argument for RDNA2 (gfx1030) was historically kept at 1 or 4, but setting it to 2 provides a more balanced optimization target on this hardware according to docs and testing. RDNA2 doesn't have matrix instructions, so `matrix_instr_nonkdim` and `kpack` can be omitted entirely instead of passing unsupported params to triton on RDNA2.
-**Action:** Replaced dynamic hardware checks in `extend_attention.py`, `decode_attention.py`, `double_sparsity_attention.py`, and `rocm_mla_decode_rope.py` with module-level cached flags using `is_rdna2()` from the arch detection util. Set `waves_per_eu` to 2 and avoided passing CDNA-specific kwargs like `matrix_instr_nonkdim` and `kpack` for RDNA2 targets to improve kernel launch efficiency and stability.
+
+## 2024-05-24 - CI Dependency Failure
+**Learning:**
+The CI job `stage-a-test-cpu` failed with `ModuleNotFoundError: No module named 'tabulate'`. This appears to be a missing dependency in the CI test runner (`test/run_suite.py`) rather than a direct consequence of the RDNA2 Triton kernel optimizations I introduced. The script `test/run_suite.py` likely expects `tabulate` to be installed but it was missing from the `uv pip install -e "python[dev]"` environment resolving phase.
+
+**Action:**
+Add `tabulate` to the development dependencies list (either `requirements-test.txt` or within `pyproject.toml`'s dev dependencies section depending on project structure) to fix the `stage-a-test-cpu` job.

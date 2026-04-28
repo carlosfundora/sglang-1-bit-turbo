@@ -5142,7 +5142,7 @@ class ServerArgs:
             choices=[1, 2, 3, 4, 5, 6, 7, 8],
             help="Maximum ghost worker threads for PHANTOM-X adaptive scaling. "
                  "1=single worker (no scaling), 2-8=pool with throughput-based "
-                 "hill-climbing scaler. Default=1.",
+                 "hill-climbing scaler. Default=4.",
         )
 
         # Medusa speculative decoding
