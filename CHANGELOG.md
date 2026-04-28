@@ -1,6 +1,8 @@
 
 ## [Unreleased]
 ### Documentation
+- Created: `.jules/reports/research/repo-triangulation-20260428-030514.md`
+- Updated: `.jules/journals/triangulator-forge.md`
 - Created: `.jules/reports/research/repo-triangulation-20260427-024844.md`
 - Updated: `docs/rdna2_support.md`
 ### Updated
