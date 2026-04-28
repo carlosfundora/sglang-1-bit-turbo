@@ -1102,7 +1102,7 @@ class SchedulerDisaggregationDecodeMixin:
             if not new_prebuilt_batch.is_empty():
                 if self.running_batch.is_empty():
                     self.running_batch = new_prebuilt_batch
-                else:
+                elif not new_prebuilt_batch.is_empty():
                     self.running_batch.merge_batch(new_prebuilt_batch)
 
         # Schedule decode batch

@@ -212,7 +212,8 @@ class SchedulerMultiplexMixin:
                             self.split_prefill_batch, prefill_result
                         )
                         if self.running_batch and not self.running_batch.is_empty():
-                            self.running_batch.merge_batch(self.split_prefill_batch)
+                            if not self.split_prefill_batch.is_empty():
+                                self.running_batch.merge_batch(self.split_prefill_batch)
                         else:
                             self.running_batch = self.split_prefill_batch
 
