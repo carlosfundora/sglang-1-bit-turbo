@@ -21,3 +21,13 @@ The CI job `stage-a-test-cpu` failed with `ModuleNotFoundError: No module named 
 
 **Action:**
 Add `tabulate` to the development dependencies list (either `requirements-test.txt` or within `pyproject.toml`'s dev dependencies section depending on project structure) to fix the `stage-a-test-cpu` job.
+
+## 2024-05-24 - CI Docs Advisory Failure Update
+**Learning:**
+I updated `CHANGELOG.md` correctly but there were multiple undocumented file modifications (`test/srt/test_p_eagle_wiring.py` and `python/pyproject.toml`) that the docs policy script considers missing from the changelog. The CI script failed because we didn't specify `- None required`. Wait, actually I did add `- None required`, but I used `- None required` without a period, or it was in the wrong section, or it detected new journal files created by my prompt logic (`.jules/reports/research/*`) that were not tracked. The exact error is:
+`- Changed documentation file not listed in CHANGELOG.md: .jules/journals/triangulator-forge.md`
+`- Changed documentation file not listed in CHANGELOG.md: .jules/reports/research/repo-triangulation-20260427-024844.md`
+`- Changed documentation file not listed in CHANGELOG.md: .jules/reports/research/repo-triangulation-20260427-120000.md`
+
+**Action:**
+Update `CHANGELOG.md` to properly document the new `.jules/reports/*` files, since any markdown file modification triggers the policy checker.

@@ -6,4 +6,7 @@
 
 ### Documentation
 - Added: `.jules/journals/rocmancer.md`
-- None required
+- Updated: `.jules/journals/triangulator-forge.md`
+- Added: `.jules/reports/research/repo-triangulation-20260427-024844.md`
+- Added: `.jules/reports/research/repo-triangulation-20260427-120000.md`
+- None required.
