@@ -31,3 +31,11 @@ I updated `CHANGELOG.md` correctly but there were multiple undocumented file mod
 
 **Action:**
 Update `CHANGELOG.md` to properly document the new `.jules/reports/*` files, since any markdown file modification triggers the policy checker.
+
+## 2024-05-24 - Docs Policy CI Refinement
+**Learning:**
+I previously encountered issues with the docs-policy CI job failing because it detected markdown file modifications inside `.jules/`. I thought I had solved this by resetting the `.jules/` directory from `git`. However, the CI output still reports `- Changed documentation file not listed in CHANGELOG.md: .jules/journals/rocmancer.md.`
+This happened because `git reset HEAD .jules/` removes the files from the index (unstages them), but they might still be untracked or the commit itself still contains the previously committed versions of `.jules` files if I only did `git commit --amend` without actually dropping them from the commit tree.
+
+**Action:**
+I need to definitively purge the `.jules/` files from the *branch history* (or the last commit) so they don't show up in the `origin/main...HEAD` diff. I will use `git rm --cached -r .jules/` and amend the commit, ensuring they are ignored.

@@ -98,11 +98,16 @@ class TritonAttnBackend(AttentionBackend):
         kv_indptr_buf: Optional[torch.Tensor] = None,
     ):
         # Lazy import to avoid the initialization of cuda context
-        try:
-            import torch
-            _is_gfx1030 = "gfx103" in torch.cuda.get_device_properties(0).gcnArchName
-        except Exception:
-            _is_gfx1030 = False
+        _is_gfx1030 = False
+        import os
+        if "gfx103" in os.environ.get("PYTORCH_ROCM_ARCH", "") or "gfx103" in os.environ.get("AMDGPU_TARGETS", ""):
+            _is_gfx1030 = True
+        else:
+            try:
+                import torch
+                _is_gfx1030 = "gfx103" in torch.cuda.get_device_properties(0).gcnArchName
+            except Exception:
+                _is_gfx1030 = False
 
         if _is_gfx1030:
             from sglang.srt.layers.attention.triton_ops.rdna2.decode_attention import (
