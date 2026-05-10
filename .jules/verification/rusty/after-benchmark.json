@@ -1,11 +1,11 @@
 {
-  "candidate": "python/sglang/srt/server_args_config_parser.py",
+  "candidate": "python/sglang/srt/parser/harmony_parser.py",
   "implementation": "after",
-  "command": "python3 rust_refactor_sandbox/benchmark_after.py",
-  "timestamp": "2026-05-10T12:34:58+0000",
-  "iterations": 1000,
-  "input_description": "Config with 5 distinct properties (string, int, bool, store_true, list)",
-  "duration_ms": 171.59223556518555,
-  "throughput": "5827.77 ops/sec",
-  "notes": "YAML file read is real in Rust (serde_yaml)"
+  "command": "python3 bench_after.py",
+  "timestamp": "2026-05-10T14:15:00+0000",
+  "iterations": 100000,
+  "input_description": "String length 33, 3 tokens array",
+  "duration_ms": 964.29,
+  "throughput": "103702.8 ops/sec",
+  "notes": "rust pyo3 prefix_hold (utf-8 safe)"
 }

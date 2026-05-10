@@ -21,26 +21,29 @@ class Token:
     end: int
 
 
-def prefix_hold(text: str, tokens: List[str]) -> Tuple[str, str]:
-    """
-    Holds back the longest suffix of `text` that could be a prefix of any token.
-    Returns (emit_now, keep_for_later).
-    """
-    if not text:
-        return "", ""
-    max_hold = 0
-    for tok in tokens:
-        if not tok:
-            continue
-        # Check for prefixes of tok in the suffix of text
-        L = min(len(tok) - 1, len(text))
-        for k in range(L, 0, -1):
-            if tok.startswith(text[-k:]):
-                max_hold = max(max_hold, k)
-                break
-    if max_hold == 0:
-        return text, ""
-    return text[:-max_hold], text[-max_hold:]
+try:
+    from sglang_router.sglang_router_rs import prefix_hold
+except ImportError:
+    def prefix_hold(text: str, tokens: List[str]) -> Tuple[str, str]:
+        """
+        Holds back the longest suffix of `text` that could be a prefix of any token.
+        Returns (emit_now, keep_for_later).
+        """
+        if not text:
+            return "", ""
+        max_hold = 0
+        for tok in tokens:
+            if not tok:
+                continue
+            # Check for prefixes of tok in the suffix of text
+            L = min(len(tok) - 1, len(text))
+            for k in range(L, 0, -1):
+                if tok.startswith(text[-k:]):
+                    max_hold = max(max_hold, k)
+                    break
+        if max_hold == 0:
+            return text, ""
+        return text[:-max_hold], text[-max_hold:]
 
 
 def iter_tokens(text: str, start_pos: int = 0) -> Iterator[Token]:

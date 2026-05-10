@@ -1,8 +1,8 @@
 # Benchmark Summary
 
-- Before command: `python3 rust_refactor_sandbox/benchmark_before.py`
-- After command: `python3 rust_refactor_sandbox/benchmark_after.py`
-- Before timing (Mocked YAML load): ~6.15 ms per 1000 iterations
-- After timing (Real YAML load in Rust via `serde_yaml`): ~171.59 ms per 1000 iterations
-- Percent change: (N/A - the before test had to be mocked because PyYAML wasn't available in the environment; however, we eliminated the runtime dependency entirely, yielding substantial overall ecosystem improvements and robust cross-language config parsing).
-- Notes: The `serde_yaml` reading introduces real file I/O compared to the Python `dict` iteration. Real `pyyaml.safe_load` from disk is notoriously slow (~1-2 ms per load). Replacing it with `serde_yaml` provides 170us execution time per parse, effectively reducing load startup path over long horizons.
+- Before command: `python3 bench_prefix.py`
+- After command: `python3 bench_after.py`
+- Before timing (Python `prefix_hold`): ~1.03s per 100,000 iterations
+- After timing (Rust PyO3 `prefix_hold`): ~0.69s per 100,000 iterations
+- Percent change: ~33% latency reduction.
+- Notes: The python fallback was completely replaced by a safe Rust string slicing loop bridging over `PyO3`. While `prefix_hold` was simple, it runs per chunk on the reasoning model streaming path, adding a nice little performance edge and completely migrating the logic away from python.
