@@ -3,6 +3,9 @@ use smg::*;
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 
+mod config_merger;
+use config_merger::ConfigArgumentMerger;
+
 // Define the enums with PyO3 bindings
 #[pyclass(eq)]
 #[derive(Clone, PartialEq, Debug)]
@@ -1025,5 +1028,6 @@ fn sglang_router_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_version_string, m)?)?;
     m.add_function(wrap_pyfunction!(get_verbose_version_string, m)?)?;
     m.add_function(wrap_pyfunction!(get_available_tool_call_parsers, m)?)?;
+    m.add_class::<ConfigArgumentMerger>()?;
     Ok(())
 }
