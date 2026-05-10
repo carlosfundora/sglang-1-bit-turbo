@@ -2222,6 +2222,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             )
 
     def merge_batch(self, other: "ScheduleBatch"):
+        if other is None or other.is_empty():
+            return
+
         # In the regular scheduler path:
         # 1) self is always prefill, whose seq_lens is not a future
         # 2) other is always decode, which is finished in previous step

@@ -2146,7 +2146,7 @@ class Scheduler(
                 new_batch = self._build_hisparse_decode_batch(ready_reqs)
                 if self.running_batch.is_empty():
                     self.running_batch = new_batch
-                else:
+                elif not new_batch.is_empty():
                     self.running_batch.merge_batch(new_batch)
                 self.running_batch.hisparse_coordinator = self.hisparse_coordinator
         else:
@@ -2171,7 +2171,7 @@ class Scheduler(
                 if not self.last_batch.is_empty():
                     if self.running_batch.is_empty():
                         self.running_batch = self.last_batch
-                    else:
+                    elif not self.last_batch.is_empty():
                         # Merge running_batch with prefill batch
                         self.running_batch.merge_batch(self.last_batch)
 
@@ -3263,7 +3263,7 @@ class Scheduler(
             ):
                 if self.running_batch.is_empty():
                     self.running_batch = self.last_batch
-                else:
+                elif not self.last_batch.is_empty():
                     self.running_batch.merge_batch(self.last_batch)
 
         self.last_batch = None
