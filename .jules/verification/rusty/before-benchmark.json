@@ -1,0 +1,11 @@
+{
+  "candidate": "python/sglang/srt/server_args_config_parser.py",
+  "implementation": "before",
+  "command": "python3 rust_refactor_sandbox/benchmark_before.py",
+  "timestamp": "2026-05-10T09:09:20+0000",
+  "iterations": 1000,
+  "input_description": "Config with 5 distinct properties (string, int, bool, store_true, list)",
+  "duration_ms": 6.151676177978516,
+  "throughput": "162557.32 ops/sec",
+  "notes": "YAML file read is mocked"
+}
