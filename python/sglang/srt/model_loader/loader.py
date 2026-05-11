@@ -2025,11 +2025,22 @@ class GGUFModelLoader(BaseModelLoader):
                 arch = key
                 break
         if arch is None:
-            raise RuntimeError(f"Unknown gguf model_type: {model_type}")
+            # Architecture not in gguf's registry.
+            # Return an identity map so all tensor names pass through
+            # unchanged — the model's load_weights() handles conversion.
+            reader = gguf.GGUFReader(model_config.model_path)
+            return {t.name: t.name for t in reader.tensors}
         num_layers = config.num_hidden_layers
         name_map = gguf.get_tensor_name_map(arch, num_layers)
-        with torch.device("meta"):
-            dummy_model = AutoModelForCausalLM.from_config(config)
+        try:
+            with torch.device("meta"):
+                dummy_model = AutoModelForCausalLM.from_config(config)
+        except ValueError:
+            # Non-causal model (e.g. encoder-only BERT variants loaded from
+            # GGUF).  Fall back to identity map — the model's load_weights()
+            # handles the GGUF→HF name conversion itself.
+            reader = gguf.GGUFReader(model_config.model_path)
+            return {t.name: t.name for t in reader.tensors}
         state_dict = dummy_model.state_dict()
 
         gguf_to_hf_name_map = {}

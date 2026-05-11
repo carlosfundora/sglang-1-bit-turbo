@@ -514,11 +514,20 @@ def get_config(
                 model, trust_remote_code=trust_remote_code, revision=revision, **kwargs
             )
         except ValueError as e:
-            if not "deepseek_v32" in str(e):
+            if "deepseek_v32" in str(e):
+                config = _load_deepseek_v32_model(
+                    model, trust_remote_code=trust_remote_code, revision=revision, **kwargs
+                )
+            elif is_gguf and "is not supported yet" in str(e):
+                # GGUF architecture not recognized by HF's parser — fall back
+                # to config.json in the same directory (requires --tokenizer-path
+                # or the config.json living next to the .gguf file).
+                fallback_kwargs = {k: v for k, v in kwargs.items() if k != "gguf_file"}
+                config = AutoConfig.from_pretrained(
+                    model, trust_remote_code=trust_remote_code, revision=revision, **fallback_kwargs
+                )
+            else:
                 raise e
-            config = _load_deepseek_v32_model(
-                model, trust_remote_code=trust_remote_code, revision=revision, **kwargs
-            )
         except KeyError as e:
             # Transformers v5 may register a built-in config class that
             # conflicts with sglang's custom one (e.g. NemotronHConfig
@@ -627,8 +636,10 @@ def get_config(
     if model_override_args:
         config.update(model_override_args)
 
-    # Special architecture mapping check for GGUF models
-    if is_gguf:
+    # Special architecture mapping check for GGUF models.
+    # Skip when architectures are already set (e.g. config loaded from JSON
+    # fallback for GGUF files whose architecture HF doesn't recognise).
+    if is_gguf and not getattr(config, "architectures", None):
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
             raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
