@@ -60,7 +60,7 @@ def rpd_to_chrome_trace(
                 )
             except ValueError:
                 outfile.write("")
-    except:
+    except Exception:
         pass
 
     rangeStringApi = ""
@@ -99,17 +99,17 @@ def rpd_to_chrome_trace(
 
         rangeStringApi = (
             rangeStringApi + " and rocpd_api.start/1000 <= %s" % (end_time)
-            if start != None
+            if start is not None
             else "where rocpd_api.start/1000 <= %s" % (end_time)
         )
         rangeStringOp = (
             rangeStringOp + " and rocpd_op.start/1000 <= %s" % (end_time)
-            if start != None
+            if start is not None
             else "where rocpd_op.start/1000 <= %s" % (end_time)
         )
         rangeStringMonitor = (
             rangeStringMonitor + " and start/1000 <= %s" % (end_time)
-            if start != None
+            if start is not None
             else "where start/1000 <= %s" % (end_time)
         )
 
@@ -144,7 +144,7 @@ def rpd_to_chrome_trace(
                 )
             except ValueError:
                 outfile.write("")
-    except:
+    except Exception:
         pass
 
     # Output apis
@@ -229,7 +229,7 @@ def rpd_to_chrome_trace(
                 )
             except ValueError:
                 outfile.write("")
-    except:
+    except Exception:
         pass
 
     #
@@ -311,7 +311,7 @@ def rpd_to_chrome_trace(
                 ',{"pid":"%s","name":"%s","ph":"C","ts":%s,"args":{"%s":%s}}\n'
                 % (row[0], row[1], row[2], row[1], row[3])
             )
-    except:
+    except Exception:
         print("Did not find SMI data")
 
     # Create the (global) memory counter
@@ -358,27 +358,49 @@ def rpd_to_chrome_trace(
             self.gpus = []
             self.totalOps = 0
 
-    # FIXME: include 'start' (in ns) so we can ORDER BY it and break ties?
-    for row in connection.execute(
-        "SELECT '0', start/1000.0, pid, tid, B.string as label, '','','', '' from rocpd_api INNER JOIN rocpd_string A on A.id = rocpd_api.apiName_id AND A.string = 'UserMarker' INNER JOIN rocpd_string B on B.id = rocpd_api.args_id AND rocpd_api.start/1000.0 != rocpd_api.end/1000.0 %s UNION ALL SELECT '1', end/1000.0, pid, tid, B.string as label, '','','', '' from rocpd_api INNER JOIN rocpd_string A on A.id = rocpd_api.apiName_id AND A.string = 'UserMarker' INNER JOIN rocpd_string B on B.id = rocpd_api.args_id AND rocpd_api.start/1000.0 != rocpd_api.end/1000.0 %s UNION ALL SELECT '2', rocpd_api.start/1000.0, pid, tid, '' as label, gpuId, queueId, rocpd_op.start/1000.0, rocpd_op.end/1000.0 from rocpd_api_ops INNER JOIN rocpd_api ON rocpd_api_ops.api_id = rocpd_api.id INNER JOIN rocpd_op ON rocpd_api_ops.op_id = rocpd_op.id %s ORDER BY start/1000.0 asc"
-        % (rangeStringApi, rangeStringApi, rangeStringApi)
-    ):
+    query = """
+        SELECT '0', rocpd_api.start/1000.0, pid, tid, B.string as label, '', '', '', '', rocpd_api.start
+        FROM rocpd_api
+        INNER JOIN rocpd_string A ON A.id = rocpd_api.apiName_id AND A.string = 'UserMarker'
+        INNER JOIN rocpd_string B ON B.id = rocpd_api.args_id
+        AND rocpd_api.start/1000.0 != rocpd_api.end/1000.0
+        %s
+        UNION ALL
+        SELECT '2', rocpd_api.end/1000.0, pid, tid, B.string as label, '', '', '', '', rocpd_api.end
+        FROM rocpd_api
+        INNER JOIN rocpd_string A ON A.id = rocpd_api.apiName_id AND A.string = 'UserMarker'
+        INNER JOIN rocpd_string B ON B.id = rocpd_api.args_id
+        AND rocpd_api.start/1000.0 != rocpd_api.end/1000.0
+        %s
+        UNION ALL
+        SELECT '1', rocpd_api.start/1000.0, pid, tid, '' as label, gpuId, queueId, rocpd_op.start/1000.0, rocpd_op.end/1000.0, rocpd_api.start
+        FROM rocpd_api_ops
+        INNER JOIN rocpd_api ON rocpd_api_ops.api_id = rocpd_api.id
+        INNER JOIN rocpd_op ON rocpd_api_ops.op_id = rocpd_op.id
+        %s
+        ORDER BY 2, 10, 1
+    """ % (
+        rangeStringApi,
+        rangeStringApi,
+        rangeStringApi,
+    )
+    for row in connection.execute(query):
         try:
             key = (row[2], row[3])  # Key is 'pid,tid'
             if row[0] == "0":  # Frame start
                 if key not in stacks:
                     stacks[key] = []
-                stack = stacks[key].append((row[1], row[4]))
+                stacks[key].append((row[1], row[4]))
                 # print(f"0: new api frame: pid_tid={key} -> stack={stacks}")
 
-            elif row[0] == "1":  # Frame end
-                completed = stacks[key].pop()
-                # print(f"1: end api frame: pid_tid={key} -> stack={stacks}")
+            elif row[0] == "2":  # Frame end
+                stacks[key].pop()
+                # print(f"2: end api frame: pid_tid={key} -> stack={stacks}")
 
-            elif row[0] == "2":  # API + Op
+            elif row[0] == "1":  # API + Op
                 if key in stacks and len(stacks[key]) > 0:
                     frame = stacks[key][-1]
-                    # print(f"2: Op on {frame} ({len(stacks[key])})")
+                    # print(f"1: Op on {frame} ({len(stacks[key])})")
                     gpuFrame = None
                     if key not in currentFrame:  # First op under the current api frame
                         gpuFrame = GpuFrame()

@@ -9,3 +9,12 @@
   "throughput": "97202.8 ops/sec",
   "notes": "pure python prefix_hold"
 }
+  "candidate": "python/sglang/utils.py:trim_overlap",
+  "implementation": "before",
+  "command": "python3 test_trim_overlap.py",
+  "timestamp": "2023-10-27T12:00:00Z",
+  "iterations": 10000,
+  "input_description": "String overlap text vs suffix overlap text",
+  "duration_ms": 4902.808904647827,
+  "notes": "pure python tight loop test"
+}
