@@ -672,18 +672,21 @@ class TypeBasedDispatcher:
         raise ValueError(f"Invalid object: {obj}")
 
 
-def trim_overlap(existing_text, new_chunk):
-    """
-    Finds the largest suffix of 'existing_text' that is a prefix of 'new_chunk'
-    and removes that overlap from the start of 'new_chunk'.
-    """
-    max_overlap = 0
-    max_possible = min(len(existing_text), len(new_chunk))
-    for i in range(max_possible, 0, -1):
-        if existing_text.endswith(new_chunk[:i]):
-            max_overlap = i
-            break
-    return new_chunk[max_overlap:]
+try:
+    from sglang_rust_utils import trim_overlap
+except ImportError:
+    def trim_overlap(existing_text, new_chunk):
+        """
+        Finds the largest suffix of 'existing_text' that is a prefix of 'new_chunk'
+        and removes that overlap from the start of 'new_chunk'.
+        """
+        max_overlap = 0
+        max_possible = min(len(existing_text), len(new_chunk))
+        for i in range(max_possible, 0, -1):
+            if existing_text.endswith(new_chunk[:i]):
+                max_overlap = i
+                break
+        return new_chunk[max_overlap:]
 
 
 def stream_and_merge(llm, prompt, sampling_params):
