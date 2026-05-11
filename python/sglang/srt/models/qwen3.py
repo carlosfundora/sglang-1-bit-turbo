@@ -39,6 +39,7 @@ Qwen3Config = None
 logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
 _is_npu = is_npu()
+_is_hip = hasattr(torch.version, "hip") and torch.version.hip is not None
 
 if _is_npu:
     from sgl_kernel_npu.norm.split_qkv_rmsnorm_rope import split_qkv_rmsnorm_rope
@@ -140,8 +141,45 @@ class Qwen3Attention(nn.Module):
         )
         self.alt_stream = alt_stream
 
+        # RDNA2 fused QKNorm+RoPE: one kernel launch instead of separate norm + rope
+        self._use_rdna2_fused_qknorm_rope = False
+        if _is_hip and self.head_dim in (64, 128, 256):
+            try:
+                from sglang.srt.layers.kernels.rdna2.dispatch import rdna2_ops
+                if rdna2_ops.probe():
+                    self._use_rdna2_fused_qknorm_rope = True
+                    self._rdna2_ops = rdna2_ops
+                    logger.info(f"Qwen3Attention layer {layer_id}: RDNA2 fused QKNorm+RoPE enabled")
+            except ImportError:
+                pass
+
     def forward_prepare_native(self, positions, hidden_states):
         qkv, _ = self.qkv_proj(hidden_states)
+
+        # RDNA2 fused path: QKNorm + RoPE in a single kernel on unsplit QKV
+        if self._use_rdna2_fused_qknorm_rope:
+            cos_sin_cache = self.rotary_emb.cos_sin_cache.to(
+                qkv.device, dtype=qkv.dtype
+            )
+            result = self._rdna2_ops.fused_qknorm_rope(
+                qkv=qkv,
+                q_weight=self.q_norm.weight,
+                k_weight=self.k_norm.weight,
+                cos_sin_cache=cos_sin_cache,
+                position_ids=positions.flatten().to(torch.int64),
+                num_heads_q=self.num_heads,
+                num_heads_k=self.num_kv_heads,
+                num_heads_v=self.num_kv_heads,
+                head_dim=self.head_dim,
+                rotary_dim=self.rotary_emb.rotary_dim,
+                eps=self.q_norm.variance_epsilon,
+                is_neox=self.rotary_emb.is_neox_style,
+            )
+            if result is not None:
+                q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+                return q, k, v
+
+        # Standard path: separate QKNorm then RoPE
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = apply_qk_norm(
             q=q,

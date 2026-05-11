@@ -27,6 +27,7 @@ KVCache actually holds the physical kv cache.
 import abc
 import dataclasses
 import logging
+import os
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
@@ -4089,7 +4090,82 @@ class MHATokenToKVPoolMixed(MHATokenToKVPool):
         self._mixed_tq_bits = tq_bit_width
         self._mixed_rq_method = rq_method
         self._mixed_rq_bits = rq_bit_width
+
+        # AutoQuant: lookup a saved per-layer policy on disk if enabled.
+        # Activate with: SGLANG_AUTOQUANT=1 (or =observe to also collect stats).
+        # Backward compatible: when no policy exists OR the env var is unset,
+        # we behave exactly like the static mixed pool above.
+        self._autoquant_policy = None
+        self._autoquant_observer = None
+        self._autoquant_mode = os.environ.get("SGLANG_AUTOQUANT", "").lower()
+
         super().__init__(*args, **kwargs)
+
+        if self._autoquant_mode in ("1", "true", "on", "observe", "apply"):
+            self._init_autoquant()
+
+    def _init_autoquant(self) -> None:
+        """Best-effort AutoQuant init: load policy from shelf, attach observer.
+
+        Never raises — failures degrade to stock mixed-pool behaviour.
+        """
+        try:
+            from sglang.srt.layers.quantization.autoquant import (
+                detect_fingerprint,
+                load_policy,
+            )
+            from sglang.srt.layers.quantization.autoquant.observer import (
+                TensorStatsObserver,
+            )
+
+            model_family = os.environ.get(
+                "SGLANG_AUTOQUANT_MODEL",
+                f"mha-h{self.head_num}-d{self.head_dim}-l{self.layer_num}",
+            )
+            fp = detect_fingerprint(
+                model_family=model_family,
+                n_layers=self.layer_num,
+                head_dim=self.head_dim,
+                n_heads=self.head_num,
+                n_kv_heads=self.head_num,
+                dtype_mode=str(self.dtype).replace("torch.", ""),
+            )
+            policy = load_policy(fp)
+            if policy is not None:
+                self._autoquant_policy = policy
+                hist = policy.codec_histogram()
+                logger.info(
+                    "AutoQuant: applying policy %s (uniform=%s, hist=%s). "
+                    "NOTE: per-layer dispatch is a planned follow-up; this "
+                    "build only loads + reports the policy. Static codec "
+                    "(K=TQ%d, V=RQ%d_%s) remains in effect.",
+                    fp.hex_digest, policy.is_uniform(), hist,
+                    self._mixed_tq_bits, self._mixed_rq_bits,
+                    self._mixed_rq_method,
+                )
+            else:
+                logger.info(
+                    "AutoQuant: no saved policy for %s; running stock mixed "
+                    "(K=TQ%d, V=RQ%d_%s).",
+                    fp.hex_digest, self._mixed_tq_bits, self._mixed_rq_bits,
+                    self._mixed_rq_method,
+                )
+
+            if self._autoquant_mode == "observe":
+                self._autoquant_observer = TensorStatsObserver(
+                    n_layers=self.layer_num,
+                    sample_every=int(os.environ.get("SGLANG_AUTOQUANT_SAMPLE_EVERY", "64")),
+                    enabled=True,
+                )
+                logger.info(
+                    "AutoQuant: observer enabled (sample_every=%d). Dump with "
+                    "pool._autoquant_observer.dump_json(path).",
+                    self._autoquant_observer.sample_every,
+                )
+        except Exception as e:  # never poison init
+            logger.warning("AutoQuant: init failed (%s); falling back to stock mixed pool.", e)
+            self._autoquant_policy = None
+            self._autoquant_observer = None
 
     # ------------------------------------------------------------------
     # Buffer creation
