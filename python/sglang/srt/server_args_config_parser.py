@@ -13,8 +13,18 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
-class ConfigArgumentMerger:
-    """Handles merging of configuration file arguments with command-line arguments."""
+try:
+    from sglang_router.sglang_router_rs import (
+        ConfigArgumentMerger as _RustConfigArgumentMerger,
+    )
+
+    _RUST_AVAILABLE = True
+except ImportError:
+    _RUST_AVAILABLE = False
+
+
+class _PythonConfigArgumentMerger:
+    """Handles merging of configuration file arguments with command-line arguments (Python fallback)."""
 
     def __init__(
         self,
@@ -131,9 +141,9 @@ class ConfigArgumentMerger:
     def _validate_yaml_file(self, file_path: str) -> None:
         """Validate that the file is a YAML file."""
         path = Path(file_path)
-        if path.suffix.lower() not in [".yaml", ".yml"]:
-            raise ValueError(f"Config file must be YAML format, got: {path.suffix}")
 
+        # We do not enforce the `.yaml` or `.yml` suffix.
+        # This preserves backwards compatibility with existing users relying on unstructured extensions.
         if not path.exists():
             raise ValueError(f"Config file not found: {file_path}")
 
@@ -182,3 +192,51 @@ class ConfigArgumentMerger:
     def _add_scalar_arg(self, args: List[str], key: str, value: Any) -> None:
         """Add scalar argument to the list."""
         args.extend([f"--{key}", str(value)])
+
+
+class ConfigArgumentMerger:
+    """Handles merging of configuration file arguments with command-line arguments."""
+
+    def __init__(
+        self,
+        parser: argparse.ArgumentParser = None,
+        boolean_actions: List[str] = None,
+    ):
+        """Initialize with list of store_true action names."""
+        # NOTE: The current code does not support actions other than "store_true" and "store".
+        if parser is not None:
+            self.store_true_actions = [
+                action.dest
+                for action in parser._actions
+                if isinstance(action, argparse._StoreTrueAction)
+            ]
+            self.unsupported_actions = {
+                a.dest: a.__class__.__name__
+                for a in parser._actions
+                if a.option_strings
+                and not isinstance(a, argparse._StoreTrueAction)
+                and not isinstance(a, argparse._StoreAction)
+                and "--config" not in a.option_strings
+                and "--help" not in a.option_strings
+                and "-h" not in a.option_strings
+            }
+        elif boolean_actions is not None:
+            # Legacy interface for compatibility
+            self.store_true_actions = boolean_actions
+            self.unsupported_actions = {}
+        else:
+            self.store_true_actions = []
+            self.unsupported_actions = {}
+
+        if _RUST_AVAILABLE:
+            self._impl = _RustConfigArgumentMerger(
+                store_true_actions=self.store_true_actions,
+                unsupported_actions=self.unsupported_actions,
+            )
+        else:
+            self._impl = _PythonConfigArgumentMerger(
+                parser=parser, boolean_actions=boolean_actions
+            )
+
+    def merge_config_with_args(self, cli_args: List[str]) -> List[str]:
+        return self._impl.merge_config_with_args(cli_args)

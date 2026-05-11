@@ -22,7 +22,6 @@ from typing import Optional
 import torch
 
 from sglang.srt.managers.schedule_batch import ScheduleBatch
-from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.server_args import ServerArgs
 
@@ -195,7 +194,7 @@ class SaguaroWorker:
         """Hash the last `window` tokens as a cache key."""
         suffix = tokens[-window:] if len(tokens) >= window else tokens
         raw = ",".join(str(t) for t in suffix)
-        return hashlib.md5(raw.encode()).hexdigest()
+        return hashlib.sha256(raw.encode()).hexdigest()
 
     def _try_cache_hit(self, batch: ScheduleBatch) -> Optional[GenerationBatchResult]:
         """Check if we predicted this prefix — log the hit but always return None.
