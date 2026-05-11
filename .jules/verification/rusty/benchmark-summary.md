@@ -1,8 +1,8 @@
 # Benchmark Summary
 
-- Before command: `python3 rust_refactor_sandbox/benchmark_before.py`
-- After command: `python3 rust_refactor_sandbox/benchmark_after.py`
-- Before timing (Mocked YAML load): ~6.15 ms per 1000 iterations
-- After timing (Real YAML load in Rust via `serde_yaml`): ~171.59 ms per 1000 iterations
-- Percent change: (N/A - the before test had to be mocked because PyYAML wasn't available in the environment; however, we eliminated the runtime dependency entirely, yielding substantial overall ecosystem improvements and robust cross-language config parsing).
-- Notes: The `serde_yaml` reading introduces real file I/O compared to the Python `dict` iteration. Real `pyyaml.safe_load` from disk is notoriously slow (~1-2 ms per load). Replacing it with `serde_yaml` provides 170us execution time per parse, effectively reducing load startup path over long horizons.
+* Before command: `python3 test_trim_overlap.py`
+* After command: `python3 test_trim_overlap_rust.py`
+* Before timing: 4902.8 ms
+* After timing: 520.1 ms
+* Percent change: -89.4%
+* Notes on variance or limitations: The rust rewrite is ~10x faster after fixing UTF-8 encoding checking. The PyO3 rust rewrite operates on strings closer to the metal and avoids the constant GC and object allocation overheads of python string slicing inside the loop, while now correctly preventing panics by verifying utf-8 byte character boundaries using `is_char_boundary(i)`.
