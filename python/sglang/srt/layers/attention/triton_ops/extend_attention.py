@@ -23,6 +23,7 @@ import triton.language as tl
 from sglang.srt.layers.attention.triton_ops.prefill_attention import (
     context_attention_fwd,
 )
+from sglang.srt.hardware_backend.rocm.arch_detection import is_rdna2
 from sglang.srt.utils import is_cuda, is_hip
 
 _is_cuda = is_cuda()
@@ -30,6 +31,7 @@ if _is_cuda:
     CUDA_CAPABILITY = torch.cuda.get_device_capability()
 
 _is_hip = is_hip()
+_is_rdna2 = is_rdna2()
 
 
 def _get_block_sizes_for_extend_attention(Lq: int, Lv: int):
@@ -61,12 +63,7 @@ def _get_block_sizes_for_extend_attention(Lq: int, Lv: int):
 
     # Determine BLOCK_M, BLOCK_N, and num_warps based on hardware
     if _is_hip:
-        _gcn_ext = ""
-        try:
-            _gcn_ext = torch.cuda.get_device_properties(0).gcnArchName
-        except Exception:
-            pass
-        if "gfx103" in _gcn_ext:
+        if _is_rdna2:
             # RDNA2 (gfx1030/1031): Wave32, 2 warps = 64 threads = 1 CU sweet spot
             BLOCK_M, BLOCK_N = (64, 64)
             num_warps = 2
@@ -665,12 +662,7 @@ def extend_attention_fwd(
 
     extra_kargs = {}
     if _is_hip:
-        _gcn_ext2 = ""
-        try:
-            _gcn_ext2 = torch.cuda.get_device_properties(0).gcnArchName
-        except Exception:
-            pass
-        if "gfx103" in _gcn_ext2:
+        if _is_rdna2:
             # RDNA2: Wave32, no matrix instructions
             extra_kargs = {"waves_per_eu": 1}
         else:
@@ -1126,12 +1118,7 @@ def extend_attention_fwd_unified(
 
     extra_kargs = {}
     if _is_hip:
-        _gcn_ext3 = ""
-        try:
-            _gcn_ext3 = torch.cuda.get_device_properties(0).gcnArchName
-        except Exception:
-            pass
-        if "gfx103" in _gcn_ext3:
+        if _is_rdna2:
             # RDNA2: Wave32, no matrix instructions
             extra_kargs = {"waves_per_eu": 1}
         else:
