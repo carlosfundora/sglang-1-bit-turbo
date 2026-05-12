@@ -196,3 +196,10 @@ codegen-units = 1
 [profile.dev-opt]
 inherits = "dev"
 opt-level = 1
+
+
+[workspace]
+members = [
+    "smg-file-verifier",
+    "bindings/python"
+]
