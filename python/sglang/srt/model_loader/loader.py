@@ -42,6 +42,11 @@ from sglang.srt.model_loader.remote_instance_weight_loader_utils import (
 )
 from sglang.srt.server_args import get_global_server_args
 
+try:
+    from sglang.sglang_rust_utils import find_files
+except ImportError:
+    find_files = None
+
 # Try to import accelerate (optional dependency)
 try:
     from accelerate import infer_auto_device_map, init_empty_weights
@@ -2472,17 +2477,33 @@ class RemoteModelLoader(BaseModelLoader):
                 r_key = f"{model_name}/keys/rank_{rank}/{key}"
                 client.set(r_key, tensor)
 
-            for root, _, files in os.walk(model_path):
-                for file_name in files:
-                    # ignore hidden files
-                    if file_name.startswith("."):
-                        continue
-                    if os.path.splitext(file_name)[1] in (".json", ".py"):
-                        file_path = os.path.join(root, file_name)
-                        with open(file_path, encoding="utf-8") as file:
-                            file_content = file.read()
-                            f_key = f"{model_name}/files/{file_name}"
-                            client.setstr(f_key, file_content)
+            if find_files is not None:
+                # Use fast Rust-based file walker
+                try:
+                    all_files = find_files(model_path)
+                except Exception as e:
+                    logger.warning(f"Failed to use Rust find_files: {e}. Falling back to os.walk.")
+                    all_files = []
+                    for root, _, files in os.walk(model_path):
+                        for file_name in files:
+                            all_files.append(os.path.join(root, file_name))
+            else:
+                # Fallback to standard os.walk
+                all_files = []
+                for root, _, files in os.walk(model_path):
+                    for file_name in files:
+                        all_files.append(os.path.join(root, file_name))
+
+            for file_path in all_files:
+                file_name = os.path.basename(file_path)
+                # ignore hidden files
+                if file_name.startswith("."):
+                    continue
+                if os.path.splitext(file_name)[1] in (".json", ".py"):
+                    with open(file_path, encoding="utf-8") as file:
+                        file_content = file.read()
+                        f_key = f"{model_name}/files/{file_name}"
+                        client.setstr(f_key, file_content)
 
     def _load_model_from_remote_kv(
         self, model: nn.Module, model_config: ModelConfig, client

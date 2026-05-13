@@ -11,6 +11,7 @@
 - Added: `.jules/reports/research/repo-triangulation-20260426-120000.md`
 - Updated: `.jules/journals/triangulator-forge.md`
 - Updated: `.jules/journals/triangulator-forge.md`
+- Optimized model loader startup by replacing `os.walk` with a fast Rust-based `find_files` utility using the `ignore` crate.
 
 ### Added
 - Support for Qwen 0.6B Embedding and Jina embedding models.
