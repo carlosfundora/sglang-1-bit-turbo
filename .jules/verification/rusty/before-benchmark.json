@@ -1,10 +1,9 @@
 {
   "candidate": "python/sglang/srt/parser/reasoning_parser.py",
   "implementation": "before",
-  "command": "python3 .jules/verification/rusty/bench_reasoning_parser.py",
-  "timestamp": "2026-05-13T00:58:55Z",
-  "iterations": 1000,
-  "input_description": "Streaming text of length 11618 in chunks of size 8",
-  "duration_ms": 2944.3039894104004,
-  "throughput": "3945924.08 chars/sec"
+  "command": "python3 test_parse_reasoning_benchmark.py",
+  "timestamp": "2023-10-27T00:00:00Z",
+  "iterations": 150000,
+  "input_description": "Streaming chunks simulating DeepSeek-R1 output with <think> tags",
+  "duration_ms": 288.1640659999789
 }
