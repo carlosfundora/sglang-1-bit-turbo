@@ -1,4 +1,13 @@
 {
+  "candidate": "python/sglang/srt/utils/model_file_verifier.py",
+  "implementation": "before",
+  "command": "python run_benchmark.py",
+  "timestamp": "2026-05-11T01:45:22",
+  "iterations": 1,
+  "input_description": "250MB dummy model files",
+  "duration_ms": 1180,
+  "throughput": "211.86 MB/s",
+  "notes": "Python implementation with ThreadPoolExecutor"
   "candidate": "python/sglang/srt/parser/reasoning_parser.py",
   "implementation": "before",
   "command": "python3 .jules/verification/rusty/bench_reasoning_parser.py",

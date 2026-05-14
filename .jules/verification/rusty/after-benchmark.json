@@ -1,4 +1,14 @@
 {
+  "candidate": "python/sglang/srt/utils/model_file_verifier.py",
+  "implementation": "after",
+  "command": "python run_benchmark_after.py",
+  "timestamp": "2026-05-11T01:44:33",
+  "iterations": 1,
+  "input_description": "250MB dummy model files",
+  "duration_ms": 1176,
+  "throughput": "212.59 MB/s",
+  "notes": "Rust implementation with Rayon"
+}
   "candidate": "python/sglang/srt/parser/harmony_parser.py",
   "implementation": "after",
   "command": "python3 bench_after.py",

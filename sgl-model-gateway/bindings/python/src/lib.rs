@@ -1015,6 +1015,7 @@ fn get_available_tool_call_parsers() -> Vec<String> {
 
 #[pymodule]
 fn sglang_router_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    smg_file_verifier::add_functions(m)?;
     m.add_class::<PolicyType>()?;
     m.add_class::<BackendType>()?;
     m.add_class::<HistoryBackendType>()?;

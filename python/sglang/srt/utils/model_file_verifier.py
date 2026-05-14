@@ -20,6 +20,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+def _get_rust_verifier():
+    try:
+        from sglang_router import sglang_router_rs
+        return sglang_router_rs
+    except ImportError:
+        return None
+
+
 # ======== Data Format ========
 
 
@@ -73,6 +81,17 @@ IGNORE_PATTERNS = [
 
 def verify(*, model_path: str, checksums_source: str, max_workers: int = 4) -> None:
     model_path = Path(model_path).resolve()
+
+    rust_verifier = _get_rust_verifier()
+    if rust_verifier is not None:
+        expected = _load_checksums(checksums_source)
+        manifest_json = json.dumps(expected.to_dict())
+        errors = rust_verifier.verify_checksums_py(str(model_path), manifest_json, max_workers)
+        if errors:
+            raise IntegrityError("Integrity check failed: " + "; ".join(errors))
+        print(f"[ModelFileVerifier] All {len(expected.files)} files verified successfully (via Rust).")
+        return
+
     expected = _load_checksums(checksums_source)
     actual = _compute_manifest_from_folder(
         model_path=model_path,
@@ -106,12 +125,20 @@ def generate_checksums(
 ) -> Manifest:
     if Path(source).is_dir():
         model_path = Path(source).resolve()
-        files = _discover_files(model_path)
-        if not files:
-            raise IntegrityError(f"No model files found in {model_path}")
-        manifest = _compute_manifest_from_folder(
-            model_path=model_path, filenames=files, max_workers=max_workers
-        )
+        rust_verifier = _get_rust_verifier()
+        if rust_verifier is not None:
+            manifest_json = rust_verifier.generate_checksums_py(str(model_path), max_workers)
+            manifest_data = json.loads(manifest_json)
+            manifest = Manifest.from_dict(manifest_data)
+            if not manifest.files:
+                raise IntegrityError(f"No model files found in {model_path}")
+        else:
+            files = _discover_files(model_path)
+            if not files:
+                raise IntegrityError(f"No model files found in {model_path}")
+            manifest = _compute_manifest_from_folder(
+                model_path=model_path, filenames=files, max_workers=max_workers
+            )
     else:
         manifest = Manifest(files=_load_file_infos_from_hf(repo_id=source))
 
