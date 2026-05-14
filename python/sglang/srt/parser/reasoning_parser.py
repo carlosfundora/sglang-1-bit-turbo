@@ -3,6 +3,11 @@ from typing import Dict, Optional, Tuple, Type
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 from sglang.srt.parser.harmony_parser import HarmonyParser
 
+try:
+    from sglang.sglang_rust_utils import RustReasoningState
+except ImportError:
+    RustReasoningState = None
+
 
 class StreamingParseResult:
     """Result of streaming incremental parsing."""
@@ -50,6 +55,10 @@ class BaseReasoningFormatDetector:
             self._in_reasoning = True
         if self.think_end_token in self.previous_content:
             self._in_reasoning = False
+
+        self.rust_state = None
+        if RustReasoningState is not None:
+            self.rust_state = RustReasoningState(self._in_reasoning, self.stripped_think_start, self._buffer)
 
     def detect_and_parse(self, text: str) -> StreamingParseResult:
         """
@@ -108,6 +117,26 @@ class BaseReasoningFormatDetector:
         If stream_reasoning is True:
             Streams reasoning content as it arrives
         """
+        if self.rust_state is not None:
+            # Use Rust extension for performance
+            normal_text, reasoning_text = self.rust_state.parse_streaming_increment(
+                new_text,
+                self.think_start_token,
+                self.think_end_token,
+                self.tool_start_token,
+                self.stream_reasoning,
+            )
+            # Sync back internal variables just in case
+            self._buffer = self.rust_state.buffer
+            self._in_reasoning = self.rust_state.in_reasoning
+            self.stripped_think_start = self.rust_state.stripped_think_start
+
+            return StreamingParseResult(
+                normal_text=normal_text,
+                reasoning_text=reasoning_text
+            )
+
+        # Fallback to Python implementation
         self._buffer += new_text
         current_text = self._buffer
 

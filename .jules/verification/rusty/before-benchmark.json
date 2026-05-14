@@ -1,18 +1,9 @@
 {
-  "candidate": "python/sglang/srt/utils/model_file_verifier.py",
-  "implementation": "before",
-  "command": "python run_benchmark.py",
-  "timestamp": "2026-05-11T01:45:22",
-  "iterations": 1,
-  "input_description": "250MB dummy model files",
-  "duration_ms": 1180,
-  "throughput": "211.86 MB/s",
-  "notes": "Python implementation with ThreadPoolExecutor"
   "candidate": "python/sglang/srt/parser/reasoning_parser.py",
   "implementation": "before",
   "command": "python3 test_parse_reasoning_benchmark.py",
   "timestamp": "2023-10-27T00:00:00Z",
   "iterations": 150000,
   "input_description": "Streaming chunks simulating DeepSeek-R1 output with <think> tags",
-  "duration_ms": 288.1640659999789
+  "duration_ms": 283.13960899998847
 }
