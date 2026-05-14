@@ -1,30 +1,9 @@
 {
-  "candidate": "python/sglang/srt/utils/model_file_verifier.py",
+  "candidate": "python/sglang/srt/parser/reasoning_parser.py",
   "implementation": "after",
-  "command": "python run_benchmark_after.py",
-  "timestamp": "2026-05-11T01:44:33",
-  "iterations": 1,
-  "input_description": "250MB dummy model files",
-  "duration_ms": 1176,
-  "throughput": "212.59 MB/s",
-  "notes": "Rust implementation with Rayon"
-}
-  "candidate": "python/sglang/srt/parser/harmony_parser.py",
-  "implementation": "after",
-  "command": "python3 bench_after.py",
-  "timestamp": "2026-05-10T14:15:00+0000",
-  "iterations": 100000,
-  "input_description": "String length 33, 3 tokens array",
-  "duration_ms": 964.29,
-  "throughput": "103702.8 ops/sec",
-  "notes": "rust pyo3 prefix_hold (utf-8 safe)"
-}
-  "candidate": "python/sglang/utils.py:trim_overlap",
-  "implementation": "after",
-  "command": "python3 test_trim_overlap_rust.py",
-  "timestamp": "2023-10-27T12:00:00Z",
-  "iterations": 10000,
-  "input_description": "String overlap text vs suffix overlap text",
-  "duration_ms": 520.1592445373535,
-  "notes": "pure rust tight loop test"
+  "command": "python3 test_parse_reasoning_benchmark.py",
+  "timestamp": "2023-10-27T00:00:00Z",
+  "iterations": 150000,
+  "input_description": "Streaming chunks simulating DeepSeek-R1 output with <think> tags",
+  "duration_ms": 642.4442590000581
 }
