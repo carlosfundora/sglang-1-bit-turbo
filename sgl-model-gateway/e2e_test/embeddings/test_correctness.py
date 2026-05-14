@@ -85,15 +85,11 @@ def get_openai_embeddings(
     if isinstance(texts, str):
         texts = [texts]
 
-    embeddings = []
-    for text in texts:
-        response = client.embeddings.create(
-            model=model,
-            input=text,
-        )
-        embeddings.append(response.data[0].embedding)
-
-    return embeddings
+    response = client.embeddings.create(
+        model=model,
+        input=texts,
+    )
+    return [d.embedding for d in response.data]
 
 
 def get_hf_st_embeddings(texts: str | list[str], model_path: str) -> np.ndarray:

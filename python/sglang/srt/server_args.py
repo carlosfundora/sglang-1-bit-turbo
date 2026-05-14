@@ -2649,6 +2649,14 @@ class ServerArgs:
                         self.attention_backend = defaults["attention_backend"]
                     if not self.disable_cuda_graph:
                         self.cuda_graph_bs = defaults.get("cuda_graph_bs")
+                    if self.mem_fraction_static is None:
+                        self.mem_fraction_static = defaults.get(
+                            "mem_fraction_static"
+                        )
+                    if self.chunked_prefill_size is None:
+                        self.chunked_prefill_size = defaults.get(
+                            "chunked_prefill_size"
+                        )
 
                     # RDNA2 bf16 crash: Triton kernels emit fdot2.bf16.bf16
                     # intrinsic which does not exist on gfx1030. This causes
@@ -5138,7 +5146,7 @@ class ServerArgs:
             choices=[1, 2, 3, 4, 5, 6, 7, 8],
             help="Maximum ghost worker threads for PHANTOM-X adaptive scaling. "
                  "1=single worker (no scaling), 2-8=pool with throughput-based "
-                 "hill-climbing scaler. Default=1.",
+                 "hill-climbing scaler. Default=4.",
         )
 
         # Medusa speculative decoding

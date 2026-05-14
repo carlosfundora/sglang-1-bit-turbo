@@ -4,9 +4,6 @@ import triton.language as tl
 
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import is_cuda, is_hip
-from sglang.srt.hardware_backend.rocm.arch_detection import is_rdna2
-
-_is_rdna2 = is_hip() and is_rdna2()
 
 _is_cuda = is_cuda()
 if _is_cuda:
@@ -1066,10 +1063,7 @@ def extend_attention_fwd(
 
     extra_kargs = {}
     if _is_hip:
-        if _is_rdna2:
-            extra_kargs = {"waves_per_eu": 2}
-        else:
-            extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
+        extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
 
     _fwd_kernel[grid](
         q_extend,

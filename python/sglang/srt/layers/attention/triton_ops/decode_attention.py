@@ -22,15 +22,15 @@ It supports page size = 1.
 
 import logging
 
+import torch
 import triton
 import triton.language as tl
 
-from sglang.srt.utils import is_hip
 from sglang.srt.hardware_backend.rocm.arch_detection import is_rdna2
-
-_is_rdna2 = is_hip() and is_rdna2()
+from sglang.srt.utils import is_hip
 
 _is_hip = is_hip()
+_is_rdna2 = is_rdna2()
 
 logger = logging.getLogger(__name__)
 
@@ -488,7 +488,7 @@ def _decode_grouped_att_m_fwd(
         if _is_rdna2:
             # RDNA2 (gfx1030/1031): Wave32, no matrix instructions
             # num_stages=2 verified +6% faster than 1 on RDNA2 (37.0µs vs 39.4µs)
-            extra_kargs = {"waves_per_eu": 2}
+            extra_kargs = {"waves_per_eu": 1}
             num_stages = 2
         else:
             # CDNA (MI-series): Wave64, matrix instructions available
@@ -627,7 +627,7 @@ def _decode_softmax_reducev_fwd(
     if _is_hip:
         if _is_rdna2:
             # RDNA2 (gfx1030): Wave32, no matrix instructions
-            extra_kargs = {"waves_per_eu": 2}
+            extra_kargs = {"waves_per_eu": 4}
         else:
             extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
 

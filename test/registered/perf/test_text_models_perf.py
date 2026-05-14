@@ -3,6 +3,10 @@ import unittest
 from sglang.test.ci.ci_register import register_cuda_ci
 from sglang.test.nightly_utils import NightlyBenchmarkRunner
 from sglang.test.test_utils import (
+    DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_FP8_TP1,
+    DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_FP8_TP2,
+    DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_TP1,
+    DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_TP2,
     DEFAULT_URL_FOR_TEST,
     ModelLaunchSettings,
     _parse_int_list_env,
@@ -18,15 +22,18 @@ class TestNightlyTextModelsPerformance(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.models = []
-        # TODO: replace with DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_TP1 or other model lists
-        for model_path in parse_models("meta-llama/Llama-3.1-8B-Instruct"):
+        models_tp1 = parse_models(
+            DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_TP1
+        ) + parse_models(DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_FP8_TP1)
+        for model_path in models_tp1:
             cls.models.append(ModelLaunchSettings(model_path, tp_size=1))
-        for model_path in parse_models("Qwen/Qwen2-57B-A14B-Instruct"):
+
+        models_tp2 = parse_models(
+            DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_TP2
+        ) + parse_models(DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_FP8_TP2)
+        for model_path in models_tp2:
             cls.models.append(ModelLaunchSettings(model_path, tp_size=2))
-        # (parse_models(DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_TP1), False, False),
-        # (parse_models(DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_TP2), False, True),
-        # (parse_models(DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_FP8_TP1), True, False),
-        # (parse_models(DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_FP8_TP2), True, True),
+
         cls.base_url = DEFAULT_URL_FOR_TEST
         cls.batch_sizes = [1, 1, 8, 16, 64]
         cls.input_lens = tuple(_parse_int_list_env("NIGHTLY_INPUT_LENS", "4096"))

@@ -8,4 +8,12 @@
   "duration_ms": 1180,
   "throughput": "211.86 MB/s",
   "notes": "Python implementation with ThreadPoolExecutor"
+  "candidate": "python/sglang/srt/parser/reasoning_parser.py",
+  "implementation": "before",
+  "command": "python3 .jules/verification/rusty/bench_reasoning_parser.py",
+  "timestamp": "2026-05-13T00:58:55Z",
+  "iterations": 1000,
+  "input_description": "Streaming text of length 11618 in chunks of size 8",
+  "duration_ms": 2944.3039894104004,
+  "throughput": "3945924.08 chars/sec"
 }
