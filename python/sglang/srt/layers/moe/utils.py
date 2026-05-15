@@ -164,10 +164,18 @@ def initialize_moe_config(server_args: ServerArgs):
     global MOE_QUANTIZATION
 
     MOE_A2A_BACKEND = MoeA2ABackend(server_args.moe_a2a_backend)
-    MOE_RUNNER_BACKEND = MoeRunnerBackend(server_args.moe_runner_backend)
+    moe_backend = server_args.moe_runner_backend
+    speculative_moe_backend = server_args.speculative_moe_runner_backend
+    if moe_backend == "atom":
+        logger.info("Mapping moe_runner_backend=atom to triton.")
+        moe_backend = MoeRunnerBackend.TRITON.value
+    if speculative_moe_backend == "atom":
+        logger.info("Mapping speculative_moe_runner_backend=atom to triton.")
+        speculative_moe_backend = MoeRunnerBackend.TRITON.value
+    MOE_RUNNER_BACKEND = MoeRunnerBackend(moe_backend)
     SPECULATIVE_MOE_RUNNER_BACKEND = (
-        MoeRunnerBackend(server_args.speculative_moe_runner_backend)
-        if server_args.speculative_moe_runner_backend is not None
+        MoeRunnerBackend(speculative_moe_backend)
+        if speculative_moe_backend is not None
         else MOE_RUNNER_BACKEND
     )
     SPECULATIVE_MOE_A2A_BACKEND = (

@@ -154,6 +154,7 @@ ATTENTION_BACKEND_CHOICES = [
     # AMD specific
     "aiter",
     "wave",
+    "atom",
     # Other platforms
     "intel_amx",
     "ascend",
@@ -203,6 +204,7 @@ MOE_RUNNER_BACKEND_CHOICES = [
     "flashinfer_mxfp4",
     "flashinfer_cutedsl",
     "cutlass",
+    "atom",
 ]
 
 MOE_A2A_BACKEND_CHOICES = [
@@ -224,6 +226,7 @@ FP8_GEMM_RUNNER_BACKEND_CHOICES = [
     "cutlass",
     "triton",
     "aiter",
+    "atom",
 ]
 
 FP4_GEMM_RUNNER_BACKEND_CHOICES = [
@@ -802,6 +805,8 @@ class ServerArgs:
         _RQ_SHORTHAND = {"rq3": "rq3_planar", "rq4": "rq4_planar"}
         if self.kv_cache_dtype in _RQ_SHORTHAND:
             self.kv_cache_dtype = _RQ_SHORTHAND[self.kv_cache_dtype]
+        if self.kv_cache_dtype == "atom_fp8":
+            self.kv_cache_dtype = "fp8_e4m3"
 
         # Expand kv_mixed shorthand (TQ K + RQ V mixed compression)
         _MIXED_SHORTHAND = {"kv_mixed": "kv_mixed4", "kv_mixed3": "kv_mixed3"}
@@ -2472,7 +2477,6 @@ class ServerArgs:
                 "or SGLANG_USE_AITER is not enabled. Falling back to triton."
             )
             self.decode_attention_backend = "triton"
-
         if (
             self.prefill_attention_backend == "fa4"
             and not self.use_mla_backend()
@@ -4081,6 +4085,7 @@ class ServerArgs:
                 "auto",
                 "fp8_e5m2",
                 "fp8_e4m3",
+                "atom_fp8",
                 "bf16",
                 "bfloat16",
                 "fp4_e2m1",

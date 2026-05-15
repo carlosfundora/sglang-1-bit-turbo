@@ -68,6 +68,39 @@ def create_wave_backend(runner):
     return WaveAttnBackend(runner)
 
 
+@register_attention_backend("atom")
+def create_atom_backend(runner):
+    from sglang.srt.layers.attention.aiter_backend import AiterAttnBackend
+    from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
+    from sglang.srt.server_args import _is_hip_aiter_available
+
+    if _is_hip_aiter_available():
+        backend = AiterAttnBackend(runner)
+        backend.atom_runtime_profile = {
+            "supports_atom_backend": True,
+            "supports_atom_attention": True,
+            "supports_atom_kv_quant": False,
+            "supports_atom_rocm_telemetry": True,
+            "supports_atom_fallback": True,
+            "delegate_backend": "aiter",
+        }
+        return backend
+
+    logger.warning(
+        "ATOM backend requested but AITER is unavailable; falling back to triton backend."
+    )
+    backend = TritonAttnBackend(runner)
+    backend.atom_runtime_profile = {
+        "supports_atom_backend": True,
+        "supports_atom_attention": True,
+        "supports_atom_kv_quant": False,
+        "supports_atom_rocm_telemetry": True,
+        "supports_atom_fallback": True,
+        "delegate_backend": "triton",
+    }
+    return backend
+
+
 @register_attention_backend("ascend")
 def create_ascend_backend(runner):
     from sglang.srt.hardware_backend.npu.attention.ascend_backend import (
