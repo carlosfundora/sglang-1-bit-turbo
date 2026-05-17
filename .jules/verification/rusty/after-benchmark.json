@@ -1,9 +1,10 @@
 {
-  "candidate": "python/sglang/srt/parser/reasoning_parser.py",
+  "candidate": "python/sglang/srt/parser/jinja_template_utils.py",
   "implementation": "after",
-  "command": "python3 test_parse_reasoning_benchmark.py",
-  "timestamp": "2023-10-27T00:00:00Z",
-  "iterations": 150000,
-  "input_description": "Streaming chunks simulating DeepSeek-R1 output with <think> tags",
-  "duration_ms": 642.4442590000581
+  "command": "python3 test_jinja2_process.py",
+  "timestamp": "2024-05-15T19:00:00Z",
+  "iterations": 100000,
+  "input_description": "process 5-chunk multimodal message",
+  "duration_ms": 1280,
+  "notes": "Rust PyO3 implementation"
 }

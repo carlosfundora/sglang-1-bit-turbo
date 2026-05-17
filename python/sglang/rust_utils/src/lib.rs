@@ -1,4 +1,7 @@
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
+
+// Existing code
 
 #[pyfunction]
 fn trim_overlap(existing_text: &str, new_chunk: &str) -> String {
@@ -160,9 +163,252 @@ impl RustReasoningState {
     }
 }
 
+
+#[pyfunction]
+fn process_content_for_template_format<'py>(
+    py: Python<'py>,
+    msg_dict: &Bound<'py, PyDict>,
+    content_format: &str,
+    image_data: &Bound<'py, PyList>,
+    video_data: &Bound<'py, PyList>,
+    audio_data: &Bound<'py, PyList>,
+    modalities: &Bound<'py, PyList>,
+    use_dpsk_v32_encoding: bool,
+    image_data_cls: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let content_opt = msg_dict.get_item("content")?;
+
+    // If not list, return dict without None values
+    let content_list = match content_opt {
+        Some(c) => {
+            if c.is_instance_of::<PyList>() {
+                c.downcast_into::<PyList>().unwrap()
+            } else {
+                let new_msg = PyDict::new(py);
+                for (k, v) in msg_dict.iter() {
+                    if !v.is_none() {
+                        new_msg.set_item(k, v)?;
+                    }
+                }
+                return Ok(new_msg);
+            }
+        },
+        None => {
+            let new_msg = PyDict::new(py);
+            for (k, v) in msg_dict.iter() {
+                if !v.is_none() {
+                    new_msg.set_item(k, v)?;
+                }
+            }
+            return Ok(new_msg);
+        }
+    };
+
+    if content_format == "openai" || use_dpsk_v32_encoding {
+        let processed_content_parts = PyList::empty(py);
+        let mut text_parts = Vec::new();
+
+        for chunk_item in content_list.iter() {
+            if let Ok(chunk) = chunk_item.downcast_into::<PyDict>() {
+                if let Some(chunk_type_obj) = chunk.get_item("type")? {
+                    if let Ok(chunk_type) = chunk_type_obj.extract::<String>() {
+                        match chunk_type.as_str() {
+                            "image_url" => {
+                                let image_obj = chunk.get_item("image_url")?;
+                                let image_dict = if let Some(obj) = image_obj {
+                                    if obj.is_instance_of::<PyDict>() {
+                                        Some(obj.downcast_into::<PyDict>().unwrap())
+                                    } else {
+                                        None
+                                    }
+                                } else { None };
+
+                                let mut url = String::new();
+                                let mut detail = "auto".to_string();
+                                let mut max_dynamic_patch: Option<Py<PyAny>> = None;
+
+                                if let Some(dict) = image_dict {
+                                    if let Some(u) = dict.get_item("url")? {
+                                        if let Ok(u_str) = u.extract::<String>() {
+                                            url = u_str;
+                                        }
+                                    }
+                                    if let Some(d) = dict.get_item("detail")? {
+                                        if let Ok(d_str) = d.extract::<String>() {
+                                            detail = d_str;
+                                        }
+                                    }
+                                    if let Some(mdp) = dict.get_item("max_dynamic_patch")? {
+                                        max_dynamic_patch = Some(mdp.clone().unbind());
+                                    }
+                                }
+
+                                let kwargs = PyDict::new(py);
+                                kwargs.set_item("url", url)?;
+                                kwargs.set_item("detail", detail)?;
+                                if let Some(mdp) = max_dynamic_patch {
+                                    kwargs.set_item("max_dynamic_patch", mdp)?;
+                                } else {
+                                    kwargs.set_item("max_dynamic_patch", py.None())?;
+                                }
+
+                                let image_data_instance = image_data_cls.call((), Some(&kwargs))?;
+                                image_data.append(image_data_instance)?;
+
+                                if let Some(mod_val) = chunk.get_item("modalities")? {
+                                    modalities.append(mod_val)?;
+                                }
+
+                                let new_part = PyDict::new(py);
+                                new_part.set_item("type", "image")?;
+                                processed_content_parts.append(new_part)?;
+                            },
+                            "video_url" => {
+                                let video_obj = chunk.get_item("video_url")?;
+                                let video_dict = if let Some(obj) = video_obj {
+                                    if obj.is_instance_of::<PyDict>() {
+                                        Some(obj.downcast_into::<PyDict>().unwrap())
+                                    } else {
+                                        None
+                                    }
+                                } else { None };
+
+                                let mut url = String::new();
+                                let mut max_dynamic_patch: Option<Py<PyAny>> = None;
+
+                                if let Some(dict) = video_dict {
+                                    if let Some(u) = dict.get_item("url")? {
+                                        if let Ok(u_str) = u.extract::<String>() {
+                                            url = u_str;
+                                        }
+                                    }
+                                    if let Some(mdp) = dict.get_item("max_dynamic_patch")? {
+                                        max_dynamic_patch = Some(mdp.clone().unbind());
+                                    }
+                                }
+
+                                if let Some(mdp) = max_dynamic_patch {
+                                    let dict_item = PyDict::new(py);
+                                    dict_item.set_item("url", url)?;
+                                    dict_item.set_item("max_dynamic_patch", mdp)?;
+                                    video_data.append(dict_item)?;
+                                } else {
+                                    video_data.append(url)?;
+                                }
+
+                                if let Some(mod_val) = chunk.get_item("modalities")? {
+                                    modalities.append(mod_val)?;
+                                }
+
+                                let new_part = PyDict::new(py);
+                                new_part.set_item("type", "video")?;
+                                processed_content_parts.append(new_part)?;
+                            },
+                            "audio_url" => {
+                                let mut url = String::new();
+                                let audio_obj = chunk.get_item("audio_url")?;
+                                if let Some(obj) = audio_obj {
+                                    if let Ok(dict) = obj.downcast_into::<PyDict>() {
+                                        if let Some(u) = dict.get_item("url")? {
+                                            if let Ok(u_str) = u.extract::<String>() {
+                                                url = u_str;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if !url.is_empty() {
+                                    audio_data.append(url)?;
+                                } else {
+                                    // Mirror python gracefully appending an empty string fallback
+                                    audio_data.append("")?;
+                                }
+
+                                let new_part = PyDict::new(py);
+                                new_part.set_item("type", "audio")?;
+                                processed_content_parts.append(new_part)?;
+                            },
+                            "text" => {
+                                if use_dpsk_v32_encoding {
+                                    if let Some(text_val) = chunk.get_item("text")? {
+                                        if let Ok(text_str) = text_val.extract::<String>() {
+                                            text_parts.push(text_str);
+                                        }
+                                    }
+                                } else {
+                                    processed_content_parts.append(chunk)?;
+                                }
+                            },
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        let new_msg = PyDict::new(py);
+        for (k, v) in msg_dict.iter() {
+            if let Ok(k_str) = k.extract::<String>() {
+                if k_str != "content" && !v.is_none() {
+                    new_msg.set_item(k, v)?;
+                }
+            }
+        }
+
+        if use_dpsk_v32_encoding {
+            if text_parts.is_empty() {
+                new_msg.set_item("content", "")?;
+            } else {
+                new_msg.set_item("content", text_parts.join(" "))?;
+            }
+        } else {
+            new_msg.set_item("content", processed_content_parts)?;
+        }
+
+        return Ok(new_msg);
+
+    } else if content_format == "string" {
+        let mut text_parts = Vec::new();
+
+        for chunk_item in content_list.iter() {
+            if let Ok(chunk) = chunk_item.downcast_into::<PyDict>() {
+                if let Some(chunk_type_obj) = chunk.get_item("type")? {
+                    if let Ok(chunk_type) = chunk_type_obj.extract::<String>() {
+                        if chunk_type == "text" {
+                            if let Some(text_val) = chunk.get_item("text")? {
+                                if let Ok(text_str) = text_val.extract::<String>() {
+                                    text_parts.push(text_str);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let new_msg = PyDict::new(py);
+        for (k, v) in msg_dict.iter() {
+            if !v.is_none() {
+                new_msg.set_item(k, v)?;
+            }
+        }
+
+        if text_parts.is_empty() {
+            new_msg.set_item("content", "")?;
+        } else {
+            new_msg.set_item("content", text_parts.join(" "))?;
+        }
+
+        return Ok(new_msg);
+    }
+
+    Err(pyo3::exceptions::PyValueError::new_err(format!("Invalid content format: {}", content_format)))
+}
+
 #[pymodule]
 fn sglang_rust_utils(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(trim_overlap, m)?)?;
     m.add_class::<RustReasoningState>()?;
+    m.add_function(wrap_pyfunction!(process_content_for_template_format, m)?)?;
     Ok(())
 }
