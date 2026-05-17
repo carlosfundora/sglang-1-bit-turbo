@@ -80,3 +80,30 @@ def test_materialize_rejects_model_layer_mismatch():
     broker.compress_and_store(block_id, kv, metadata={"importance": 1.0})
     with pytest.raises(ValueError):
         broker.materialize_for_model("lfm2.5", layer=0, block_id=block_id)
+
+
+def test_hot_materialization_uses_header_quant_scale():
+    UniversalKVBroker = _load_broker_cls()
+    broker = UniversalKVBroker(gpu_capacity_mb=64, ram_capacity_mb=64)
+    kv = torch.randn(8, 32)
+    block_id = broker.allocate("qwen3.5", layer=0, seq_len=8)
+    broker.compress_and_store(
+        block_id,
+        kv,
+        metadata={"importance": 1.0, "bit_width": 8, "scale": 999.0},
+    )
+    record = broker.records[block_id]
+    expected_scale = float(kv.abs().max().clamp(min=1e-8))
+    assert record.header.scale == pytest.approx(expected_scale, rel=1e-5)
+
+    materialized = broker.materialize_for_model("qwen3.5", layer=0, block_id=block_id)
+    assert torch.allclose(materialized, kv, atol=0.05, rtol=0.05)
+
+
+def test_rejects_invalid_bit_width():
+    UniversalKVBroker = _load_broker_cls()
+    broker = UniversalKVBroker(gpu_capacity_mb=64, ram_capacity_mb=64)
+    kv = torch.randn(8, 32)
+    block_id = broker.allocate("qwen3.5", layer=0, seq_len=8)
+    with pytest.raises(ValueError):
+        broker.compress_and_store(block_id, kv, metadata={"importance": 1.0, "bit_width": 0})

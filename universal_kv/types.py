@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import math
 import struct
 
 
@@ -23,6 +24,20 @@ class UniversalKVBlockHeader:
 
     _PACK_FMT = "<BBBB?f"
     _PACK_SIZE = struct.calcsize(_PACK_FMT)
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.block_size <= 255:
+            raise ValueError(f"block_size must be in [1, 255], got {self.block_size}")
+        if not 1 <= self.bit_width <= 8:
+            raise ValueError(f"bit_width must be in [1, 8], got {self.bit_width}")
+        if not 0 <= self.rotor_id <= 255:
+            raise ValueError(f"rotor_id must be in [0, 255], got {self.rotor_id}")
+        if not 0 <= self.origin_model_tag <= 255:
+            raise ValueError(
+                f"origin_model_tag must be in [0, 255], got {self.origin_model_tag}"
+            )
+        if not math.isfinite(self.scale) or self.scale <= 0:
+            raise ValueError(f"scale must be a positive finite float, got {self.scale}")
 
     def to_bytes(self) -> bytes:
         return struct.pack(

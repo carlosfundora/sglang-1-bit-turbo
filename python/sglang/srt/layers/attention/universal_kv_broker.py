@@ -77,13 +77,14 @@ class UniversalKVBroker:
         importance = float(metadata.get("importance", 1.0))
         preferred_hot = importance >= self.hot_importance_threshold
         bit_width = int(metadata.get("bit_width", 3))
+        if bit_width < 1 or bit_width > 8:
+            raise ValueError(f"UniversalKVBroker bit_width must be in [1, 8], got {bit_width}")
         block_size = int(metadata.get("block_size", 16))
         rotor_id = int(metadata.get("rotor_id", 0))
         model_tag = int(metadata.get("origin_model_tag", 0))
-        scale = float(metadata.get("scale", 1.0))
         self._tick += 1
 
-        compressed_hot = self._compress_rotor_hot(kv_tensor, bit_width=bit_width)
+        compressed_hot, rotor_scale = self._compress_rotor_hot(kv_tensor, bit_width=bit_width)
         residual_warm = self._compress_turbo_residual(kv_tensor) if not preferred_hot else None
         size_hot_bytes = self._tensor_nbytes(compressed_hot)
 
@@ -94,7 +95,7 @@ class UniversalKVBroker:
                 rotor_id=rotor_id,
                 origin_model_tag=model_tag,
                 turbo_residual_flag=not preferred_hot,
-                scale=scale,
+                scale=rotor_scale,
             ),
             compressed_hot=compressed_hot,
             residual_warm=residual_warm,
@@ -104,7 +105,12 @@ class UniversalKVBroker:
             importance=importance,
             last_access_tick=self._tick,
             spill_key=None,
-            metadata={"model_id": handle.model_id, "layer": handle.layer, **metadata},
+            metadata={
+                "model_id": handle.model_id,
+                "layer": handle.layer,
+                "rotor_scale": rotor_scale,
+                **metadata,
+            },
         )
         self.records[block_id] = record
 
@@ -130,7 +136,7 @@ class UniversalKVBroker:
         if compressed_hot is None:
             raise RuntimeError(f"Universal KV block {block_id} has no compressed payload")
 
-        x = self._decompress_rotor_hot(compressed_hot)
+        x = self._decompress_rotor_hot(compressed_hot, record.header)
         residual_warm = payload["residual_warm"]
         if residual_warm is not None:
             x = x + self._decompress_turbo_residual(residual_warm)
@@ -158,16 +164,20 @@ class UniversalKVBroker:
             "evicted_blocks": self._evicted_blocks,
         }
 
-    def _compress_rotor_hot(self, kv_tensor: torch.Tensor, bit_width: int) -> torch.Tensor:
-        scale = kv_tensor.abs().max().clamp(min=1e-8)
+    def _compress_rotor_hot(self, kv_tensor: torch.Tensor, bit_width: int) -> tuple[torch.Tensor, float]:
+        scale = float(kv_tensor.abs().max().clamp(min=1e-8).item())
         normalized = (kv_tensor / scale).clamp(-1, 1)
         levels = (1 << bit_width) - 1
         q = torch.round((normalized + 1.0) * 0.5 * levels).to(torch.uint8)
-        return q
+        return q, scale
 
-    def _decompress_rotor_hot(self, code: torch.Tensor) -> torch.Tensor:
-        # Skeleton decode path; exact scale/rotation restoration comes in kernel tranche.
-        return code.to(torch.float32)
+    def _decompress_rotor_hot(
+        self, code: torch.Tensor, header: UniversalKVBlockHeader
+    ) -> torch.Tensor:
+        levels = (1 << header.bit_width) - 1
+        normalized = code.to(torch.float32) / levels
+        normalized = normalized * 2.0 - 1.0
+        return normalized * header.scale
 
     def _compress_turbo_residual(self, kv_tensor: torch.Tensor) -> torch.Tensor:
         return torch.sign(kv_tensor).to(torch.int8)
