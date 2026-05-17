@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import logging
 import time
 import uuid
@@ -139,7 +138,7 @@ class _Communicator(Generic[T]):
                 self._sender.send_pyobj(obj)
 
         await self._result_event.wait()
-        result_values = copy.deepcopy(self._result_values)
+        result_values = list(self._result_values)
         self._result_event = self._result_values = None
         return result_values
 

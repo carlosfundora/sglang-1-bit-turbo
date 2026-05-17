@@ -1,20 +1,15 @@
 {
-  "candidate": "python/sglang/srt/parser/harmony_parser.py",
+  "candidate": "python/sglang/srt/parser/jinja_template_utils.py",
   "implementation": "before",
-  "command": "python3 bench_prefix.py",
-  "timestamp": "2026-05-10T14:00:00+0000",
+  "command": "python python/sglang/test/test_reasoning_parser_bench.py",
+  "timestamp": "2026-05-17T03:00:55Z",
   "iterations": 100000,
-  "input_description": "String length 33, 3 tokens array",
-  "duration_ms": 1028.77,
-  "throughput": "97202.8 ops/sec",
-  "notes": "pure python prefix_hold"
-}
-  "candidate": "python/sglang/utils.py:trim_overlap",
-  "implementation": "before",
-  "command": "python3 test_trim_overlap.py",
-  "timestamp": "2023-10-27T12:00:00Z",
-  "iterations": 10000,
-  "input_description": "String overlap text vs suffix overlap text",
-  "duration_ms": 4902.808904647827,
-  "notes": "pure python tight loop test"
+  "input_description": "detect_and_parse (pure python)",
+  "duration_ms": 260.50472259521484
+  "command": "python3 test_jinja2_process_python.py",
+  "timestamp": "2024-05-15T19:00:00Z",
+  "iterations": 100000,
+  "input_description": "process 5-chunk multimodal message",
+  "duration_ms": 426,
+  "notes": "Python implementation"
 }

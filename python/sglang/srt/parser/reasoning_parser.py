@@ -3,6 +3,11 @@ from typing import Dict, Optional, Tuple, Type
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 from sglang.srt.parser.harmony_parser import HarmonyParser
 
+try:
+    from sglang.sglang_rust_utils import RustReasoningState
+except ImportError:
+    RustReasoningState = None
+
 
 class StreamingParseResult:
     """Result of streaming incremental parsing."""
@@ -51,18 +56,35 @@ class BaseReasoningFormatDetector:
         if self.think_end_token in self.previous_content:
             self._in_reasoning = False
 
+        self.rust_state = None
+        if RustReasoningState is not None:
+            self.rust_state = RustReasoningState(self._in_reasoning, self.stripped_think_start, self._buffer)
+
     def detect_and_parse(self, text: str) -> StreamingParseResult:
         """
         One-time parsing: Detects and parses reasoning sections in the provided text.
         Returns both reasoning content and normal text separately.
         """
+        if self.rust_state is not None:
+            normal_text, reasoning_text = self.rust_state.detect_and_parse(
+                text,
+                self.think_start_token,
+                self.think_end_token,
+                self.tool_start_token,
+                self.previous_content,
+            )
+            return StreamingParseResult(
+                normal_text=normal_text,
+                reasoning_text=reasoning_text,
+            )
+
         in_reasoning = self._in_reasoning or self.think_start_token in text
 
         if not in_reasoning:
             return StreamingParseResult(normal_text=text)
 
         # The text is considered to be in a reasoning block.
-        processed_text = text.replace(self.think_start_token, "").strip()
+        processed_text = text.replace(self.think_start_token, "", 1).strip()
 
         if (
             self.think_end_token not in processed_text
@@ -108,6 +130,26 @@ class BaseReasoningFormatDetector:
         If stream_reasoning is True:
             Streams reasoning content as it arrives
         """
+        if self.rust_state is not None:
+            # Use Rust extension for performance
+            normal_text, reasoning_text = self.rust_state.parse_streaming_increment(
+                new_text,
+                self.think_start_token,
+                self.think_end_token,
+                self.tool_start_token,
+                self.stream_reasoning,
+            )
+            # Sync back internal variables just in case
+            self._buffer = self.rust_state.buffer
+            self._in_reasoning = self.rust_state.in_reasoning
+            self.stripped_think_start = self.rust_state.stripped_think_start
+
+            return StreamingParseResult(
+                normal_text=normal_text,
+                reasoning_text=reasoning_text
+            )
+
+        # Fallback to Python implementation
         self._buffer += new_text
         current_text = self._buffer
 
