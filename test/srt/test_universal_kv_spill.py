@@ -24,3 +24,18 @@ def test_spill_and_restore_roundtrip():
     y = mgr.restore(key)
     assert y.shape == x.shape
     assert y.device.type == "cpu"
+
+
+def test_spill_nested_payload_and_discard():
+    UniversalKVSpillManager = _load_spill_cls()
+    mgr = UniversalKVSpillManager(pin_memory=False)
+    payload = {
+        "compressed_hot": torch.randint(0, 8, (8, 8), dtype=torch.uint8),
+        "residual_warm": torch.ones(8, 8, dtype=torch.int8),
+    }
+    key = mgr.spill("req-2", payload)
+    restored = mgr.restore(key)
+    assert restored["compressed_hot"].device.type == "cpu"
+    assert restored["residual_warm"].device.type == "cpu"
+    mgr.discard(key)
+    assert key not in mgr.store

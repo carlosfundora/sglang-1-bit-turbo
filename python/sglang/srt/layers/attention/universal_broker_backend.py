@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Optional
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
 from sglang.srt.layers.attention.universal_kv_broker import UniversalKVBroker
+from sglang.srt.mem_cache.universal_kv_spill import UniversalKVSpillManager
 
 if TYPE_CHECKING:
     import torch
@@ -27,13 +28,14 @@ class UniversalBrokerAttnBackend(AttentionBackend):
         self.broker = UniversalKVBroker(
             gpu_capacity_mb=model_runner.server_args.universal_kv_gpu_capacity_mb,
             ram_capacity_mb=model_runner.server_args.universal_kv_ram_capacity_mb,
+            hot_importance_threshold=model_runner.server_args.universal_kv_hot_importance_threshold,
+            spill_manager=UniversalKVSpillManager(pin_memory=True),
         )
         model_tag = int(
             hashlib.sha1(model_runner.server_args.model_path.encode("utf-8")).hexdigest()[:2],
             16,
         )
         self._model_tag = model_tag
-        self._hot_threshold = model_runner.server_args.universal_kv_hot_importance_threshold
         self._block_size = model_runner.server_args.universal_kv_block_size
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
@@ -106,7 +108,7 @@ class UniversalBrokerAttnBackend(AttentionBackend):
         forward_batch: ForwardBatch,
         save_kv_cache: bool = True,
     ):
-        self._record_block(k, layer=layer, importance=max(1.0, self._hot_threshold))
+        self._record_block(k, layer=layer, importance=1.0)
         return self.triton.forward_decode(
             q, k, v, layer, forward_batch, save_kv_cache=save_kv_cache
         )
@@ -120,7 +122,7 @@ class UniversalBrokerAttnBackend(AttentionBackend):
         forward_batch: ForwardBatch,
         save_kv_cache: bool = True,
     ):
-        self._record_block(k, layer=layer, importance=max(0.8, self._hot_threshold))
+        self._record_block(k, layer=layer, importance=0.8)
         return self.triton.forward_extend(
             q, k, v, layer, forward_batch, save_kv_cache=save_kv_cache
         )
@@ -134,7 +136,7 @@ class UniversalBrokerAttnBackend(AttentionBackend):
         forward_batch: ForwardBatch,
         save_kv_cache: bool = True,
     ):
-        self._record_block(k, layer=layer, importance=max(0.9, self._hot_threshold))
+        self._record_block(k, layer=layer, importance=0.9)
         return self.triton.forward_mixed(
             q, k, v, layer, forward_batch, save_kv_cache=save_kv_cache
         )

@@ -39,3 +39,16 @@ This happened because `git reset HEAD .jules/` removes the files from the index 
 
 **Action:**
 I need to definitively purge the `.jules/` files from the *branch history* (or the last commit) so they don't show up in the `origin/main...HEAD` diff. I will use `git rm --cached -r .jules/` and amend the commit, ensuring they are ignored.
+
+## 2026-05-17 - Universal Broker Capacity Tiering and Spill Hardening
+**What changed:**
+1. Upgraded `UniversalKVBroker` to enforce explicit GPU and RAM budgets with active hot-to-warm demotion and warm-tier eviction.
+2. Added tier metrics (`gpu_used_bytes`, `ram_used_bytes`, capacities, hot/warm block counts, spilled/evicted block counters) so runtime can reason about broker pressure.
+3. Added spill payload support for structured broker records (`compressed_hot` + optional residual) and explicit spill-key discard handling.
+4. Tightened broker materialization with model/layer ownership validation to avoid cross-model misuse.
+
+**Why this matters on gfx1030:**
+Consumer RDNA2 cards are capacity-constrained, so broker metadata without budget control quickly turns into hidden VRAM pressure. Deterministic demotion/eviction behavior and metrics are mandatory prerequisites before wiring deeper Rust/TurboQuant kernels.
+
+**Remaining risk:**
+Compression/decompression is still scaffold-level in Python tensors; true throughput/latency wins require Rust/HIP fused paths and direct integration with quantized KV kernels.

@@ -10,12 +10,14 @@
 - Added a new `universal_broker` attention backend option that wraps Triton compute while recording hybrid universal KV broker metadata for `rq3_hybrid` and `univ_rq3` cache modes.
 - Expanded `--kv-cache-dtype` choices with universal broker hybrid modes (`rq3_hybrid`, `univ_rq3`).
 - Added `UNIVERSAL_KV` host-tier pool name and a pinned host allocation helper for warm-tier spill plumbing.
+- Hardened `UniversalKVBroker` with GPU/RAM budget-aware hot-to-warm demotion, warm-tier eviction, and broker memory metrics for spill/eviction observability.
 
 ### Documentation
 - Created: `.jules/reports/research/repo-triangulation-20260427-024844.md`
 - Updated: `docs/rdna2_support.md`
 - Added: `.jules/reports/research/repo-triangulation-20260426-120000.md`
 - Updated: `.jules/journals/triangulator-forge.md`
+- Updated: `.jules/journals/rocmancer.md`
 
 ### Added
 - Support for Qwen 0.6B Embedding and Jina embedding models.
