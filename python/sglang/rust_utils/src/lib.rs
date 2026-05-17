@@ -39,6 +39,50 @@ impl RustReasoningState {
         }
     }
 
+    fn detect_and_parse(
+        &mut self,
+        text: &str,
+        think_start_token: &str,
+        think_end_token: &str,
+        tool_start_token: Option<&str>,
+        previous_content: &str,
+    ) -> PyResult<(Option<String>, Option<String>)> {
+        let in_reasoning = self.in_reasoning || text.contains(think_start_token);
+
+        if !in_reasoning {
+            return Ok((Some(text.to_string()), None));
+        }
+
+        let processed_text = text.replacen(think_start_token, "", 1);
+        let processed_text = processed_text.trim();
+
+        if !processed_text.contains(think_end_token) && !previous_content.contains(think_end_token)
+        {
+            if in_reasoning {
+                if let Some(tool_token) = tool_start_token {
+                    if processed_text.contains(tool_token) {
+                        if let Some(tool_idx) = processed_text.find(tool_token) {
+                            let reasoning_text = processed_text[..tool_idx].trim().to_string();
+                            let normal_text = processed_text[tool_idx..].to_string();
+                            return Ok((Some(normal_text), Some(reasoning_text)));
+                        }
+                    }
+                }
+            }
+            // Reasoning text was truncated before end token
+            return Ok((None, Some(processed_text.to_string())));
+        }
+
+        if processed_text.contains(think_end_token) {
+            let mut splits = processed_text.splitn(2, think_end_token);
+            let reasoning_text = splits.next().unwrap_or("").to_string();
+            let normal_text = splits.next().unwrap_or("").trim_start().to_string();
+            return Ok((Some(normal_text), Some(reasoning_text)));
+        }
+
+        Ok((Some(processed_text.to_string()), None))
+    }
+
     fn parse_streaming_increment(
         &mut self,
         new_text: &str,
@@ -95,11 +139,17 @@ impl RustReasoningState {
                     if let Some(end_idx) = self.buffer.find(think_end_token) {
                         let reasoning_text = self.buffer[..end_idx].to_string();
                         self.in_reasoning = false;
-                        let after_normal = self.buffer[end_idx + think_end_token.len()..].to_string();
+                        let after_normal =
+                            self.buffer[end_idx + think_end_token.len()..].to_string();
                         self.buffer = "".to_string();
 
-                        let combined_normal = format!("{}{}", ret_normal.unwrap_or_default(), after_normal);
-                        ret_normal = if combined_normal.is_empty() { None } else { Some(combined_normal) };
+                        let combined_normal =
+                            format!("{}{}", ret_normal.unwrap_or_default(), after_normal);
+                        ret_normal = if combined_normal.is_empty() {
+                            None
+                        } else {
+                            Some(combined_normal)
+                        };
                         ret_reasoning = Some(reasoning_text.trim_end().to_string());
                         return Ok((ret_normal, ret_reasoning));
                     }
@@ -125,7 +175,10 @@ impl RustReasoningState {
                 let normal_text = self.buffer[end_idx + think_end_token.len()..].to_string();
                 self.buffer.clear();
 
-                return Ok((Some(normal_text), Some(reasoning_text.trim_end().to_string())));
+                return Ok((
+                    Some(normal_text),
+                    Some(reasoning_text.trim_end().to_string()),
+                ));
             }
         }
 
