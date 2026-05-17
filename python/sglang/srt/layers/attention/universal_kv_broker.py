@@ -70,6 +70,16 @@ class UniversalKVBroker:
         self.handles[block_id] = AllocationHandle(block_id, model_id, layer, seq_len)
         return block_id
 
+    def register_model_shape(
+        self, model_id: str, *, num_layers: int, num_kv_heads: int, head_dim: int
+    ) -> None:
+        self.registry.register(
+            model_id,
+            num_layers=num_layers,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        )
+
     def compress_and_store(
         self, block_id: int, kv_tensor: torch.Tensor, metadata: dict[str, Any]
     ) -> None:
@@ -122,10 +132,16 @@ class UniversalKVBroker:
 
     def materialize_for_model(self, model_id: str, layer: int, block_id: int) -> torch.Tensor:
         handle = self.handles[block_id]
-        if handle.model_id != model_id or handle.layer != layer:
+        if handle.layer != layer:
             raise ValueError(
-                f"Universal KV block {block_id} belongs to ({handle.model_id}, layer {handle.layer}), "
-                f"not ({model_id}, layer {layer})"
+                f"Universal KV block {block_id} belongs to layer {handle.layer}, not layer {layer}"
+            )
+        if handle.model_id != model_id:
+            self._ensure_cross_model_compatibility(
+                source_model_id=handle.model_id,
+                target_model_id=model_id,
+                layer=layer,
+                block_id=block_id,
             )
         record = self.records[block_id]
         self._tick += 1
@@ -141,6 +157,35 @@ class UniversalKVBroker:
         if residual_warm is not None:
             x = x + self._decompress_turbo_residual(residual_warm)
         return x
+
+    def _ensure_cross_model_compatibility(
+        self, source_model_id: str, target_model_id: str, layer: int, block_id: int
+    ) -> None:
+        try:
+            source_shape = self.registry.lookup(source_model_id)
+            target_shape = self.registry.lookup(target_model_id)
+        except KeyError as exc:
+            raise ValueError(
+                f"Universal KV block {block_id} cross-model materialization requires "
+                f"registered shape metadata for both {source_model_id!r} and {target_model_id!r}"
+            ) from exc
+
+        if layer >= source_shape.num_layers or layer >= target_shape.num_layers:
+            raise ValueError(
+                f"Universal KV block {block_id} layer {layer} exceeds registered layer bounds "
+                f"({source_model_id}: {source_shape.num_layers}, {target_model_id}: {target_shape.num_layers})"
+            )
+
+        if (
+            source_shape.num_kv_heads != target_shape.num_kv_heads
+            or source_shape.head_dim != target_shape.head_dim
+        ):
+            raise ValueError(
+                f"Universal KV block {block_id} source model {source_model_id!r} "
+                f"(heads={source_shape.num_kv_heads}, dim={source_shape.head_dim}) is incompatible "
+                f"with target model {target_model_id!r} (heads={target_shape.num_kv_heads}, "
+                f"dim={target_shape.head_dim})"
+            )
 
     def get_record_tier(self, block_id: int) -> TierKind:
         return self.records[block_id].tier

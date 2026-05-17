@@ -79,7 +79,7 @@ def test_materialize_rejects_model_layer_mismatch():
     block_id = broker.allocate("qwen3.5", layer=0, seq_len=8)
     broker.compress_and_store(block_id, kv, metadata={"importance": 1.0})
     with pytest.raises(ValueError):
-        broker.materialize_for_model("lfm2.5", layer=0, block_id=block_id)
+        broker.materialize_for_model("qwen3.5", layer=1, block_id=block_id)
 
 
 def test_hot_materialization_uses_header_quant_scale():
@@ -107,3 +107,38 @@ def test_rejects_invalid_bit_width():
     block_id = broker.allocate("qwen3.5", layer=0, seq_len=8)
     with pytest.raises(ValueError):
         broker.compress_and_store(block_id, kv, metadata={"importance": 1.0, "bit_width": 0})
+
+
+def test_cross_model_materialization_requires_registered_shapes():
+    UniversalKVBroker = _load_broker_cls()
+    broker = UniversalKVBroker(gpu_capacity_mb=64, ram_capacity_mb=64)
+    kv = torch.randn(8, 32)
+    block_id = broker.allocate("qwen3.5", layer=0, seq_len=8)
+    broker.compress_and_store(block_id, kv, metadata={"importance": 1.0})
+    with pytest.raises(ValueError):
+        broker.materialize_for_model("opencoder", layer=0, block_id=block_id)
+
+
+def test_cross_model_materialization_allows_compatible_shapes():
+    UniversalKVBroker = _load_broker_cls()
+    broker = UniversalKVBroker(gpu_capacity_mb=64, ram_capacity_mb=64)
+    broker.register_model_shape("qwen3.5", num_layers=40, num_kv_heads=8, head_dim=128)
+    broker.register_model_shape("opencoder", num_layers=48, num_kv_heads=8, head_dim=128)
+    kv = torch.randn(8, 32)
+    block_id = broker.allocate("qwen3.5", layer=3, seq_len=8)
+    broker.compress_and_store(block_id, kv, metadata={"importance": 1.0, "bit_width": 8})
+    materialized = broker.materialize_for_model("opencoder", layer=3, block_id=block_id)
+    assert materialized.shape == kv.shape
+    assert torch.allclose(materialized, kv, atol=0.05, rtol=0.05)
+
+
+def test_cross_model_materialization_rejects_incompatible_shapes():
+    UniversalKVBroker = _load_broker_cls()
+    broker = UniversalKVBroker(gpu_capacity_mb=64, ram_capacity_mb=64)
+    broker.register_model_shape("qwen3.5", num_layers=40, num_kv_heads=8, head_dim=128)
+    broker.register_model_shape("lfm2.5", num_layers=36, num_kv_heads=8, head_dim=64)
+    kv = torch.randn(8, 32)
+    block_id = broker.allocate("qwen3.5", layer=2, seq_len=8)
+    broker.compress_and_store(block_id, kv, metadata={"importance": 1.0})
+    with pytest.raises(ValueError):
+        broker.materialize_for_model("lfm2.5", layer=2, block_id=block_id)
