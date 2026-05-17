@@ -1,9 +1,9 @@
 {
   "candidate": "python/sglang/srt/parser/reasoning_parser.py",
   "implementation": "after",
-  "command": "python3 test_parse_reasoning_benchmark.py",
-  "timestamp": "2023-10-27T00:00:00Z",
-  "iterations": 150000,
-  "input_description": "Streaming chunks simulating DeepSeek-R1 output with <think> tags",
-  "duration_ms": 642.4442590000581
+  "command": "python python/sglang/test/test_reasoning_parser_bench.py",
+  "timestamp": "2026-05-17T03:00:55Z",
+  "iterations": 100000,
+  "input_description": "detect_and_parse (pure rust)",
+  "duration_ms": 277.0836353302002
 }
