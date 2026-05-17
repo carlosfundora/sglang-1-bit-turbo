@@ -11,6 +11,12 @@ import transformers.utils.chat_template_utils as hf_chat_utils
 
 from sglang.srt.utils import ImageData
 
+try:
+    from sglang.sglang_rust_utils import process_content_for_template_format as rust_process
+    RUST_UTILS_AVAILABLE = True
+except ImportError:
+    RUST_UTILS_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 # ============================================================================
@@ -144,6 +150,9 @@ def process_content_for_template_format(
     Returns:
         Processed message dictionary
     """
+    if RUST_UTILS_AVAILABLE:
+        return rust_process(msg_dict, content_format, image_data, video_data, audio_data, modalities, use_dpsk_v32_encoding)
+
     if not isinstance(msg_dict.get("content"), list):
         # Already a string or None, no processing needed
         return {k: v for k, v in msg_dict.items() if v is not None}
