@@ -336,6 +336,9 @@ class SamplingBatchInfo:
         return merged_dict
 
     def merge_batch(self, other: "SamplingBatchInfo"):
+        if len(self) == 0:
+            return
+
         self.penalizer_orchestrator.merge(other.penalizer_orchestrator)
 
         # Merge the custom logit processors and custom params lists
