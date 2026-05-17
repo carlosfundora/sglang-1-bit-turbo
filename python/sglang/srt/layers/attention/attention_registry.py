@@ -68,6 +68,15 @@ def create_wave_backend(runner):
     return WaveAttnBackend(runner)
 
 
+@register_attention_backend("universal_broker")
+def create_universal_broker_backend(runner):
+    from sglang.srt.layers.attention.universal_broker_backend import (
+        UniversalBrokerAttnBackend,
+    )
+
+    return UniversalBrokerAttnBackend(runner)
+
+
 @register_attention_backend("ascend")
 def create_ascend_backend(runner):
     from sglang.srt.hardware_backend.npu.attention.ascend_backend import (
