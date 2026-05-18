@@ -53,6 +53,66 @@ from sglang.srt.utils import add_prefix
 logger = logging.getLogger(__name__)
 
 
+def _concat_audio_features_with_preallocation(
+    items: List[MultimodalDataItem], dtype: torch.dtype
+) -> torch.Tensor:
+    """Concatenate item.feature tensors with a single preallocated output buffer."""
+    first_feature = items[0].feature
+    trailing_shape = first_feature.shape[1:]
+    if any(item.feature.shape[1:] != trailing_shape for item in items):
+        # Fall back when feature ranks/shapes differ across items.
+        return torch.cat([item.feature for item in items], dim=0).to(dtype=dtype)
+
+    total_rows = sum(int(item.feature.shape[0]) for item in items)
+    output = first_feature.new_empty(
+        (total_rows, *trailing_shape), dtype=dtype, device=first_feature.device
+    )
+
+    offset = 0
+    for item in items:
+        feature = item.feature
+        rows = int(feature.shape[0])
+        output[offset : offset + rows].copy_(feature.to(dtype=dtype))
+        offset += rows
+    return output
+
+
+def _concat_audio_feature_lens_with_preallocation(
+    items: List[MultimodalDataItem],
+) -> torch.Tensor:
+    """Concatenate item.audio_feature_lens with one preallocated vector."""
+    first_lens = items[0].audio_feature_lens
+    total = sum(int(item.audio_feature_lens.numel()) for item in items)
+    output = first_lens.new_empty((total,), dtype=first_lens.dtype, device=first_lens.device)
+
+    offset = 0
+    for item in items:
+        lens = item.audio_feature_lens.reshape(-1)
+        n = int(lens.numel())
+        output[offset : offset + n].copy_(lens)
+        offset += n
+    return output
+
+
+def _flatten_projected_audio_embeds_with_preallocation(
+    audio_embeds: torch.Tensor, audio_feature_lens: torch.Tensor
+) -> torch.Tensor:
+    """Pack variable-length projected audio embeddings into one contiguous tensor."""
+    hidden_size = int(audio_embeds.shape[-1])
+    total_tokens = int(audio_feature_lens.sum().item())
+    output = audio_embeds.new_empty((total_tokens, hidden_size))
+
+    offset = 0
+    for feature_len, embed in zip(audio_feature_lens, audio_embeds):
+        token_count = int(feature_len.item())
+        if token_count <= 0:
+            continue
+        end = offset + token_count
+        output[offset:end].copy_(embed[:token_count])
+        offset = end
+    return output[:offset]
+
+
 class Qwen2AudioForConditionalGeneration(nn.Module):
     # BitandBytes specific attributes
     default_bitsandbytes_target_modules = [
@@ -104,20 +164,17 @@ class Qwen2AudioForConditionalGeneration(nn.Module):
         return self.pattern.pad_input_tokens(input_ids, mm_inputs)
 
     def get_audio_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
-        # Extract audio features from input items
-        input_features = torch.cat([item.feature for item in items], dim=0).type(
-            self.audio_tower.dtype
+        input_features = _concat_audio_features_with_preallocation(
+            items, self.audio_tower.dtype
         )
 
         audio_embeds = self.audio_tower(input_features).last_hidden_state
         audio_embeds = self.multi_modal_projector(audio_embeds)
 
-        audio_feature_lens = torch.cat([item.audio_feature_lens for item in items])
-        new_embeds = []
-        for i, d in zip(audio_feature_lens, audio_embeds):
-            new_embeds.append(d[: i.item()])
-
-        return torch.cat(new_embeds, dim=0)
+        audio_feature_lens = _concat_audio_feature_lens_with_preallocation(items)
+        return _flatten_projected_audio_embeds_with_preallocation(
+            audio_embeds, audio_feature_lens
+        )
 
     def forward(
         self,

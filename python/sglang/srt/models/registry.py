@@ -112,15 +112,27 @@ def import_model_classes(package_name: str, strict: bool = False):
                     entry, list
                 ):  # To support multiple model classes in one module
                     for tmp in entry:
-                        assert (
-                            tmp.__name__ not in model_arch_name_to_cls
-                        ), f"Duplicated model implementation for {tmp.__name__}"
-                        model_arch_name_to_cls[tmp.__name__] = tmp
+                        existing = model_arch_name_to_cls.get(tmp.__name__)
+                        if existing is None:
+                            model_arch_name_to_cls[tmp.__name__] = tmp
+                            continue
+                        logger.warning(
+                            "Duplicated model implementation for %s: keeping %s, ignoring %s",
+                            tmp.__name__,
+                            existing.__module__,
+                            tmp.__module__,
+                        )
                 else:
-                    assert (
-                        entry.__name__ not in model_arch_name_to_cls
-                    ), f"Duplicated model implementation for {entry.__name__}"
-                    model_arch_name_to_cls[entry.__name__] = entry
+                    existing = model_arch_name_to_cls.get(entry.__name__)
+                    if existing is None:
+                        model_arch_name_to_cls[entry.__name__] = entry
+                    else:
+                        logger.warning(
+                            "Duplicated model implementation for %s: keeping %s, ignoring %s",
+                            entry.__name__,
+                            existing.__module__,
+                            entry.__module__,
+                        )
 
     return model_arch_name_to_cls
 
