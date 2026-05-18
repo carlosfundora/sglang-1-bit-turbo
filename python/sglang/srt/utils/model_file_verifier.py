@@ -20,6 +20,21 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+try:
+    from sglang.sglang_rust_utils import (
+        find_files as _rust_find_files,
+        sha256_manifest as _rust_sha256_manifest,
+    )
+except Exception:
+    try:
+        from sglang_rust_utils import (
+            find_files as _rust_find_files,
+            sha256_manifest as _rust_sha256_manifest,
+        )
+    except Exception:
+        _rust_find_files = None
+        _rust_sha256_manifest = None
+
 # ======== Data Format ========
 
 
@@ -126,6 +141,28 @@ def generate_checksums(
 
 
 def _discover_files(model_path: Path) -> List[str]:
+    if _rust_find_files is not None:
+        try:
+            base = model_path.resolve()
+            files = []
+            for file_path in _rust_find_files(str(base)):
+                path = Path(file_path)
+                try:
+                    rel = path.resolve().relative_to(base)
+                except ValueError:
+                    continue
+                if len(rel.parts) != 1:
+                    continue
+                name = rel.name
+                if (
+                    not name.startswith(".")
+                    and not any(fnmatch.fnmatch(name, p) for p in IGNORE_PATTERNS)
+                ):
+                    files.append(name)
+            return sorted(files)
+        except Exception:
+            pass
+
     return sorted(
         e.name
         for e in model_path.iterdir()
@@ -190,6 +227,20 @@ def _get_filename_and_info_from_hf_file(
 def _compute_manifest_from_folder(
     *, model_path: Path, filenames: List[str], max_workers: int
 ) -> Manifest:
+    if _rust_sha256_manifest is not None:
+        try:
+            rust_manifest = _rust_sha256_manifest(
+                str(model_path), filenames, max_workers
+            )
+            return Manifest(
+                files={
+                    filename: FileInfo(sha256=info[0], size=info[1])
+                    for filename, info in rust_manifest.items()
+                }
+            )
+        except Exception:
+            pass
+
     from tqdm import tqdm
 
     def compute_one(filename: str) -> Tuple[str, Optional[FileInfo]]:

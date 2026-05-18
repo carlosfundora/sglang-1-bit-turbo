@@ -3,12 +3,22 @@ name = "sglang-rust-utils"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+
 [lib]
 name = "sglang_rust_utils"
 crate-type = ["cdylib"]
 
+[features]
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
+
 [dependencies]
-pyo3 = { version = "0.27.1", features = ["extension-module", "abi3-py38"] }
+pyo3 = { version = "0.27.1", features = ["abi3-py38"] }
+hex = "0.4"
+ignore = "0.4"
+rayon = "1.10"
+sha2 = "0.10"
 
 [profile.release]
 lto = true
