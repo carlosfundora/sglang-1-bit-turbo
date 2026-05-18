@@ -274,3 +274,21 @@ def create_intel_xpu_backend(runner):
     from sglang.srt.layers.attention.xpu_backend import XPUAttentionBackend
 
     return XPUAttentionBackend(runner)
+
+
+@register_attention_backend("atom_hybrid")
+def create_hybrid_atom_backend(runner):
+    """
+    Hybrid AITER + Triton backend for optimal AMD performance.
+    
+    Automatically dispatches between AITER (Wave32-optimized decode) and
+    Triton (flexible prefill) based on batch size, sequence length, and phase.
+    
+    Usage:
+        python3 -m sglang.launch_server \\
+            --model-path=... \\
+            --attention-backend=atom_hybrid
+    """
+    from sglang.srt.layers.attention.hybrid_atom_backend import HybridAITERTritonBackend
+    
+    return HybridAITERTritonBackend(runner)
