@@ -42,6 +42,14 @@ from sglang.srt.model_loader.remote_instance_weight_loader_utils import (
 )
 from sglang.srt.server_args import get_global_server_args
 
+try:
+    from sglang.sglang_rust_utils import find_files as _rust_find_files
+except Exception:
+    try:
+        from sglang_rust_utils import find_files as _rust_find_files
+    except Exception:
+        _rust_find_files = None
+
 # Try to import accelerate (optional dependency)
 try:
     from accelerate import infer_auto_device_map, init_empty_weights
@@ -124,6 +132,27 @@ _is_npu = is_npu()
 # which contains the complete mapping of quantization config choices
 
 logger = logging.getLogger(__name__)
+
+
+def _iter_model_config_files(model_path: str):
+    if _rust_find_files is not None:
+        try:
+            for file_path in _rust_find_files(model_path):
+                file_name = os.path.basename(file_path)
+                if file_name.startswith("."):
+                    continue
+                if os.path.splitext(file_name)[1] in (".json", ".py"):
+                    yield file_path, file_name
+            return
+        except Exception:
+            pass
+
+    for root, _, files in os.walk(model_path):
+        for file_name in files:
+            if file_name.startswith("."):
+                continue
+            if os.path.splitext(file_name)[1] in (".json", ".py"):
+                yield os.path.join(root, file_name), file_name
 
 
 @contextmanager
@@ -2472,17 +2501,11 @@ class RemoteModelLoader(BaseModelLoader):
                 r_key = f"{model_name}/keys/rank_{rank}/{key}"
                 client.set(r_key, tensor)
 
-            for root, _, files in os.walk(model_path):
-                for file_name in files:
-                    # ignore hidden files
-                    if file_name.startswith("."):
-                        continue
-                    if os.path.splitext(file_name)[1] in (".json", ".py"):
-                        file_path = os.path.join(root, file_name)
-                        with open(file_path, encoding="utf-8") as file:
-                            file_content = file.read()
-                            f_key = f"{model_name}/files/{file_name}"
-                            client.setstr(f_key, file_content)
+            for file_path, file_name in _iter_model_config_files(model_path):
+                with open(file_path, encoding="utf-8") as file:
+                    file_content = file.read()
+                    f_key = f"{model_name}/files/{file_name}"
+                    client.setstr(f_key, file_content)
 
     def _load_model_from_remote_kv(
         self, model: nn.Module, model_config: ModelConfig, client
