@@ -58,6 +58,7 @@ class TestLoadBalanceMethod(unittest.TestCase):
 class TestAtomBackendWiring(unittest.TestCase):
     def test_atom_choices_registered(self):
         self.assertIn("atom", ATTENTION_BACKEND_CHOICES)
+        self.assertIn("atom_hybrid", ATTENTION_BACKEND_CHOICES)
         self.assertIn("atom", MOE_RUNNER_BACKEND_CHOICES)
         self.assertIn("atom", FP8_GEMM_RUNNER_BACKEND_CHOICES)
 
@@ -80,6 +81,21 @@ class TestAtomBackendWiring(unittest.TestCase):
         self.assertEqual(server_args.fp8_gemm_runner_backend, "atom")
         self.assertEqual(server_args.moe_runner_backend, "atom")
         self.assertEqual(server_args.kv_cache_dtype, "atom_fp8")
+
+    def test_prepare_server_args_accepts_atom_launch_flags(self):
+        server_args = prepare_server_args(
+            [
+                "--model-path",
+                "dummy",
+                "--attention-backend",
+                "atom_hybrid",
+                "--atom-wave32",
+                "--no-atom-fallback-to-triton",
+            ]
+        )
+        self.assertEqual(server_args.attention_backend, "atom_hybrid")
+        self.assertTrue(server_args.atom_wave32)
+        self.assertFalse(server_args.atom_fallback_to_triton)
 
 
 class TestPortArgs(unittest.TestCase):

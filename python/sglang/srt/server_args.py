@@ -155,6 +155,7 @@ ATTENTION_BACKEND_CHOICES = [
     "aiter",
     "wave",
     "atom",
+    "atom_hybrid",
     # Other platforms
     "intel_amx",
     "ascend",
@@ -488,6 +489,8 @@ class ServerArgs:
     attention_backend: Optional[str] = None
     decode_attention_backend: Optional[str] = None
     prefill_attention_backend: Optional[str] = None
+    atom_wave32: bool = False
+    atom_fallback_to_triton: bool = True
     sampling_backend: Optional[str] = None
     grammar_backend: Optional[str] = None
     mm_attention_backend: Optional[str] = None
@@ -4915,6 +4918,18 @@ class ServerArgs:
             choices=ATTENTION_BACKEND_CHOICES,
             default=ServerArgs.decode_attention_backend,
             help="Choose the kernels for decode attention layers (have priority over --attention-backend).",
+        )
+        parser.add_argument(
+            "--atom-wave32",
+            action=argparse.BooleanOptionalAction,
+            default=ServerArgs.atom_wave32,
+            help="Enable ATOM Wave32-optimized decode routing when ATOM backends are active.",
+        )
+        parser.add_argument(
+            "--atom-fallback-to-triton",
+            action=argparse.BooleanOptionalAction,
+            default=ServerArgs.atom_fallback_to_triton,
+            help="Allow Triton fallback for prefill when ATOM backend is selected.",
         )
         parser.add_argument(
             "--sampling-backend",
