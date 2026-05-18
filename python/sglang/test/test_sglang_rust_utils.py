@@ -83,6 +83,7 @@ class TestSglangRustUtils(unittest.TestCase):
                 hicache_hash,
                 hicache_hash_to_int64,
                 hicache_page_hashes,
+                pack_sampling_params,
                 saguaro_prefix_hash,
                 sha256_manifest,
             )
@@ -93,6 +94,7 @@ class TestSglangRustUtils(unittest.TestCase):
                     hicache_hash,
                     hicache_hash_to_int64,
                     hicache_page_hashes,
+                    pack_sampling_params,
                     saguaro_prefix_hash,
                     sha256_manifest,
                 )
@@ -123,6 +125,38 @@ class TestSglangRustUtils(unittest.TestCase):
                 saguaro_prefix_hash([1, 2, 3], 2),
                 hashlib.sha256(b"2,3").hexdigest(),
             )
+
+            class Params:
+                def __init__(self, temperature, top_p, top_k, min_p, sampling_seed):
+                    self.temperature = temperature
+                    self.top_p = top_p
+                    self.top_k = top_k
+                    self.min_p = min_p
+                    self.sampling_seed = sampling_seed
+
+            class Req:
+                def __init__(self, params, custom_logit_processor=None):
+                    self.sampling_params = params
+                    self.custom_logit_processor = custom_logit_processor
+
+            packed = pack_sampling_params(
+                [
+                    Req(Params(0.0, 1.0, 1, 0.0, None)),
+                    Req(Params(0.7, 0.9, 8, 0.1, 123), "processor"),
+                ],
+                1 << 30,
+                True,
+                True,
+            )
+            self.assertAlmostEqual(packed[0][0], 0.0)
+            self.assertAlmostEqual(packed[0][1], 0.7)
+            self.assertAlmostEqual(packed[1][0], 1.0)
+            self.assertAlmostEqual(packed[1][1], 0.9)
+            self.assertEqual(packed[2], [1, 8])
+            self.assertAlmostEqual(packed[3][0], 0.0)
+            self.assertAlmostEqual(packed[3][1], 0.1)
+            self.assertEqual(packed[4], [42, 123])
+            self.assertEqual(packed[5:], (False, True, True, True, True))
 
 
 if __name__ == "__main__":

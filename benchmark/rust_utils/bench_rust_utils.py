@@ -60,11 +60,47 @@ def _python_saguaro_prefix_hash(tokens: list[int], window: int) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+class _SamplingParams:
+    def __init__(self, i: int):
+        self.temperature = 0.0 if i % 4 == 0 else 0.7
+        self.top_p = 1.0 if i % 3 == 0 else 0.9
+        self.top_k = 1 if i % 5 == 0 else 64
+        self.min_p = 0.0 if i % 7 else 0.05
+        self.sampling_seed = None if i % 2 else i
+
+
+class _Req:
+    def __init__(self, i: int):
+        self.sampling_params = _SamplingParams(i)
+        self.custom_logit_processor = None
+
+
+def _python_pack_sampling_params(reqs: list[_Req], top_k_all: int):
+    return (
+        [r.sampling_params.temperature for r in reqs],
+        [r.sampling_params.top_p for r in reqs],
+        [r.sampling_params.top_k for r in reqs],
+        [r.sampling_params.min_p for r in reqs],
+        [
+            r.sampling_params.sampling_seed
+            if r.sampling_params.sampling_seed is not None
+            else 42
+            for r in reqs
+        ],
+        all(r.sampling_params.top_k <= 1 for r in reqs),
+        any(r.sampling_params.top_p != 1.0 for r in reqs),
+        any(r.sampling_params.top_k != top_k_all for r in reqs),
+        any(r.sampling_params.min_p > 0 for r in reqs),
+        any(r.custom_logit_processor for r in reqs),
+    )
+
+
 def _load_rust_utils():
     try:
         from sglang.sglang_rust_utils import (
             find_files,
             hicache_page_hashes,
+            pack_sampling_params,
             saguaro_prefix_hash,
             sha256_manifest,
             trim_overlap,
@@ -73,11 +109,19 @@ def _load_rust_utils():
         from sglang_rust_utils import (
             find_files,
             hicache_page_hashes,
+            pack_sampling_params,
             saguaro_prefix_hash,
             sha256_manifest,
             trim_overlap,
         )
-    return trim_overlap, find_files, sha256_manifest, hicache_page_hashes, saguaro_prefix_hash
+    return (
+        trim_overlap,
+        find_files,
+        sha256_manifest,
+        hicache_page_hashes,
+        saguaro_prefix_hash,
+        pack_sampling_params,
+    )
 
 
 def _time(label: str, fn, iterations: int = 1):
@@ -103,6 +147,7 @@ def main():
         rust_sha256_manifest,
         rust_hicache_page_hashes,
         rust_saguaro_prefix_hash,
+        rust_pack_sampling_params,
     ) = _load_rust_utils()
 
     existing = "prefix " + ("abc " * 32) + "shared boundary"
@@ -126,6 +171,17 @@ def main():
         "rust saguaro_prefix_hash",
         lambda: rust_saguaro_prefix_hash(tokens, 32),
         100_000,
+    )
+    reqs = [_Req(i) for i in range(512)]
+    _time(
+        "python pack_sampling_params",
+        lambda: _python_pack_sampling_params(reqs, 1 << 30),
+        10_000,
+    )
+    _time(
+        "rust pack_sampling_params",
+        lambda: rust_pack_sampling_params(reqs, 1 << 30, True, True),
+        10_000,
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:

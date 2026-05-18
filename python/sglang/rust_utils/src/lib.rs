@@ -150,6 +150,91 @@ fn saguaro_prefix_hash(tokens: &Bound<'_, PyAny>, window: usize) -> PyResult<Str
 }
 
 #[pyfunction]
+fn pack_sampling_params(
+    reqs: &Bound<'_, PyAny>,
+    top_k_all: i32,
+    enable_deterministic: bool,
+    enable_custom_logit_processor: bool,
+) -> PyResult<(
+    Vec<f32>,
+    Vec<f32>,
+    Vec<i32>,
+    Vec<f32>,
+    Option<Vec<i64>>,
+    bool,
+    bool,
+    bool,
+    bool,
+    bool,
+)> {
+    let iter = reqs
+        .try_iter()
+        .map_err(|_| pyo3::exceptions::PyTypeError::new_err("reqs must be iterable"))?;
+
+    let mut temperatures = Vec::new();
+    let mut top_ps = Vec::new();
+    let mut top_ks = Vec::new();
+    let mut min_ps = Vec::new();
+    let mut sampling_seed = if enable_deterministic {
+        Some(Vec::new())
+    } else {
+        None
+    };
+
+    let mut is_all_greedy = true;
+    let mut need_top_p_sampling = false;
+    let mut need_top_k_sampling = false;
+    let mut need_min_p_sampling = false;
+    let mut has_custom_logit_processor = false;
+
+    for req in iter {
+        let req = req?;
+        let params = req.getattr("sampling_params")?;
+
+        let temperature = params.getattr("temperature")?.extract::<f32>()?;
+        let top_p = params.getattr("top_p")?.extract::<f32>()?;
+        let top_k = params.getattr("top_k")?.extract::<i32>()?;
+        let min_p = params.getattr("min_p")?.extract::<f32>()?;
+
+        temperatures.push(temperature);
+        top_ps.push(top_p);
+        top_ks.push(top_k);
+        min_ps.push(min_p);
+
+        is_all_greedy &= top_k <= 1;
+        need_top_p_sampling |= top_p != 1.0;
+        need_top_k_sampling |= top_k != top_k_all;
+        need_min_p_sampling |= min_p > 0.0;
+
+        if let Some(seeds) = sampling_seed.as_mut() {
+            let seed = params.getattr("sampling_seed")?;
+            if seed.is_none() {
+                seeds.push(42);
+            } else {
+                seeds.push(seed.extract::<i64>()?);
+            }
+        }
+
+        if enable_custom_logit_processor && req.getattr("custom_logit_processor")?.is_truthy()? {
+            has_custom_logit_processor = true;
+        }
+    }
+
+    Ok((
+        temperatures,
+        top_ps,
+        top_ks,
+        min_ps,
+        sampling_seed,
+        is_all_greedy,
+        need_top_p_sampling,
+        need_top_k_sampling,
+        need_min_p_sampling,
+        has_custom_logit_processor,
+    ))
+}
+
+#[pyfunction]
 fn trim_overlap(existing_text: &str, new_chunk: &str) -> String {
     let max_possible = existing_text.len().min(new_chunk.len());
     let mut max_overlap = 0;
@@ -259,6 +344,7 @@ fn sglang_rust_utils(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hicache_page_hashes, m)?)?;
     m.add_function(wrap_pyfunction!(hicache_hash_to_int64, m)?)?;
     m.add_function(wrap_pyfunction!(saguaro_prefix_hash, m)?)?;
+    m.add_function(wrap_pyfunction!(pack_sampling_params, m)?)?;
     Ok(())
 }
 

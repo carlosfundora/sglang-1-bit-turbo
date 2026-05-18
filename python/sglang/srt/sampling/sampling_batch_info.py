@@ -17,6 +17,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+try:
+    from sglang.sglang_rust_utils import pack_sampling_params as _rust_pack_sampling_params
+except Exception:
+    try:
+        from sglang_rust_utils import pack_sampling_params as _rust_pack_sampling_params
+    except Exception:
+        _rust_pack_sampling_params = None
+
 
 @dataclasses.dataclass
 class SamplingBatchInfo:
@@ -73,36 +81,85 @@ class SamplingBatchInfo:
 
         reqs = batch.reqs
         device = batch.device
-        temperatures = torch.tensor(
-            [r.sampling_params.temperature for r in reqs],
-            dtype=torch.float,
-            device=device,
-        ).view(-1, 1)
-        top_ps = torch.tensor(
-            [r.sampling_params.top_p for r in reqs], dtype=torch.float, device=device
-        )
-        top_ks = torch.tensor(
-            [r.sampling_params.top_k for r in reqs], dtype=torch.int32, device=device
-        )
-        min_ps = torch.tensor(
-            [r.sampling_params.min_p for r in reqs], dtype=torch.float, device=device
-        )
-        sampling_seed = (
-            torch.tensor(
-                [
-                    (
-                        r.sampling_params.sampling_seed
-                        if r.sampling_params.sampling_seed is not None
-                        else 42
-                    )
-                    for r in reqs
-                ],
-                dtype=torch.int64,
+        packed_sampling_params = None
+        if str(device) == "cpu" and _rust_pack_sampling_params is not None:
+            try:
+                packed_sampling_params = _rust_pack_sampling_params(
+                    reqs,
+                    TOP_K_ALL,
+                    enable_deterministic,
+                    global_server_args.enable_custom_logit_processor,
+                )
+            except Exception:
+                packed_sampling_params = None
+
+        if packed_sampling_params is not None:
+            (
+                temperature_values,
+                top_p_values,
+                top_k_values,
+                min_p_values,
+                sampling_seed_values,
+                is_all_greedy,
+                need_top_p_sampling,
+                need_top_k_sampling,
+                need_min_p_sampling,
+                has_custom_logit_processor,
+            ) = packed_sampling_params
+            temperatures = torch.tensor(
+                temperature_values, dtype=torch.float, device=device
+            ).view(-1, 1)
+            top_ps = torch.tensor(top_p_values, dtype=torch.float, device=device)
+            top_ks = torch.tensor(top_k_values, dtype=torch.int32, device=device)
+            min_ps = torch.tensor(min_p_values, dtype=torch.float, device=device)
+            sampling_seed = (
+                torch.tensor(sampling_seed_values, dtype=torch.int64, device=device)
+                if sampling_seed_values is not None
+                else None
+            )
+        else:
+            temperatures = torch.tensor(
+                [r.sampling_params.temperature for r in reqs],
+                dtype=torch.float,
+                device=device,
+            ).view(-1, 1)
+            top_ps = torch.tensor(
+                [r.sampling_params.top_p for r in reqs],
+                dtype=torch.float,
                 device=device,
             )
-            if enable_deterministic
-            else None
-        )
+            top_ks = torch.tensor(
+                [r.sampling_params.top_k for r in reqs],
+                dtype=torch.int32,
+                device=device,
+            )
+            min_ps = torch.tensor(
+                [r.sampling_params.min_p for r in reqs], dtype=torch.float, device=device
+            )
+            sampling_seed = (
+                torch.tensor(
+                    [
+                        (
+                            r.sampling_params.sampling_seed
+                            if r.sampling_params.sampling_seed is not None
+                            else 42
+                        )
+                        for r in reqs
+                    ],
+                    dtype=torch.int64,
+                    device=device,
+                )
+                if enable_deterministic
+                else None
+            )
+            has_custom_logit_processor = (
+                global_server_args.enable_custom_logit_processor
+                and any(r.custom_logit_processor for r in reqs)  # check the flag first.
+            )  # then check the requests.
+            is_all_greedy = all(r.sampling_params.top_k <= 1 for r in reqs)
+            need_top_p_sampling = any(r.sampling_params.top_p != 1.0 for r in reqs)
+            need_top_k_sampling = any(r.sampling_params.top_k != TOP_K_ALL for r in reqs)
+            need_min_p_sampling = any(r.sampling_params.min_p > 0 for r in reqs)
 
         logit_bias = None
         if any(r.sampling_params.logit_bias is not None for r in reqs):
@@ -111,12 +168,6 @@ class SamplingBatchInfo:
                 if r.sampling_params.logit_bias is not None:
                     for key, value in r.sampling_params.logit_bias.items():
                         logit_bias[i, int(key)] = value
-
-        # Check if any request has custom logit processor
-        has_custom_logit_processor = (
-            global_server_args.enable_custom_logit_processor
-            and any(r.custom_logit_processor for r in reqs)  # check the flag first.
-        )  # then check the requests.
 
         if has_custom_logit_processor:
             # Merge the same type of custom logit processors together
@@ -168,10 +219,10 @@ class SamplingBatchInfo:
             top_ks=top_ks,
             min_ps=min_ps,
             sampling_seed=sampling_seed,
-            is_all_greedy=all(r.sampling_params.top_k <= 1 for r in reqs),
-            need_top_p_sampling=any(r.sampling_params.top_p != 1.0 for r in reqs),
-            need_top_k_sampling=any(r.sampling_params.top_k != TOP_K_ALL for r in reqs),
-            need_min_p_sampling=any(r.sampling_params.min_p > 0 for r in reqs),
+            is_all_greedy=is_all_greedy,
+            need_top_p_sampling=need_top_p_sampling,
+            need_top_k_sampling=need_top_k_sampling,
+            need_min_p_sampling=need_min_p_sampling,
             vocab_size=vocab_size,
             penalizer_orchestrator=penalizer_orchestrator,
             has_custom_logit_processor=has_custom_logit_processor,
