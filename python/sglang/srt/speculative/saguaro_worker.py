@@ -30,6 +30,14 @@ logger = logging.getLogger(__name__)
 # Minimum acceptance ratio required to trust a cached result on replay.
 _DEFAULT_MIN_ACCEPTANCE = 0.5
 
+try:
+    from sglang.sglang_rust_utils import saguaro_prefix_hash as _rust_prefix_hash
+except Exception:
+    try:
+        from sglang_rust_utils import saguaro_prefix_hash as _rust_prefix_hash
+    except Exception:
+        _rust_prefix_hash = None
+
 
 class _DraftCacheEntry:
     """Cached observation for a single request prefix.
@@ -192,6 +200,12 @@ class SaguaroWorker:
     @staticmethod
     def _prefix_hash(tokens: list, window: int) -> str:
         """Hash the last `window` tokens as a cache key."""
+        if _rust_prefix_hash is not None:
+            try:
+                return _rust_prefix_hash(tokens, window)
+            except Exception:
+                pass
+
         suffix = tokens[-window:] if len(tokens) >= window else tokens
         raw = ",".join(str(t) for t in suffix)
         return hashlib.sha256(raw.encode()).hexdigest()

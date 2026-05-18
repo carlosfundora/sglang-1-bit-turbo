@@ -4,17 +4,43 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, List, Optional, Set
+from typing import TYPE_CHECKING, Any, List, Optional, Set
 
 import torch
 
 from sglang.srt.environ import envs
-from sglang.srt.mem_cache.memory_pool_host import HostKVCache
+
+if TYPE_CHECKING:
+    from sglang.srt.mem_cache.memory_pool_host import HostKVCache
 
 logger = logging.getLogger(__name__)
 
+try:
+    from sglang.sglang_rust_utils import (
+        hicache_hash as _rust_hicache_hash,
+        hicache_hash_to_int64 as _rust_hash_str_to_int64,
+        hicache_page_hashes as _rust_hicache_page_hashes,
+    )
+except Exception:
+    try:
+        from sglang_rust_utils import (
+            hicache_hash as _rust_hicache_hash,
+            hicache_hash_to_int64 as _rust_hash_str_to_int64,
+            hicache_page_hashes as _rust_hicache_page_hashes,
+        )
+    except Exception:
+        _rust_hicache_hash = None
+        _rust_hash_str_to_int64 = None
+        _rust_hicache_page_hashes = None
+
 
 def get_hash_str(token_ids: List[int], prior_hash: str = None) -> str:
+    if _rust_hicache_hash is not None:
+        try:
+            return _rust_hicache_hash(token_ids, prior_hash)
+        except Exception:
+            pass
+
     hasher = hashlib.sha256()
 
     if prior_hash:
@@ -37,12 +63,39 @@ def hash_str_to_int64(hash_str: str) -> int:
 
     Takes first 16 hex characters (64 bits) and converts to signed int64 range.
     """
+    if _rust_hash_str_to_int64 is not None:
+        try:
+            return _rust_hash_str_to_int64(hash_str)
+        except Exception:
+            pass
+
     # Take first 16 hex chars to get 64-bit value
     uint64_val = int(hash_str[:16], 16)
     # Convert to signed int64 range [-2^63, 2^63-1]
     if uint64_val >= 2**63:
         return uint64_val - 2**64
     return uint64_val
+
+
+def get_page_hash_values(
+    token_ids: List[int], page_size: int, prior_hash: str = None
+) -> List[str]:
+    if _rust_hicache_page_hashes is not None:
+        try:
+            return _rust_hicache_page_hashes(token_ids, page_size, prior_hash)
+        except Exception:
+            pass
+
+    hash_values = []
+    parent_hash = prior_hash
+    for start in range(0, len(token_ids), page_size):
+        page_tokens = token_ids[start : start + page_size]
+        if not page_tokens:
+            continue
+        hash_val = get_hash_str(page_tokens, prior_hash=parent_hash)
+        hash_values.append(hash_val)
+        parent_hash = hash_val
+    return hash_values
 
 
 @dataclass
@@ -128,10 +181,10 @@ class HiCacheStorage(ABC):
     """
 
     # todo, the page size of storage backend does not have to be the same as the same as host memory pool
-    def register_mem_pool_host(self, mem_pool_host: HostKVCache):
+    def register_mem_pool_host(self, mem_pool_host: "HostKVCache"):
         self.mem_pool_host = mem_pool_host
 
-    def register_mem_host_pool_v2(self, host_pool: HostKVCache, host_pool_name):
+    def register_mem_host_pool_v2(self, host_pool: "HostKVCache", host_pool_name):
         if not hasattr(self, "registered_pools"):
             self.registered_pools = {}
         self.registered_pools[host_pool_name] = host_pool

@@ -1,10 +1,153 @@
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyAny, PyDict};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
+
+fn update_hash_with_u32(hasher: &mut Sha256, value: u32) {
+    hasher.update(value.to_le_bytes());
+}
+
+fn update_hash_with_token(hasher: &mut Sha256, token: &Bound<'_, PyAny>) -> PyResult<()> {
+    if let Ok(value) = token.extract::<u32>() {
+        update_hash_with_u32(hasher, value);
+        return Ok(());
+    }
+
+    if let Ok(iter) = token.try_iter() {
+        for elem in iter {
+            let value = elem?.extract::<u32>().map_err(|err| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "token tuple/list elements must be unsigned 32-bit integers: {err}"
+                ))
+            })?;
+            update_hash_with_u32(hasher, value);
+        }
+        return Ok(());
+    }
+
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "tokens must be unsigned 32-bit integers or iterable bigram tokens",
+    ))
+}
+
+fn new_chained_hasher(prior_hash: Option<&str>) -> PyResult<Sha256> {
+    let mut hasher = Sha256::new();
+    if let Some(prior_hash) = prior_hash {
+        if !prior_hash.is_empty() {
+            let decoded = hex::decode(prior_hash).map_err(|err| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "prior_hash must be a valid hex SHA256 digest: {err}"
+                ))
+            })?;
+            hasher.update(decoded);
+        }
+    }
+    Ok(hasher)
+}
+
+fn finalize_hash(hasher: Sha256) -> String {
+    hex::encode(hasher.finalize())
+}
+
+fn saguaro_prefix_hash_parts(parts: &[String], window: usize) -> String {
+    let start = if window == 0 || parts.len() < window {
+        0
+    } else {
+        parts.len() - window
+    };
+    let raw = parts[start..].join(",");
+    let mut hasher = Sha256::new();
+    hasher.update(raw.as_bytes());
+    finalize_hash(hasher)
+}
+
+#[pyfunction]
+#[pyo3(signature = (token_ids, prior_hash = None))]
+fn hicache_hash(token_ids: &Bound<'_, PyAny>, prior_hash: Option<&str>) -> PyResult<String> {
+    let mut hasher = new_chained_hasher(prior_hash)?;
+    let iter = token_ids.try_iter().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err("token_ids must be an iterable of tokens")
+    })?;
+    for token in iter {
+        update_hash_with_token(&mut hasher, &token?)?;
+    }
+    Ok(finalize_hash(hasher))
+}
+
+#[pyfunction]
+#[pyo3(signature = (token_ids, page_size, prior_hash = None))]
+fn hicache_page_hashes(
+    token_ids: &Bound<'_, PyAny>,
+    page_size: usize,
+    prior_hash: Option<&str>,
+) -> PyResult<Vec<String>> {
+    if page_size == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "page_size must be greater than zero",
+        ));
+    }
+
+    let iter = token_ids.try_iter().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err("token_ids must be an iterable of tokens")
+    })?;
+    let mut hashes = Vec::new();
+    let mut parent_hash = prior_hash.map(str::to_owned);
+    let mut hasher = new_chained_hasher(parent_hash.as_deref())?;
+    let mut page_tokens = 0_usize;
+
+    for token in iter {
+        update_hash_with_token(&mut hasher, &token?)?;
+        page_tokens += 1;
+        if page_tokens == page_size {
+            let hash = finalize_hash(hasher);
+            parent_hash = Some(hash.clone());
+            hashes.push(hash);
+            hasher = new_chained_hasher(parent_hash.as_deref())?;
+            page_tokens = 0;
+        }
+    }
+
+    if page_tokens > 0 {
+        hashes.push(finalize_hash(hasher));
+    }
+
+    Ok(hashes)
+}
+
+#[pyfunction]
+fn hicache_hash_to_int64(hash_str: &str) -> PyResult<i64> {
+    if hash_str.len() < 16 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "hash_str must contain at least 16 hex characters",
+        ));
+    }
+    let value = u64::from_str_radix(&hash_str[..16], 16).map_err(|err| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "hash_str must start with 16 valid hex characters: {err}"
+        ))
+    })?;
+    Ok(value as i64)
+}
+
+#[pyfunction]
+fn saguaro_prefix_hash(tokens: &Bound<'_, PyAny>, window: usize) -> PyResult<String> {
+    let iter = tokens
+        .try_iter()
+        .map_err(|_| pyo3::exceptions::PyTypeError::new_err("tokens must be an iterable"))?;
+    let mut parts = Vec::new();
+    for token in iter {
+        let token = token?;
+        if let Ok(value) = token.extract::<i64>() {
+            parts.push(value.to_string());
+        } else {
+            parts.push(token.str()?.to_string_lossy().to_string());
+        }
+    }
+    Ok(saguaro_prefix_hash_parts(&parts, window))
+}
 
 #[pyfunction]
 fn trim_overlap(existing_text: &str, new_chunk: &str) -> String {
@@ -112,6 +255,10 @@ fn sglang_rust_utils(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(trim_overlap, m)?)?;
     m.add_function(wrap_pyfunction!(find_files, m)?)?;
     m.add_function(wrap_pyfunction!(sha256_manifest, m)?)?;
+    m.add_function(wrap_pyfunction!(hicache_hash, m)?)?;
+    m.add_function(wrap_pyfunction!(hicache_page_hashes, m)?)?;
+    m.add_function(wrap_pyfunction!(hicache_hash_to_int64, m)?)?;
+    m.add_function(wrap_pyfunction!(saguaro_prefix_hash, m)?)?;
     Ok(())
 }
 
@@ -167,5 +314,28 @@ mod tests {
         assert_eq!(size, 3);
 
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn converts_hash_prefix_to_signed_i64() {
+        assert_eq!(
+            hicache_hash_to_int64("7fffffffffffffff0000").unwrap(),
+            i64::MAX
+        );
+        assert_eq!(
+            hicache_hash_to_int64("80000000000000000000").unwrap(),
+            i64::MIN
+        );
+        assert_eq!(hicache_hash_to_int64("ffffffffffffffff0000").unwrap(), -1);
+    }
+
+    #[test]
+    fn hashes_saguaro_prefix_window() {
+        let parts = vec!["1".to_string(), "2".to_string(), "3".to_string()];
+        let expected = hex::encode(Sha256::digest(b"2,3"));
+        assert_eq!(saguaro_prefix_hash_parts(&parts, 2), expected);
+
+        let expected_all = hex::encode(Sha256::digest(b"1,2,3"));
+        assert_eq!(saguaro_prefix_hash_parts(&parts, 0), expected_all);
     }
 }

@@ -62,7 +62,10 @@ from sglang.srt.mem_cache.evict_policy import (
     PriorityStrategy,
     SLRUStrategy,
 )
-from sglang.srt.mem_cache.hicache_storage import get_hash_str, hash_str_to_int64
+from sglang.srt.mem_cache.hicache_storage import (
+    get_page_hash_values,
+    hash_str_to_int64,
+)
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
@@ -236,8 +239,6 @@ def compute_node_hash_values(node: "TreeNode", page_size: int) -> List[str]:
     Returns:
         List of SHA256 hex strings, one per page
     """
-    hash_values = []
-
     # Get parent's last hash value if parent exists
     parent_hash = None
     if node.parent is not None and node.parent.hash_value is not None:
@@ -245,18 +246,7 @@ def compute_node_hash_values(node: "TreeNode", page_size: int) -> List[str]:
         if len(node.parent.key) > 0 and len(node.parent.hash_value) > 0:
             parent_hash = node.parent.hash_value[-1]
 
-    # Iterate through node's pages
-    for start in range(0, len(node.key), page_size):
-        page_tokens = node.key.token_ids[start : start + page_size]
-        if not page_tokens:
-            continue
-
-        # Use SHA256-based chaining via get_hash_str
-        hash_val = get_hash_str(page_tokens, prior_hash=parent_hash)
-        hash_values.append(hash_val)
-        parent_hash = hash_val
-
-    return hash_values
+    return get_page_hash_values(node.key.token_ids, page_size, parent_hash)
 
 
 def split_node_hash_value(

@@ -34,12 +34,50 @@ def _python_sha256_manifest(model_path: Path, filenames: list[str]) -> dict[str,
     return out
 
 
+def _python_hicache_page_hashes(
+    token_ids: list[int | tuple[int, int]], page_size: int
+) -> list[str]:
+    out = []
+    parent_hash = None
+    for start in range(0, len(token_ids), page_size):
+        digest = hashlib.sha256()
+        if parent_hash:
+            digest.update(bytes.fromhex(parent_hash))
+        for token in token_ids[start : start + page_size]:
+            if isinstance(token, tuple):
+                for elem in token:
+                    digest.update(elem.to_bytes(4, byteorder="little", signed=False))
+            else:
+                digest.update(token.to_bytes(4, byteorder="little", signed=False))
+        parent_hash = digest.hexdigest()
+        out.append(parent_hash)
+    return out
+
+
+def _python_saguaro_prefix_hash(tokens: list[int], window: int) -> str:
+    suffix = tokens[-window:] if len(tokens) >= window else tokens
+    raw = ",".join(str(t) for t in suffix)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
 def _load_rust_utils():
     try:
-        from sglang.sglang_rust_utils import find_files, sha256_manifest, trim_overlap
+        from sglang.sglang_rust_utils import (
+            find_files,
+            hicache_page_hashes,
+            saguaro_prefix_hash,
+            sha256_manifest,
+            trim_overlap,
+        )
     except Exception:
-        from sglang_rust_utils import find_files, sha256_manifest, trim_overlap
-    return trim_overlap, find_files, sha256_manifest
+        from sglang_rust_utils import (
+            find_files,
+            hicache_page_hashes,
+            saguaro_prefix_hash,
+            sha256_manifest,
+            trim_overlap,
+        )
+    return trim_overlap, find_files, sha256_manifest, hicache_page_hashes, saguaro_prefix_hash
 
 
 def _time(label: str, fn, iterations: int = 1):
@@ -59,12 +97,36 @@ def main():
     parser.add_argument("--trim-iters", type=int, default=100_000)
     args = parser.parse_args()
 
-    rust_trim, rust_find_files, rust_sha256_manifest = _load_rust_utils()
+    (
+        rust_trim,
+        rust_find_files,
+        rust_sha256_manifest,
+        rust_hicache_page_hashes,
+        rust_saguaro_prefix_hash,
+    ) = _load_rust_utils()
 
     existing = "prefix " + ("abc " * 32) + "shared boundary"
     chunk = "shared boundary and new text"
     _time("python trim_overlap", lambda: _python_trim_overlap(existing, chunk), args.trim_iters)
     _time("rust trim_overlap", lambda: rust_trim(existing, chunk), args.trim_iters)
+
+    tokens = list(range(4096))
+    _time(
+        "python hicache_page_hashes",
+        lambda: _python_hicache_page_hashes(tokens, 64),
+        1_000,
+    )
+    _time("rust hicache_page_hashes", lambda: rust_hicache_page_hashes(tokens, 64), 1_000)
+    _time(
+        "python saguaro_prefix_hash",
+        lambda: _python_saguaro_prefix_hash(tokens, 32),
+        100_000,
+    )
+    _time(
+        "rust saguaro_prefix_hash",
+        lambda: rust_saguaro_prefix_hash(tokens, 32),
+        100_000,
+    )
 
     with tempfile.TemporaryDirectory() as tmpdir:
         model_dir = Path(tmpdir)
