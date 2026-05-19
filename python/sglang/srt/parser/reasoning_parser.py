@@ -1,3 +1,7 @@
+"""
+Reasoning Parsers for handling <think> ... </think> or similar formats in model outputs.
+"""
+
 from typing import Dict, Optional, Tuple, Type
 
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
@@ -221,15 +225,7 @@ class DeepSeekR1Detector(BaseReasoningFormatDetector):
 
     Supported models:
       - DeepSeek-R1: Always generates thinking content without <think> start tag
-      - DeepSeek-R1-0528: Generates thinking content with <think> start tag
-
-    Format patterns:
-      - DeepSeek-R1: "I need to think about this...</think>The answer is 42."
-      - DeepSeek-R1-0528: "<think>I need to think about this...</think>The answer is 42."
-
-    Args:
-        stream_reasoning (bool): If False, accumulates reasoning content until the end tag.
-            If True, streams reasoning content as it arrives.
+      - DeepSeek-R1-Distill-*: Generates `<think>...</think>` tags
     """
 
     def __init__(
@@ -243,28 +239,22 @@ class DeepSeekR1Detector(BaseReasoningFormatDetector):
         super().__init__(
             "<think>",
             "</think>",
-            force_reasoning=True,
+            force_reasoning=force_reasoning,
             stream_reasoning=stream_reasoning,
             continue_final_message=continue_final_message,
             previous_content=previous_content,
         )
-        # https://github.com/sgl-project/sglang/pull/3202#discussion_r1950153599
 
 
 class Qwen3Detector(BaseReasoningFormatDetector):
     """
-    Detector for Qwen3 models (e.g., Qwen/Qwen3-235B-A22B).
+    Detector for Qwen-3 models (except qwen3-thinking, which behaves like R1).
     Assumes reasoning format:
-      (<think>)*(.*)</think>
+      <think>(.*)</think>
+    Uses the `<think>` tag to identify reasoning blocks and outputs the text within the tags.
 
-    Qwen3 models released before 07/2025 supports switching between thinking mode and normal
-    mode using `enable_thinking` parameter in the request parameter.
-      - enable_thinking=True: "<think>reasoning content</think>The answer is 42."
-      - enable_thinking=False: "The answer is 42." (no thinking tokens)
-
-    Args:
-        stream_reasoning (bool): If False, accumulates reasoning content until the end tag.
-            If True, streams reasoning content as it arrives.
+    Supported models:
+      - QwQ-32B, QwQ-32B-Preview: Only generates reasoning content if prompted with the `<think>` tag, does not force reasoning
     """
 
     def __init__(
@@ -286,11 +276,9 @@ class Qwen3Detector(BaseReasoningFormatDetector):
 
 class KimiDetector(BaseReasoningFormatDetector):
     """
-    Detector for Kimi Thinking model.
+    Detector for Kimi models.
     Assumes reasoning format:
-      ◁think▷*(.*)◁/think▷
-    Returns all the text before the ◁/think▷ tag as `reasoning_text`
-    and the rest of the text as `normal_text`.
+      ◁think▷(.*)◁/think▷
     """
 
     def __init__(
