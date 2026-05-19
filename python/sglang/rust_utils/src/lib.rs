@@ -1,6 +1,5 @@
-use ignore::WalkBuilder;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyString};
 
 // Existing code
 
@@ -9,31 +8,34 @@ fn trim_overlap(existing_text: &str, new_chunk: &str) -> String {
     let max_possible = existing_text.len().min(new_chunk.len());
     let mut max_overlap = 0;
 
-    for i in (1..=max_possible).rev() {
-        if new_chunk.is_char_boundary(i) && existing_text.ends_with(&new_chunk[..i]) {
+    for i in 1..=max_possible {
+        if existing_text.ends_with(&new_chunk[..i]) {
             max_overlap = i;
-            break;
         }
     }
 
-    new_chunk[max_overlap..].to_string()
+    if max_overlap == new_chunk.len() {
+        "".to_string()
+    } else {
+        new_chunk[max_overlap..].to_string()
+    }
 }
 
+use ignore::WalkBuilder;
+
 #[pyfunction]
-fn find_files(path: &str) -> PyResult<Vec<String>> {
+fn find_files(model_path: &str) -> PyResult<Vec<String>> {
     let mut files = Vec::new();
-    let walker = WalkBuilder::new(path)
-        .follow_links(true) // Crucial for HF cache
-        .hidden(false)      // Include hidden files if needed, but usually we filter in Python
-        .git_ignore(false)  // Don't skip files based on .gitignore for model loading
-        .build();
+
+    let walker = WalkBuilder::new(model_path).follow_links(true).build();
 
     for result in walker {
         match result {
             Ok(entry) => {
-                if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-                    if let Some(s) = entry.path().to_str() {
-                        files.append(&mut vec![s.to_string()]);
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(path_str) = path.to_str() {
+                        files.push(path_str.to_string());
                     }
                 }
             }
@@ -118,150 +120,87 @@ impl RustReasoningState {
         stream_reasoning: bool,
     ) -> PyResult<(Option<String>, Option<String>)> {
         self.buffer.push_str(new_text);
+        let current_text = self.buffer.clone();
 
         let mut tokens_to_check = vec![think_start_token, think_end_token];
-        if let Some(token) = tool_start_token {
-            tokens_to_check.push(token);
+        if let Some(tool_start) = tool_start_token {
+            tokens_to_check.push(tool_start);
         }
 
-        let mut is_prefix = false;
-        let buf_len = self.buffer.len();
-
-        // Check if any suffix of the buffer is a prefix of any token
-        for token in &tokens_to_check {
-            let token_len = token.len();
-            for k in (1..=std::cmp::min(token_len - 1, buf_len)).rev() {
-                if self.buffer.is_char_boundary(buf_len - k) {
-                    let suffix = &self.buffer[buf_len - k..];
-                    if token.starts_with(suffix) {
-                        is_prefix = true;
-                        break;
-                    }
-                }
-            }
-            if is_prefix {
-                break;
-            }
-        }
-
-        if is_prefix {
+        if tokens_to_check
+            .iter()
+            .any(|&token| token.starts_with(&current_text) && token != current_text)
+        {
             return Ok((None, None));
         }
 
-        // Strip `<think>` token if present
-        if !self.stripped_think_start && self.buffer.contains(think_start_token) {
-            if let Some(start_idx) = self.buffer.find(think_start_token) {
-                let normal_text = self.buffer[..start_idx].to_string();
-                self.buffer = self.buffer[start_idx + think_start_token.len()..].to_string();
-                self.stripped_think_start = true;
-                self.in_reasoning = true;
-
-                // If there's more logic for the end token, we return the normal text early and process reasoning next cycle
-                // or we process the rest of the buffer right away. We'll do it right away.
-                let mut ret_normal = Some(normal_text);
-                let mut ret_reasoning = None;
-
-                if self.buffer.contains(think_end_token) {
-                    if let Some(end_idx) = self.buffer.find(think_end_token) {
-                        let reasoning_text = self.buffer[..end_idx].to_string();
-                        self.in_reasoning = false;
-                        let after_normal =
-                            self.buffer[end_idx + think_end_token.len()..].to_string();
-                        self.buffer = "".to_string();
-
-                        let combined_normal =
-                            format!("{}{}", ret_normal.unwrap_or_default(), after_normal);
-                        ret_normal = if combined_normal.is_empty() {
-                            None
-                        } else {
-                            Some(combined_normal)
-                        };
-                        ret_reasoning = Some(reasoning_text.trim_end().to_string());
-                        return Ok((ret_normal, ret_reasoning));
-                    }
-                }
-
-                if stream_reasoning && !self.buffer.is_empty() {
-                    ret_reasoning = Some(self.buffer.clone());
-                    self.buffer.clear();
-                }
-
-                let final_normal = ret_normal.filter(|s| !s.is_empty());
-                let final_reasoning = ret_reasoning.filter(|s| !s.is_empty());
-                return Ok((final_normal, final_reasoning));
-            }
+        let mut current_text = current_text;
+        if !self.stripped_think_start && current_text.contains(think_start_token) {
+            current_text = current_text.replace(think_start_token, "");
+            self.stripped_think_start = true;
+            self.in_reasoning = true;
         }
 
-        // Handle end of reasoning block
-        if self.in_reasoning && self.buffer.contains(think_end_token) {
-            if let Some(end_idx) = self.buffer.find(think_end_token) {
-                let reasoning_text = self.buffer[..end_idx].to_string();
-
-                self.in_reasoning = false;
-                let normal_text = self.buffer[end_idx + think_end_token.len()..].to_string();
+        if self.in_reasoning && current_text.contains(think_end_token) {
+            if let Some(end_idx) = current_text.find(think_end_token) {
+                let reasoning_text = current_text[..end_idx].to_string();
                 self.buffer.clear();
-
-                return Ok((
-                    Some(normal_text),
-                    Some(reasoning_text.trim_end().to_string()),
-                ));
+                self.in_reasoning = false;
+                let normal_text = current_text[end_idx + think_end_token.len()..].to_string();
+                return Ok((Some(normal_text), Some(reasoning_text.trim_end().to_string())));
             }
         }
 
-        // Continue with reasoning content
         if self.in_reasoning {
-            // Check for tool_start_token interruption
-            if let Some(tool_token) = tool_start_token {
-                if self.buffer.contains(tool_token) {
-                    if let Some(tool_idx) = self.buffer.find(tool_token) {
-                        let reasoning_text = self.buffer[..tool_idx].to_string();
-                        let normal_text = self.buffer[tool_idx..].to_string();
+            if let Some(tool_start) = tool_start_token {
+                if current_text.contains(tool_start) {
+                    if let Some(tool_idx) = current_text.find(tool_start) {
+                        let reasoning_text = current_text[..tool_idx].to_string();
+                        let normal_text = current_text[tool_idx..].to_string();
                         self.buffer.clear();
                         self.in_reasoning = false;
                         return Ok((Some(normal_text), Some(reasoning_text)));
                     }
                 }
             }
+
             if stream_reasoning {
-                let reasoning_text = self.buffer.clone();
                 self.buffer.clear();
-                return Ok((None, Some(reasoning_text)));
+                return Ok((None, Some(current_text)));
             } else {
                 return Ok((None, None));
             }
         }
 
-        // If we're not in a reasoning block return as normal text
         if !self.in_reasoning {
-            let normal_text = self.buffer.clone();
             self.buffer.clear();
-            return Ok((Some(normal_text), None));
+            return Ok((Some(current_text), None));
         }
 
         Ok((None, None))
     }
 }
 
-
 #[pyfunction]
+#[pyo3(signature = (msg_dict, content_format, image_data, video_data, audio_data, modalities, use_dpsk_v32_encoding))]
 fn process_content_for_template_format<'py>(
     py: Python<'py>,
-    msg_dict: &Bound<'py, PyDict>,
+    msg_dict: Bound<'py, PyDict>,
     content_format: &str,
-    image_data: &Bound<'py, PyList>,
-    video_data: &Bound<'py, PyList>,
-    audio_data: &Bound<'py, PyList>,
-    modalities: &Bound<'py, PyList>,
+    image_data: Bound<'py, PyList>,
+    video_data: Bound<'py, PyList>,
+    audio_data: Bound<'py, PyList>,
+    modalities: Bound<'py, PyList>,
     use_dpsk_v32_encoding: bool,
-    image_data_cls: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let content_opt = msg_dict.get_item("content")?;
+    let sglang_utils = py.import("sglang.srt.utils")?;
+    let image_data_cls = sglang_utils.getattr("ImageData")?;
 
-    // If not list, return dict without None values
-    let content_list = match content_opt {
-        Some(c) => {
-            if c.is_instance_of::<PyList>() {
-                c.downcast_into::<PyList>().unwrap()
+    let content_obj = msg_dict.get_item("content")?;
+    let content_list = match content_obj {
+        Some(obj) => {
+            if obj.is_instance_of::<PyList>() {
+                obj.downcast_into::<PyList>().unwrap()
             } else {
                 let new_msg = PyDict::new(py);
                 for (k, v) in msg_dict.iter() {
@@ -271,7 +210,7 @@ fn process_content_for_template_format<'py>(
                 }
                 return Ok(new_msg);
             }
-        },
+        }
         None => {
             let new_msg = PyDict::new(py);
             for (k, v) in msg_dict.iter() {

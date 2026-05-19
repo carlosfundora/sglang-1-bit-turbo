@@ -1,4 +1,11 @@
 {
+  "candidate": "python/sglang/srt/parser/reasoning_parser.py",
+  "implementation": "after",
+  "command": "python python/sglang/test/test_reasoning_parser_bench.py",
+  "timestamp": "2026-05-19T15:49:42Z",
+  "iterations": 100000,
+  "input_description": "detect_and_parse (pure rust)",
+  "duration_ms": 193.88484954833984
   "candidate": "python/sglang/srt/parser/harmony_parser.py",
   "implementation": "after",
   "command": "python3 test_harmony_benchmark.py",
