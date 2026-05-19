@@ -14,8 +14,7 @@ default = ["extension-module"]
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
-<<<<<<< HEAD
-pyo3 = { version = "0.27.1", features = ["abi3-py38"] }
+pyo3 = { version = "0.28.3", features = ["abi3-py38"] }
 hex = "0.4"
 ignore = "0.4"
 rayon = "1.10"
