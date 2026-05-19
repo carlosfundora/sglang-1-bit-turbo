@@ -154,8 +154,12 @@ ATTENTION_BACKEND_CHOICES = [
     # AMD specific
     "aiter",
     "wave",
+<<<<<<< HEAD
     "atom",
     "atom_hybrid",
+=======
+    "universal_broker",
+>>>>>>> e0905f017488c752faeed9aedcf62d0ec397d020
     # Other platforms
     "intel_amx",
     "ascend",
@@ -170,9 +174,14 @@ ENCODER_TRANSFER_BACKEND_CHOICES = ["zmq_to_scheduler", "zmq_to_tokenizer", "moo
 
 GRAMMAR_BACKEND_CHOICES = ["xgrammar", "outlines", "llguidance", "none"]
 
-DETERMINISTIC_ATTENTION_BACKEND_CHOICES = ["flashinfer", "fa3", "triton"]
+DETERMINISTIC_ATTENTION_BACKEND_CHOICES = [
+    "flashinfer",
+    "fa3",
+    "triton",
+    "universal_broker",
+]
 
-RADIX_SUPPORTED_DETERMINISTIC_ATTENTION_BACKEND = ["fa3", "triton"]
+RADIX_SUPPORTED_DETERMINISTIC_ATTENTION_BACKEND = ["fa3", "triton", "universal_broker"]
 
 NSA_PREFILL_CP_SPLIT_CHOICES = ["in-seq-split", "round-robin-split"]
 
@@ -346,6 +355,10 @@ class ServerArgs:
     quantization: Optional[str] = None
     quantization_param_path: Optional[str] = None
     kv_cache_dtype: str = "auto"
+    universal_kv_gpu_capacity_mb: int = 4096
+    universal_kv_ram_capacity_mb: int = 32768
+    universal_kv_block_size: int = 16
+    universal_kv_hot_importance_threshold: float = 0.7
     enable_fp32_lm_head: bool = False
     modelopt_quant: Optional[Union[str, Dict]] = None
     modelopt_checkpoint_restore_path: Optional[str] = None
@@ -3632,6 +3645,32 @@ class ServerArgs:
                 "and cannot be used at the same time. Please use only one of them."
             )
 
+        if self.universal_kv_gpu_capacity_mb <= 0:
+            raise ValueError("--universal-kv-gpu-capacity-mb must be > 0")
+        if self.universal_kv_ram_capacity_mb <= 0:
+            raise ValueError("--universal-kv-ram-capacity-mb must be > 0")
+        if self.universal_kv_hot_importance_threshold < 0.0 or self.universal_kv_hot_importance_threshold > 1.0:
+            raise ValueError(
+                "--universal-kv-hot-importance-threshold must be in [0.0, 1.0]"
+            )
+
+        universal_modes = {"rq3_hybrid", "univ_rq3"}
+        if self.kv_cache_dtype in universal_modes and self.attention_backend is None:
+            self.attention_backend = "universal_broker"
+            logger.info(
+                "Auto-select attention backend 'universal_broker' for kv_cache_dtype=%s",
+                self.kv_cache_dtype,
+            )
+        elif (
+            self.kv_cache_dtype in universal_modes
+            and self.attention_backend != "universal_broker"
+        ):
+            logger.warning(
+                "kv_cache_dtype=%s is intended for universal_broker backend, got attention_backend=%s",
+                self.kv_cache_dtype,
+                self.attention_backend,
+            )
+
         if self.disaggregation_decode_enable_offload_kvcache:
             if self.disaggregation_mode != "decode":
                 raise ValueError(
@@ -4101,6 +4140,8 @@ class ServerArgs:
                 "rq4_planar",
                 "rq3_iso",
                 "rq4_iso",
+                "rq3_hybrid",
+                "univ_rq3",
             ],
             help='Data type for kv cache storage. "auto" will use model data type. '
             '"fp8_e5m2"/"fp8_e4m3" for FP8 KV. "fp4_e2m1" for MXFP4 KV. '
@@ -4108,9 +4149,35 @@ class ServerArgs:
             '"rq3"/"rq4" shorthand for RotorQuant PlanarQuant (fastest, recommended default). '
             '"rq3_planar"/"rq4_planar" for RotorQuant PlanarQuant 3/4-bit (2D Givens, fastest). '
             '"rq3_iso"/"rq4_iso" for RotorQuant IsoQuant 3/4-bit (4D quaternion, best quality). '
+            '"rq3_hybrid"/"univ_rq3" for universal broker mode (RotorQuant hot tier + TurboQuant warm residual). '
             "TurboQuant advanced options via env vars: "
             "SGLANG_KV_CACHE_TURBOQUANT_ROPE=0 (disable RoPE quant for MLA), "
             "SGLANG_KV_CACHE_TURBOQUANT_QJL=1 (enable QJL unbiased inner product).",
+        )
+        parser.add_argument(
+            "--universal-kv-gpu-capacity-mb",
+            type=int,
+            default=ServerArgs.universal_kv_gpu_capacity_mb,
+            help="Universal broker hot-tier capacity in MB (VRAM).",
+        )
+        parser.add_argument(
+            "--universal-kv-ram-capacity-mb",
+            type=int,
+            default=ServerArgs.universal_kv_ram_capacity_mb,
+            help="Universal broker warm-tier capacity in MB (pinned host RAM).",
+        )
+        parser.add_argument(
+            "--universal-kv-block-size",
+            type=int,
+            default=ServerArgs.universal_kv_block_size,
+            choices=[16, 32],
+            help="Universal broker block size (values per block).",
+        )
+        parser.add_argument(
+            "--universal-kv-hot-importance-threshold",
+            type=float,
+            default=ServerArgs.universal_kv_hot_importance_threshold,
+            help="Importance threshold for hot-tier placement in universal broker.",
         )
         parser.add_argument(
             "--enable-fp32-lm-head",
@@ -5166,7 +5233,7 @@ class ServerArgs:
             choices=[1, 2, 3, 4, 5, 6, 7, 8],
             help="Maximum ghost worker threads for PHANTOM-X adaptive scaling. "
                  "1=single worker (no scaling), 2-8=pool with throughput-based "
-                 "hill-climbing scaler. Default=1.",
+                 "hill-climbing scaler. Default=4.",
         )
 
         # Medusa speculative decoding

@@ -20,10 +20,9 @@ import torch
 import triton
 import triton.language as tl
 
-from sglang.srt.layers.attention.triton_ops.prefill_attention import (
+from sglang.srt.layers.attention.triton_ops.rdna2.prefill_attention import (
     context_attention_fwd,
 )
-from sglang.srt.hardware_backend.rocm.arch_detection import is_rdna2
 from sglang.srt.utils import is_cuda, is_hip
 
 _is_cuda = is_cuda()
@@ -31,7 +30,6 @@ if _is_cuda:
     CUDA_CAPABILITY = torch.cuda.get_device_capability()
 
 _is_hip = is_hip()
-_is_rdna2 = is_rdna2()
 
 
 def _get_block_sizes_for_extend_attention(Lq: int, Lv: int):
@@ -62,51 +60,8 @@ def _get_block_sizes_for_extend_attention(Lq: int, Lv: int):
     BLOCK_DV = triton.next_power_of_2(Lv)
 
     # Determine BLOCK_M, BLOCK_N, and num_warps based on hardware
-    if _is_hip:
-        if _is_rdna2:
-            # RDNA2 (gfx1030/1031): Wave32, 2 warps = 64 threads = 1 CU sweet spot
-            BLOCK_M, BLOCK_N = (64, 64)
-            num_warps = 2
-        else:
-            BLOCK_M, BLOCK_N = (64, 64)
-            num_warps = 4
-    else:
-        if _is_cuda and CUDA_CAPABILITY[0] == 12:
-            # sm120 workstation Blackwell architecture (RTX Pro 6000) has a much smaller shared memory size (100K)
-            if Lq <= 128:
-                BLOCK_M, BLOCK_N = (64, 128)
-            elif Lq <= 256:
-                BLOCK_M, BLOCK_N = (64, 64)
-            else:
-                BLOCK_M, BLOCK_N = (32, 32)
-        elif _is_cuda and CUDA_CAPABILITY[0] >= 9:
-            # Hopper architecture (H100, etc.)
-            if Lq <= 256:
-                BLOCK_M, BLOCK_N = (128, 64)
-            else:
-                BLOCK_M, BLOCK_N = (32, 64)
-        elif _is_cuda and CUDA_CAPABILITY[0] >= 8:
-            # Ampere architecture (A100, etc.)
-            # sm86/sm89 has a much smaller shared memory size (100K) than sm80 (160K)
-            if CUDA_CAPABILITY[1] == 9 or CUDA_CAPABILITY[1] == 6:
-                if Lq <= 128:
-                    BLOCK_M, BLOCK_N = (64, 128)
-                elif Lq <= 256:
-                    BLOCK_M, BLOCK_N = (64, 64)
-                else:
-                    BLOCK_M, BLOCK_N = (32, 32)
-            else:
-                if Lq <= 128:
-                    BLOCK_M, BLOCK_N = (128, 128)
-                elif Lq <= 256:
-                    BLOCK_M, BLOCK_N = (64, 64)
-                else:
-                    BLOCK_M, BLOCK_N = (32, 64)
-        else:
-            # Older architectures
-            BLOCK_M, BLOCK_N = (64, 64) if Lq <= 128 else (32, 32)
-
-        num_warps = 4 if Lq <= 64 else 8
+    BLOCK_M, BLOCK_N = (64, 64)
+    num_warps = 2  # RDNA2 (gfx1030/1031): Wave32, 2 warps = 64 threads = 1 CU sweet spot
 
     return BLOCK_DMODEL, BLOCK_DPE, BLOCK_DV, BLOCK_M, BLOCK_N, num_warps
 
@@ -619,76 +574,11 @@ def extend_attention_fwd(
     grid = (batch_size, head_num, triton.cdiv(max_len_extend, BLOCK_M))
     num_stages = 1
 
-    # RDNA2 diagnostic: validate all tensor bounds before kernel launch
-    import os as _os
-    import sys as _sys
-    if _os.environ.get("PHANTOM_VERIFY_SYNC") and _is_hip:
-        def _diag(msg):
-            _sys.stderr.write(f"[ATTN_DIAG] {msg}\n")
-            _sys.stderr.flush()
-        _qo = qo_indptr.cpu().tolist()
-        _kvi = kv_indptr.cpu().tolist()
-        for _s in range(batch_size):
-            _ext_start = _qo[_s]
-            _ext_len = _qo[_s + 1] - _qo[_s]
-            _kv_start = _kvi[_s]
-            _pfx_len = _kvi[_s + 1] - _kvi[_s]
-            _total = _pfx_len + _ext_len
-            # Check kv_indices bounds
-            if _pfx_len > 0:
-                _kv_slice = kv_indices[_kv_start : _kv_start + _pfx_len]
-                _max_kv = _kv_slice.max().item()
-                _buf_size = k_buffer.shape[0]
-                if _max_kv >= _buf_size:
-                    _diag(f"!!! OOB kv_indices! seq={_s} max_kv_idx={_max_kv} >= buf={_buf_size}")
-            # Check custom mask bounds
-            if USE_CUSTOM_MASK and custom_mask is not None:
-                _mi = mask_indptr.cpu().tolist() if mask_indptr is not None else [0]
-                _mask_start = _mi[_s] if _s < len(_mi) else 0
-                _mask_needed = _ext_len * _total
-                _mask_avail = custom_mask.numel() - _mask_start
-                if _mask_needed > _mask_avail:
-                    _diag(
-                        f"!!! OOB mask! seq={_s} ext={_ext_len} pfx={_pfx_len} total={_total} "
-                        f"needed={_mask_needed} avail={_mask_avail} start={_mask_start}"
-                    )
-            _diag(
-                f"seq={_s} ext_start={_ext_start} ext_len={_ext_len} pfx_len={_pfx_len} "
-                f"total={_total} q={q_extend.shape} k_buf={k_buffer.shape} "
-                f"mask={'YES' if USE_CUSTOM_MASK else 'NO'} grid={grid} BM={BLOCK_M} BN={BLOCK_N}"
-            )
-        # Sync before kernel to ensure any prior async HIP error is caught HERE
-        torch.cuda.synchronize()
 
-    extra_kargs = {}
-    if _is_hip:
-        if _is_rdna2:
-            # RDNA2: Wave32, no matrix instructions
-            extra_kargs = {"waves_per_eu": 1}
-        else:
-            extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
 
-    # RDNA2 safety: clamp qo_indptr so ext_len never exceeds actual Q tensor rows.
-    # PHANTOM TARGET_VERIFY may set ext_len=draft_token_num while the actual
-    # token count is fewer (partial acceptance → dynamic γ shrinks input_ids).
-    # On RDNA2, reading beyond q_extend triggers HIP illegal memory access.
-    if _is_hip:
-        _total_q = q_extend.shape[0]
-        _max_ext = qo_indptr[-1].item() if qo_indptr is not None and qo_indptr.numel() > 0 else 0
-        if _max_ext > _total_q:
-            import sys as _sys
-            _sys.stderr.write(
-                f"[ATTN_GUARD] ext_len mismatch! qo_indptr max={_max_ext} > q_extend rows={_total_q}. "
-                f"Clamping qo_indptr to match actual Q.\n"
-            )
-            _sys.stderr.flush()
-            # Proportionally scale all indptr entries to fit actual token count
-            _scale = _total_q / max(_max_ext, 1)
-            for _i in range(1, qo_indptr.shape[0]):
-                qo_indptr[_i] = min(int(qo_indptr[_i].item() * _scale), _total_q)
-            # Recompute grid with corrected max_extend_len
-            max_extend_len = max(1, _total_q // max(batch_size, 1))
-            grid = (triton.cdiv(max_extend_len, BLOCK_M), head_num, batch_size)
+    extra_kargs = {"waves_per_eu": 1}
+
+
 
     _fwd_kernel[grid](
         q_extend,
@@ -740,21 +630,7 @@ def extend_attention_fwd(
         **extra_kargs,
     )
 
-    # RDNA2 diagnostic: sync after kernel to catch OOB at the source
-    import os as _os2
-    if _os2.environ.get("PHANTOM_VERIFY_SYNC") and _is_hip:
-        try:
-            torch.cuda.synchronize()
-        except RuntimeError as _e:
-            import sys as _sys2
-            _sys2.stderr.write(
-                f"[ATTN_CRASH] _fwd_kernel OOB! q={q_extend.shape} "
-                f"ext_len={qo_indptr[-1].item() if qo_indptr is not None else '?'} "
-                f"k_ext={k_extend.shape} o_ext={o_extend.shape} "
-                f"grid={grid} err={_e}\n"
-            )
-            _sys2.stderr.flush()
-            raise
+
 
 
 def redundant_attention(
@@ -1116,13 +992,7 @@ def extend_attention_fwd_unified(
     grid = (batch_size, head_num, triton.cdiv(max_len_extend, BLOCK_M))
     num_stages = 1
 
-    extra_kargs = {}
-    if _is_hip:
-        if _is_rdna2:
-            # RDNA2: Wave32, no matrix instructions
-            extra_kargs = {"waves_per_eu": 1}
-        else:
-            extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
+    extra_kargs = {"waves_per_eu": 1}
 
     _fwd_kernel_unified[grid](
         q,

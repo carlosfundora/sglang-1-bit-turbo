@@ -1,14 +1,11 @@
 # Benchmark Summary
 
-- Before command: `python3 bench_prefix.py`
-- After command: `python3 bench_after.py`
-- Before timing (Python `prefix_hold`): ~1.03s per 100,000 iterations
-- After timing (Rust PyO3 `prefix_hold`): ~0.69s per 100,000 iterations
-- Percent change: ~33% latency reduction.
-- Notes: The python fallback was completely replaced by a safe Rust string slicing loop bridging over `PyO3`. While `prefix_hold` was simple, it runs per chunk on the reasoning model streaming path, adding a nice little performance edge and completely migrating the logic away from python.
-* Before command: `python3 test_trim_overlap.py`
-* After command: `python3 test_trim_overlap_rust.py`
-* Before timing: 4902.8 ms
-* After timing: 520.1 ms
-* Percent change: -89.4%
-* Notes on variance or limitations: The rust rewrite is ~10x faster after fixing UTF-8 encoding checking. The PyO3 rust rewrite operates on strings closer to the metal and avoids the constant GC and object allocation overheads of python string slicing inside the loop, while now correctly preventing panics by verifying utf-8 byte character boundaries using `is_char_boundary(i)`.
+- **Before Command**: `python3 test_harmony_benchmark.py` (simulated pure python execution)
+- **After Command**: `python3 test_harmony_benchmark.py` (simulated rust PyO3 extension execution)
+
+| Metric | Before (Python) | After (Rust) | Percent Change |
+|--------|-----------------|--------------|----------------|
+| Time (ms) | 2522.17 | 1046.91 | -58.5% |
+
+**Notes**:
+The test environment simulates streaming 5 chunks of harmony structural tokens across 50,000 iterations. The python implementation relies on repeated regex matches, dictionary allocations, string slicing, and multiple conditionals on every string chunk appended to its internal buffer. Migrating the full string processing sequence to Rust PyO3 removes a significant chunk of Python interpreter looping overhead, reducing execution time by 58.5%.

@@ -1,7 +1,9 @@
+import functools
 import logging
 
 import torch
 import triton
+import triton.language as tl
 
 from sglang.srt.utils import ceil_div, is_cuda
 
@@ -13,7 +15,14 @@ if _is_cuda:
         sglang_per_token_group_quant_fp8 as per_token_group_quant_fp8,
     )
 
-import triton.language as tl
+
+@functools.lru_cache(maxsize=None)
+def _get_max_num_blocks(device):
+    MAX_THREADS_PER_BLOCK = 1024
+    props = torch.cuda.get_device_properties(device)
+    sm_count = props.multi_processor_count
+    max_threads_per_sm = props.max_threads_per_multi_processor
+    return sm_count * max_threads_per_sm // MAX_THREADS_PER_BLOCK
 
 
 def _get_launch_config_1d(device, numel):
@@ -21,10 +30,7 @@ def _get_launch_config_1d(device, numel):
     MIN_THREADS_PER_BLOCK = 512
     MAX_WAVES = 8  # empirical numbers
 
-    props = torch.cuda.get_device_properties(device)
-    sm_count = props.multi_processor_count
-    max_threads_per_sm = props.max_threads_per_multi_processor
-    max_num_blocks = sm_count * max_threads_per_sm // MAX_THREADS_PER_BLOCK
+    max_num_blocks = _get_max_num_blocks(device)
 
     block_dim = MAX_THREADS_PER_BLOCK
 
@@ -48,10 +54,7 @@ def _get_launch_config_2d(device, m, n):
     MIN_THREADS_PER_BLOCK = 512
     MAX_WAVES = 8  # empirical numbers
 
-    props = torch.cuda.get_device_properties(device)
-    sm_count = props.multi_processor_count
-    max_threads_per_sm = props.max_threads_per_multi_processor
-    max_num_blocks = sm_count * max_threads_per_sm // MAX_THREADS_PER_BLOCK
+    max_num_blocks = _get_max_num_blocks(device)
 
     block_dim = MAX_THREADS_PER_BLOCK
 
@@ -1057,7 +1060,9 @@ def moe_ep_deepgemm_preprocess(
         reorder_topk_ids, seg_indptr, topk_ids.numel()
     )
 
-    grid = lambda meta: (triton.cdiv(topk_ids.numel(), meta["BLOCK_SIZE"]),)
+    def grid(meta):
+        return (triton.cdiv(topk_ids.numel(), meta["BLOCK_SIZE"]),)
+
     compute_masked_m_triton_kernel[(num_local_experts,)](seg_indptr, masked_m)
 
     # For masked grouped GEMM, shape M should be multiple of the block M (current block M: {block_m}) https://github.com/deepseek-ai/DeepGEMM/blob/main/deep_gemm/jit_kernels/m_grouped_gemm.py#L165
@@ -1082,7 +1087,7 @@ def moe_ep_deepgemm_preprocess(
     if block_shape is None:
         block_shape = [128, 128]
     assert len(block_shape) == 2
-    block_n, block_k = block_shape[0], block_shape[1]
+    _, block_k = block_shape[0], block_shape[1]
 
     # TODO: fuse this with the preprocess
     hidden_states, scale = per_token_group_quant_fp8(hidden_states, block_k)
@@ -1159,7 +1164,9 @@ def zero_experts_compute_triton(
 ):
     N = expert_indices.numel()
     top_k = expert_indices.size(-1)
-    grid = lambda meta: (triton.cdiv(N, meta["BLOCK_SIZE"]),)
+
+    def grid(meta):
+        return (triton.cdiv(N, meta["BLOCK_SIZE"]),)
 
     if zero_expert_type == "identity":
         zero_expert_mask = expert_indices < num_experts
@@ -1174,8 +1181,10 @@ def zero_experts_compute_triton(
     hidden_dim = hidden_states.size(-1)
     num_tokens = hidden_states.size(0)
 
-    grid = lambda meta: (num_tokens * (hidden_dim // meta["BLOCK_SIZE"]),)
-    compute_identity_kernel[grid](
+    def identity_grid(meta):
+        return (num_tokens * (hidden_dim // meta["BLOCK_SIZE"]),)
+
+    compute_identity_kernel[identity_grid](
         top_k,
         hidden_states,
         zero_expert_scales,
@@ -1231,7 +1240,10 @@ def compute_problem_sizes_w4a8(
     masked_m, problem_sizes1, problem_sizes2, n, k, num_experts
 ):
     BLOCK_SIZE = 256
-    grid = lambda meta: (triton.cdiv(num_experts, meta["BLOCK_SIZE"]),)
+
+    def grid(meta):
+        return (triton.cdiv(num_experts, meta["BLOCK_SIZE"]),)
+
     compute_problem_sizes_w4a8_kernel[grid](
         masked_m,
         problem_sizes1,

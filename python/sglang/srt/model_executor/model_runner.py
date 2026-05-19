@@ -1916,6 +1916,11 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     "TurboQuant KV cache: GPU kernel optimized for AMD MI355X. "
                     "On NVIDIA, Python fallback will be used (functional but slower)."
                 )
+        elif self.server_args.kv_cache_dtype in ("rq3_hybrid", "univ_rq3"):
+            self.kv_cache_dtype = self.server_args.kv_cache_dtype
+            logger.info(
+                "Universal broker KV cache: RotorQuant hot tier + TurboQuant warm residual."
+            )
         elif self.server_args.kv_cache_dtype.startswith("rq"):
             self.kv_cache_dtype = self.server_args.kv_cache_dtype
             # Parse rq{N}_{method} for logging

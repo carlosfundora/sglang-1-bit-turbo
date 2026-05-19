@@ -124,6 +124,7 @@ class PoolName(str, Enum):
 
     KV = "kv"
     MAMBA = "mamba"
+    UNIVERSAL_KV = "universal_kv"
 
 
 class PoolHitPolicy(str, Enum):

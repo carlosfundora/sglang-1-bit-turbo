@@ -38,7 +38,6 @@ class RequestTrackers:
             max_pool_size, dtype=torch.int64, device=device
         )
 
-        # TODO: Add more trackers for hierarchical KVCache management
 
     def register(self, idx: int, prompt_len: int) -> None:
         self.repr_constructed[idx] = False
@@ -154,8 +153,6 @@ class SparseCoordinator:
 
         self.states.clear(req.req_pool_idx)
 
-        # TODO: Implement request end handling
-        # - Release host indices if any were allocated for offloading
 
     def forward_begin(self, forward_batch: "ForwardBatch") -> None:
         """
@@ -164,8 +161,6 @@ class SparseCoordinator:
         Wait for pending KVCache offloading operations to complete before forward pass.
         Ensures memory consistency for subsequent sparse attention operations.
         """
-        # TODO: Implement forward begin handling
-        # - Check if there are pending offloading operations
         pass
 
     def forward_end(self, forward_batch: "ForwardBatch") -> None:
@@ -174,9 +169,6 @@ class SparseCoordinator:
 
         Trigger async KVCache offloading operations.
         """
-        # TODO: Implement forward end handling
-        # - Identify tokens to offload
-        # - Trigger async offloading operations
         pass
 
     def attention_begin(

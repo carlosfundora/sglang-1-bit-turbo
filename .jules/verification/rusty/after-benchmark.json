@@ -1,20 +1,16 @@
 {
+  "candidate": "python/sglang/srt/parser/reasoning_parser.py",
+  "implementation": "after",
+  "command": "python python/sglang/test/test_reasoning_parser_bench.py",
+  "timestamp": "2026-05-19T15:49:42Z",
+  "iterations": 100000,
+  "input_description": "detect_and_parse (pure rust)",
+  "duration_ms": 193.88484954833984
   "candidate": "python/sglang/srt/parser/harmony_parser.py",
   "implementation": "after",
-  "command": "python3 bench_after.py",
-  "timestamp": "2026-05-10T14:15:00+0000",
-  "iterations": 100000,
-  "input_description": "String length 33, 3 tokens array",
-  "duration_ms": 964.29,
-  "throughput": "103702.8 ops/sec",
-  "notes": "rust pyo3 prefix_hold (utf-8 safe)"
-}
-  "candidate": "python/sglang/utils.py:trim_overlap",
-  "implementation": "after",
-  "command": "python3 test_trim_overlap_rust.py",
-  "timestamp": "2023-10-27T12:00:00Z",
-  "iterations": 10000,
-  "input_description": "String overlap text vs suffix overlap text",
-  "duration_ms": 520.1592445373535,
-  "notes": "pure rust tight loop test"
+  "command": "python3 test_harmony_benchmark.py",
+  "timestamp": "2026-05-18T23:40:57Z",
+  "iterations": 50000,
+  "input_description": "Streaming harmony chunks",
+  "duration_ms": 1046.9141006469727
 }

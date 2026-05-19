@@ -14,11 +14,16 @@ default = ["extension-module"]
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
+<<<<<<< HEAD
 pyo3 = { version = "0.27.1", features = ["abi3-py38"] }
 hex = "0.4"
 ignore = "0.4"
 rayon = "1.10"
 sha2 = "0.10"
+=======
+pyo3 = { version = "0.27.1", features = ["extension-module", "abi3-py38"] }
+ignore = "0.4"
+>>>>>>> e0905f017488c752faeed9aedcf62d0ec397d020
 
 [profile.release]
 lto = true

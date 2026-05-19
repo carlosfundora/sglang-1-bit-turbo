@@ -148,6 +148,22 @@ ALLOC_MEMORY_FUNCS = defaultdict(
 )
 
 
+def alloc_universal_kv_spill_tensor(
+    dims: tuple,
+    dtype: torch.dtype,
+    device: str = "cpu",
+    pin_memory: bool = True,
+) -> torch.Tensor:
+    """Allocate host tensor for universal KV broker warm-tier spill storage."""
+    return alloc_with_pin_memory(
+        dims=dims,
+        dtype=dtype,
+        device=device,
+        pin_memory=pin_memory,
+        allocator=None,
+    )
+
+
 class HostKVCache(abc.ABC):
 
     def __init__(

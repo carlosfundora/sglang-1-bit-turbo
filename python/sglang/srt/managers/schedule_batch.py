@@ -2222,6 +2222,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             )
 
     def merge_batch(self, other: "ScheduleBatch"):
+        if self.is_empty():
+            return
+
         if other is None or other.is_empty():
             return
 
