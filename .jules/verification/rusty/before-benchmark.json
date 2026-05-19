@@ -6,4 +6,11 @@
   "iterations": 100000,
   "input_description": "detect_and_parse (pure python)",
   "duration_ms": 164.02196884155273
+  "candidate": "python/sglang/srt/parser/harmony_parser.py",
+  "implementation": "before",
+  "command": "python3 test_harmony_benchmark.py",
+  "timestamp": "2026-05-18T23:42:45Z",
+  "iterations": 50000,
+  "input_description": "Streaming harmony chunks",
+  "duration_ms": 2522.1734046936035
 }

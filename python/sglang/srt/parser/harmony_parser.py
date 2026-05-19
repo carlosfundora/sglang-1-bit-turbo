@@ -22,8 +22,11 @@ class Token:
 
 
 try:
-    from sglang_router.sglang_router_rs import prefix_hold
+    from sglang_router.sglang_router_rs import prefix_hold, HarmonyParser as RustHarmonyParser
+    RUST_HARMONY_PARSER_AVAILABLE = True
 except ImportError:
+    RUST_HARMONY_PARSER_AVAILABLE = False
+
     def prefix_hold(text: str, tokens: List[str]) -> Tuple[str, str]:
         """
         Holds back the longest suffix of `text` that could be a prefix of any token.
@@ -514,7 +517,24 @@ class HarmonyParser:
             ""  # Track partial commentary being built across chunks
         )
 
+        self.rust_parser = None
+        if RUST_HARMONY_PARSER_AVAILABLE:
+            self.rust_parser = RustHarmonyParser()
+
     def parse(self, chunk: str) -> List[Event]:
+        if self.rust_parser is not None:
+            # Parse returns a list of Rust Event objects, need to map back to python Event dataclass
+            # for backwards compatibility.
+            rust_events = self.rust_parser.parse(chunk)
+
+            # Sync buffer back to python state in case it is read
+            self._buffer = self.rust_parser.buffer
+
+            events = []
+            for e in rust_events:
+                events.append(Event(e.event_type, e.content, e.raw_text))
+            return events
+
         self._buffer += chunk
 
         if self.strategy is None:
