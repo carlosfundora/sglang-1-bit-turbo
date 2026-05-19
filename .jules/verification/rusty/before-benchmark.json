@@ -1,15 +1,9 @@
 {
-  "candidate": "python/sglang/srt/parser/jinja_template_utils.py",
+  "candidate": "python/sglang/srt/parser/harmony_parser.py",
   "implementation": "before",
-  "command": "python python/sglang/test/test_reasoning_parser_bench.py",
-  "timestamp": "2026-05-17T03:00:55Z",
-  "iterations": 100000,
-  "input_description": "detect_and_parse (pure python)",
-  "duration_ms": 260.50472259521484
-  "command": "python3 test_jinja2_process_python.py",
-  "timestamp": "2024-05-15T19:00:00Z",
-  "iterations": 100000,
-  "input_description": "process 5-chunk multimodal message",
-  "duration_ms": 426,
-  "notes": "Python implementation"
+  "command": "python3 test_harmony_benchmark.py",
+  "timestamp": "2026-05-18T23:42:45Z",
+  "iterations": 50000,
+  "input_description": "Streaming harmony chunks",
+  "duration_ms": 2522.1734046936035
 }
