@@ -10,6 +10,9 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.27.1", features = ["extension-module", "abi3-py38"] }
 ignore = "0.4"
+rayon = "1.12.0"
+sha2 = "0.11.0"
+hex = "0.4.3"
 
 [profile.release]
 lto = true

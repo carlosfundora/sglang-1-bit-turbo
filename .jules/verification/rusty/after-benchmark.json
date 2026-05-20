@@ -1,9 +1,11 @@
 {
-  "candidate": "python/sglang/srt/parser/harmony_parser.py",
+  "candidate": "python/sglang/srt/mem_cache/mamba_radix_cache.py",
   "implementation": "after",
-  "command": "python3 test_harmony_benchmark.py",
-  "timestamp": "2026-05-18T23:40:57Z",
-  "iterations": 50000,
-  "input_description": "Streaming harmony chunks",
-  "duration_ms": 1046.9141006469727
+  "command": "python bench_mamba.py",
+  "timestamp": "2026-05-20T08:12:42.116548",
+  "iterations": 100000,
+  "input_description": "100,000 match_prefix queries of varying lengths",
+  "duration_ms": 744.1701989991998,
+  "throughput": "134377.86 req/s",
+  "notes": "Uses pure Rust string slice iteration"
 }
