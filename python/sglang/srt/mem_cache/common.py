@@ -31,7 +31,7 @@ def write_req_to_token_pool_triton(
     prefix_tensors,
     pre_lens,
     seq_lens,
-    extend_lens,
+    cumsum_extend_lens, # NEW: passed precomputed cumsum
     out_cache_loc,
     req_to_token_ptr_stride: tl.constexpr,
 ):
@@ -55,10 +55,9 @@ def write_req_to_token_pool_triton(
             mask=mask,
         )
 
-    # NOTE: This can be slow for large bs
     cumsum_start = tl.cast(0, tl.int64)
-    for i in range(pid):
-        cumsum_start += tl.load(extend_lens + i)
+    if pid > 0:
+        cumsum_start = tl.load(cumsum_extend_lens + pid - 1)
 
     num_loop = tl.cdiv(seq_len - pre_len, BLOCK_SIZE)
     for i in range(num_loop):
@@ -95,13 +94,14 @@ def write_cache_indices(
             dtype=torch.uint64,
         )
         # TODO: some tensors can be reused for ForwardBatchInfo (e.g., extend_lens, cumsum_start)
+        cumsum_extend_lens = extend_lens_tensor.cumsum(dim=0, dtype=torch.int64)
         write_req_to_token_pool_triton[(req_pool_indices_tensor.shape[0],)](
             req_to_token_pool.req_to_token,
             req_pool_indices_tensor,
             prefix_pointers,
             prefix_lens_tensor,
             seq_lens_tensor,
-            extend_lens_tensor,
+            cumsum_extend_lens,
             out_cache_loc,
             req_to_token_pool.req_to_token.shape[1],
         )
