@@ -1,6 +1,5 @@
 use pyo3::prelude::*;
-<<<<<<< HEAD
-use pyo3::types::{PyAny, PyDict};
+use pyo3::types::{PyAny, PyDict, PyList, PyString};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -234,11 +233,6 @@ fn pack_sampling_params(
         has_custom_logit_processor,
     ))
 }
-=======
-use pyo3::types::{PyDict, PyList, PyString};
-
-// Existing code
->>>>>>> e0905f017488c752faeed9aedcf62d0ec397d020
 
 #[pyfunction]
 fn trim_overlap(existing_text: &str, new_chunk: &str) -> String {
@@ -660,28 +654,6 @@ fn process_content_for_template_format<'py>(
     Err(pyo3::exceptions::PyValueError::new_err(format!("Invalid content format: {}", content_format)))
 }
 
-#[pyfunction]
-fn find_files(path: &str) -> PyResult<Vec<String>> {
-    let mut files = Vec::new();
-    let walker = ignore::WalkBuilder::new(path)
-        .follow_links(true)
-        .hidden(false)
-        .git_ignore(false)
-        .build();
-
-    for result in walker {
-        let entry = result.map_err(|err| pyo3::exceptions::PyIOError::new_err(err.to_string()))?;
-        if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-            if let Some(path) = entry.path().to_str() {
-                files.push(path.to_string());
-            }
-        }
-    }
-
-    files.sort();
-    Ok(files)
-}
-
 fn compute_sha256(path: &Path) -> PyResult<(String, u64)> {
     let file = File::open(path).map_err(|err| {
         pyo3::exceptions::PyIOError::new_err(format!("{}: {}", path.display(), err))
@@ -750,17 +722,14 @@ fn sha256_manifest<'py>(
 fn sglang_rust_utils(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(trim_overlap, m)?)?;
     m.add_function(wrap_pyfunction!(find_files, m)?)?;
-<<<<<<< HEAD
     m.add_function(wrap_pyfunction!(sha256_manifest, m)?)?;
     m.add_function(wrap_pyfunction!(hicache_hash, m)?)?;
     m.add_function(wrap_pyfunction!(hicache_page_hashes, m)?)?;
     m.add_function(wrap_pyfunction!(hicache_hash_to_int64, m)?)?;
     m.add_function(wrap_pyfunction!(saguaro_prefix_hash, m)?)?;
     m.add_function(wrap_pyfunction!(pack_sampling_params, m)?)?;
-=======
     m.add_class::<RustReasoningState>()?;
     m.add_function(wrap_pyfunction!(process_content_for_template_format, m)?)?;
->>>>>>> e0905f017488c752faeed9aedcf62d0ec397d020
     Ok(())
 }
 

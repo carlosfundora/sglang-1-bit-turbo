@@ -5,12 +5,5 @@
   "timestamp": "2026-05-19T15:49:42Z",
   "iterations": 100000,
   "input_description": "detect_and_parse (pure rust)",
-  "duration_ms": 193.88484954833984
-  "candidate": "python/sglang/srt/parser/harmony_parser.py",
-  "implementation": "after",
-  "command": "python3 test_harmony_benchmark.py",
-  "timestamp": "2026-05-18T23:40:57Z",
-  "iterations": 50000,
-  "input_description": "Streaming harmony chunks",
-  "duration_ms": 1046.9141006469727
+  "duration_ms": 193.88
 }
