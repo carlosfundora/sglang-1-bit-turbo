@@ -14,7 +14,7 @@ def write_req_to_token_pool_triton(
     req_pool_indices,
     pre_lens,
     seq_lens,
-    extend_lens,
+    cumsum_extend_lens,
     out_cache_loc,
     req_to_token_ptr_stride: tl.constexpr,
 ):
@@ -25,10 +25,9 @@ def write_req_to_token_pool_triton(
     pre_len = tl.load(pre_lens + pid)
     seq_len = tl.load(seq_lens + pid)
 
-    # TODO: optimize this?
-    cumsum_start = 0
-    for i in range(pid):
-        cumsum_start += tl.load(extend_lens + i)
+    cumsum_start = tl.cast(0, tl.int64)
+    if pid > 0:
+        cumsum_start = tl.load(cumsum_extend_lens + pid - 1)
 
     num_loop = tl.cdiv(seq_len - pre_len, BLOCK_SIZE)
     for i in range(num_loop):
@@ -51,7 +50,7 @@ def write_req_to_token_pool_triton_optimize(
     req_pool_indices,
     pre_lens,
     seq_lens,
-    extend_lens,
+    cumsum_extend_lens,
     out_cache_loc,
     req_to_token_ptr_stride: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -64,9 +63,9 @@ def write_req_to_token_pool_triton_optimize(
     seq_len = tl.load(seq_lens + pid_batch)
     extend_len = seq_len - pre_len
 
-    cumsum_start = 0
-    for i in range(pid_batch):
-        cumsum_start += tl.load(extend_lens + i)
+    cumsum_start = tl.cast(0, tl.int64)
+    if pid_batch > 0:
+        cumsum_start = tl.load(cumsum_extend_lens + pid_batch - 1)
 
     token_start = pid_token * BLOCK_SIZE
 
@@ -132,12 +131,13 @@ def test_write_req_to_token_pool():
     req_to_token_opt = req_to_token.clone()
 
     # Run original triton kernel
+    cumsum_extend_lens = extend_lens.cumsum(dim=0, dtype=torch.int64)
     write_req_to_token_pool_triton[(batch_size,)](
         req_to_token,
         req_pool_indices,
         pre_lens,
         seq_lens,
-        extend_lens,
+        cumsum_extend_lens,
         out_cache_loc,
         max_context_len,
     )
@@ -147,12 +147,13 @@ def test_write_req_to_token_pool():
         num_token_blocks = triton.cdiv(extend_len, 512)
         return (batch_size, num_token_blocks)
 
+    cumsum_extend_lens = extend_lens.cumsum(dim=0, dtype=torch.int64)
     write_req_to_token_pool_triton_optimize[grid(batch_size, extend_len)](
         req_to_token_opt,
         req_pool_indices,
         pre_lens,
         seq_lens,
-        extend_lens,
+        cumsum_extend_lens,
         out_cache_loc,
         max_context_len,
         BLOCK_SIZE=512,
@@ -190,24 +191,26 @@ def test_write_req_to_token_pool():
     req_to_token_opt = req_to_token.clone()
 
     # Run original triton kernel
+    cumsum_extend_lens = extend_lens.cumsum(dim=0, dtype=torch.int64)
     write_req_to_token_pool_triton[(batch_size,)](
         req_to_token,
         req_pool_indices,
         pre_lens,
         seq_lens,
-        extend_lens,
+        cumsum_extend_lens,
         out_cache_loc,
         max_context_len,
     )
 
     # Run optimized triton kernel
     max_extend_len = max(extend_lens_list)
+    cumsum_extend_lens = extend_lens.cumsum(dim=0, dtype=torch.int64)
     write_req_to_token_pool_triton_optimize[grid(batch_size, max_extend_len)](
         req_to_token_opt,
         req_pool_indices,
         pre_lens,
         seq_lens,
-        extend_lens,
+        cumsum_extend_lens,
         out_cache_loc,
         max_context_len,
         BLOCK_SIZE=512,
@@ -283,7 +286,7 @@ def get_benchmark():
                     req_pool_indices,
                     pre_lens,
                     seq_lens,
-                    extend_lens,
+                    extend_lens.cumsum(dim=0, dtype=torch.int64),
                     out_cache_loc,
                     max_context_len,
                 ),
@@ -299,7 +302,7 @@ def get_benchmark():
                     req_pool_indices,
                     pre_lens,
                     seq_lens,
-                    extend_lens,
+                    extend_lens.cumsum(dim=0, dtype=torch.int64),
                     out_cache_loc,
                     max_context_len,
                     BLOCK_SIZE=block_size,

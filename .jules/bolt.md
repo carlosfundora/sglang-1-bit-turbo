@@ -9,3 +9,6 @@
 ## 2024-05-14 - Batch Merging Invariants and Early Returns
 **Learning:** In complex batch managers like `ScheduleBatch`, an early return from `filter_batch` (e.g. when `keep_indices` is empty) can leave residual, stale tensor data even if the request list (`self.reqs`) is cleared. If `merge_batch` checks only `other.is_empty()` but NOT `self.is_empty()`, the merge will append `other`'s valid tensors onto `self`'s residual tensors, causing massive size mismatches and corruption in subsequent steps.
 **Action:** Always guard state-mutating batch merge operations (like `ScheduleBatch.merge_batch` and `SamplingBatchInfo.merge_batch`) with an explicit `is_empty()` check on `self` to prevent appending valid incoming data to residual/stale internal states.
+## 2024-05-15 - Triton Kernel Prefix Sum Optimization
+**Learning:** Using an O(N) loop to compute a prefix sum per thread (e.g., `for i in range(pid): cumsum_start += tl.load(extend_lens + i)`) inside a Triton kernel creates an O(N²) anti-pattern that becomes painfully slow at large batch sizes.
+**Action:** Optimize this by precomputing the prefix sum on the Python side using PyTorch (`cumsum_extend_lens = extend_lens.cumsum(dim=0, dtype=torch.int64)`) and passing it to the kernel for an O(1) lookup per thread (`cumsum_start = tl.load(cumsum_extend_lens + pid - 1)`).
