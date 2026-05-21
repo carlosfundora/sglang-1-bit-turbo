@@ -12,3 +12,6 @@
 ## 2024-05-15 - Triton Kernel Prefix Sum Optimization
 **Learning:** Using an O(N) loop to compute a prefix sum per thread (e.g., `for i in range(pid): cumsum_start += tl.load(extend_lens + i)`) inside a Triton kernel creates an O(N²) anti-pattern that becomes painfully slow at large batch sizes.
 **Action:** Optimize this by precomputing the prefix sum on the Python side using PyTorch (`cumsum_extend_lens = extend_lens.cumsum(dim=0, dtype=torch.int64)`) and passing it to the kernel for an O(1) lookup per thread (`cumsum_start = tl.load(cumsum_extend_lens + pid - 1)`).
+## 2026-05-21 - [Replace copy.deepcopy with list() in hot loop]
+**Learning:** In highly asynchronous or batched contexts (like tokenizer management or IO handling), `copy.deepcopy()` is incredibly slow for copying simple primitive structures like lists of integers. It adds huge per-request processing time due to Python's internal tracking mechanisms for circular references.
+**Action:** Use shallow copy methods like `list(x)`, `x.copy()`, or `x[:]` when dealing with primitive 1D list structures rather than blindly utilizing deepcopy.
