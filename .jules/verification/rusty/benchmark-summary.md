@@ -1,8 +1,13 @@
-# Benchmark Summary
+# Benchmark Summary: _find_common_prefix
 
-*   **Before command:** `python3 get_benchmark_json.py` (Benchmarking Python implementation)
-*   **After command:** `rustc rust_benchmark.rs && ./rust_benchmark` (Benchmarking Rust implementation)
-*   **Before timing:** 379.03 ms
-*   **After timing:** 225.0 ms
-*   **Percent change:** -40.6%
-*   **Notes:** The Python code was benchmarked using a mock script because standard tests were failing due to missing system dependencies (`tqdm`, `openai`). The Rust code was benchmarked by compiling the core streaming increment loop natively and measuring it. This represents a substantial 40.6% improvement in throughput for inner-loop streaming reasoning chunk processing.
+## Before Refactor
+- **Command:** `python python/sglang/test/test_find_common_prefix_bench.py before`
+- **Timing:** 11327.10 ms (for 5000 iterations on ~9000 character strings)
+
+## After Refactor
+- **Command:** `python python/sglang/test/test_find_common_prefix_bench.py after`
+- **Timing:** 67.85 ms (for 5000 iterations on same strings)
+
+## Delta
+- **Percent Change:** ~99.4% improvement
+- **Notes:** The previous python implementation used a python string concatenation in a loop (`prefix += s1[i]`) making the time complexity quadratic `O(N^2)` with respects to the common prefix length. The Rust implementation uses a fast byte comparison loop `s1.bytes().zip(s2.bytes())` and performs character boundary safety checks, resolving the operation in a fraction of a millisecond.

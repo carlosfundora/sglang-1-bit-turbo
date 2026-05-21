@@ -8,8 +8,19 @@ from partial_json_parser.core.options import Allow
 
 from sglang.srt.entrypoints.openai.protocol import Tool, ToolChoice
 
+try:
+    from sglang.sglang_rust_utils import find_common_prefix as _rust_find_common_prefix
+except ImportError:
+    try:
+        from sglang_rust_utils import find_common_prefix as _rust_find_common_prefix
+    except ImportError:
+        _rust_find_common_prefix = None
+
 
 def _find_common_prefix(s1: str, s2: str) -> str:
+    if _rust_find_common_prefix is not None:
+        return _rust_find_common_prefix(s1, s2)
+
     prefix = ""
     min_length = min(len(s1), len(s2))
     for i in range(0, min_length):
