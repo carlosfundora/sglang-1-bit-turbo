@@ -18,7 +18,6 @@ processes (TokenizerManager, DetokenizerManager, Scheduler).
 
 from __future__ import annotations
 
-import copy
 import uuid
 from abc import ABC
 from collections import Counter
@@ -540,7 +539,7 @@ class GenerateReqInput(BaseReq):
             self.token_ids_logprob = [[self.token_ids_logprob] for _ in range(num)]
         elif not isinstance(self.token_ids_logprob[0], list):
             self.token_ids_logprob = [
-                copy.deepcopy(self.token_ids_logprob) for _ in range(num)
+                list(self.token_ids_logprob) for _ in range(num)
             ]
         elif self.parallel_sample_num > 1:
             raise ValueError(
