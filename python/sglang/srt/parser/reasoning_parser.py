@@ -7,10 +7,7 @@ from typing import Dict, Optional, Tuple, Type
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 from sglang.srt.parser.harmony_parser import HarmonyParser
 
-try:
-    from sglang.sglang_rust_utils import RustReasoningState
-except ImportError:
-    RustReasoningState = None
+from sglang.sglang_rust_utils import RustReasoningState
 
 
 class StreamingParseResult:
@@ -60,69 +57,24 @@ class BaseReasoningFormatDetector:
         if self.think_end_token in self.previous_content:
             self._in_reasoning = False
 
-        self.rust_state = None
-        if RustReasoningState is not None:
-            self.rust_state = RustReasoningState(self._in_reasoning, self.stripped_think_start, self._buffer)
+        self.rust_state = RustReasoningState(self._in_reasoning, self.stripped_think_start, self._buffer)
 
     def detect_and_parse(self, text: str) -> StreamingParseResult:
         """
         One-time parsing: Detects and parses reasoning sections in the provided text.
         Returns both reasoning content and normal text separately.
         """
-        if self.rust_state is not None:
-            normal_text, reasoning_text = self.rust_state.detect_and_parse(
-                text,
-                self.think_start_token,
-                self.think_end_token,
-                self.tool_start_token,
-                self.previous_content,
-            )
-            return StreamingParseResult(
-                normal_text=normal_text,
-                reasoning_text=reasoning_text,
-            )
-
-        in_reasoning = self._in_reasoning or self.think_start_token in text
-
-        if not in_reasoning:
-            return StreamingParseResult(normal_text=text)
-
-        # The text is considered to be in a reasoning block.
-        processed_text = text.replace(self.think_start_token, "", 1).strip()
-
-        if (
-            self.think_end_token not in processed_text
-            and self.think_end_token not in self.previous_content
-        ):
-            # Check for tool_start_token interruption
-            if (
-                in_reasoning
-                and self.tool_start_token is not None
-                and self.tool_start_token in processed_text
-            ):
-                # Find the first occurrence of tool_start_token and split there
-                tool_idx = processed_text.find(self.tool_start_token)
-                reasoning_text = processed_text[:tool_idx].strip()
-                # Preserve tool_start_token in normal text
-                normal_text = processed_text[tool_idx:]
-                return StreamingParseResult(
-                    normal_text=normal_text, reasoning_text=reasoning_text
-                )
-            # Assume reasoning was truncated before end token
-            return StreamingParseResult(reasoning_text=processed_text)
-
-        # Extract reasoning content
-        if self.think_end_token in processed_text:
-            splits = processed_text.split(self.think_end_token, maxsplit=1)
-            reasoning_text = splits[0]
-            normal_text = splits[1].strip()
-
-            return StreamingParseResult(
-                normal_text=normal_text, reasoning_text=reasoning_text
-            )
-        else:
-            # think_end_token is in self.previous_content for continue_final_message=True case
-            return StreamingParseResult(normal_text=processed_text)
+        normal_text, reasoning_text = self.rust_state.detect_and_parse(
+            text,
+            self.think_start_token,
+            self.think_end_token,
+            self.tool_start_token,
+            self.previous_content,
+        )
+        return StreamingParseResult(
+            normal_text=normal_text,
+            reasoning_text=reasoning_text,
+        )
 
     def parse_streaming_increment(self, new_text: str) -> StreamingParseResult:
         """

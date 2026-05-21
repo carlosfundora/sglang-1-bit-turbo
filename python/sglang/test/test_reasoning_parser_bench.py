@@ -51,7 +51,6 @@ def bench_before():
 
     # Pre-warm
     parser = reasoning_parser.BaseReasoningFormatDetector("<think>", "</think>")
-    parser.rust_state = None
     for _ in range(100):
         parser.detect_and_parse(text)
 
