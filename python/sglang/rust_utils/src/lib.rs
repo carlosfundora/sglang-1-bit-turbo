@@ -1,4 +1,33 @@
 use pyo3::prelude::*;
+
+use regex::Regex;
+use std::sync::OnceLock;
+
+static ITERATION_RE: OnceLock<Regex> = OnceLock::new();
+
+#[pyfunction]
+fn detect_jinja_template_content_format(chat_template: &str) -> PyResult<String> {
+    // Check for multimodal keywords
+    if chat_template.contains("image")
+        || chat_template.contains("audio")
+        || chat_template.contains("video")
+        || chat_template.contains("vision")
+    {
+        return Ok("openai".to_string());
+    }
+
+    // Try to find content iteration loop
+    let iteration_re = ITERATION_RE.get_or_init(|| {
+        Regex::new(r"\{%[-]?\s*for\s+[a-zA-Z0-9_]+\s+in\s+(?:message\['content'\]|msg\.content|m\.content)\s*[-]?%\}").unwrap()
+    });
+
+    if iteration_re.is_match(chat_template) {
+        return Ok("openai".to_string());
+    }
+
+    Ok("string".to_string())
+}
+
 use pyo3::types::{PyAny, PyDict, PyList, PyString};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -750,6 +779,7 @@ fn sglang_rust_utils(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pack_sampling_params, m)?)?;
     m.add_class::<RustReasoningState>()?;
     m.add_function(wrap_pyfunction!(process_content_for_template_format, m)?)?;
+    m.add_function(wrap_pyfunction!(detect_jinja_template_content_format, m)?)?;
     Ok(())
 }
 
