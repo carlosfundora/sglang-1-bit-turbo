@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import dataclasses
 import logging
 from dataclasses import replace
@@ -566,10 +565,10 @@ class TboForwardBatchPreparer:
             extend_seq_lens_cpu[tbo_split_seq_index] - left_last_seq_token_num
         )
 
-        # making deepcopy to be extra safe
-        child_a.extend_seq_lens_cpu = copy.deepcopy(child_a.extend_seq_lens_cpu)
+        # making shallow copy to avoid deepcopy overhead on simple primitive lists
+        child_a.extend_seq_lens_cpu = list(child_a.extend_seq_lens_cpu)
         child_a.extend_seq_lens_cpu[-1] = left_last_seq_token_num
-        child_b.extend_seq_lens_cpu = copy.deepcopy(child_b.extend_seq_lens_cpu)
+        child_b.extend_seq_lens_cpu = list(child_b.extend_seq_lens_cpu)
         child_b.extend_seq_lens_cpu[0] = right_first_seq_token_num
         for child in [child_a, child_b]:
             _update_device_and_sum_field_from_cpu_field(
@@ -583,7 +582,7 @@ class TboForwardBatchPreparer:
             child_a.extend_num_tokens == half_seq_lens_sum
         ), f"{child_a.extend_num_tokens=}, {half_seq_lens_sum=}"
 
-        child_a.seq_lens_cpu = copy.deepcopy(child_a.seq_lens_cpu)
+        child_a.seq_lens_cpu = list(child_a.seq_lens_cpu)
         child_a.seq_lens_cpu[-1] = (
             child_a.extend_seq_lens_cpu[-1] + child_a.extend_prefix_lens_cpu[-1]
         )
@@ -594,7 +593,7 @@ class TboForwardBatchPreparer:
             sum_field="seq_lens_sum",
         )
 
-        child_b.extend_prefix_lens_cpu = copy.deepcopy(child_b.extend_prefix_lens_cpu)
+        child_b.extend_prefix_lens_cpu = list(child_b.extend_prefix_lens_cpu)
         child_b.extend_prefix_lens_cpu[0] += left_last_seq_token_num
         _update_device_and_sum_field_from_cpu_field(
             batch=child_b,
