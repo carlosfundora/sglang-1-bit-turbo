@@ -21,3 +21,6 @@
 ## 2026-05-21 - [Deepcopy in filter_batch]
 **Learning:** The `SamplingBatchInfo.filter_batch()` in speculative decoding components called `copy.deepcopy()` to maintain references. This needlessly invoked Pytorch's expensive tensor deepcopy allocations for elements that are fully replaced within `filter_batch` anyways.
 **Action:** Implemented a robust `clone()` method utilizing `dataclasses.replace` for shallow tensor copying and precise `.copy()`/`deepcopy` instructions for specific mutating inner list/dict configurations, avoiding CUDA synchronizations and CPU-bottlenecks.
+## 2026-05-22 - [Avoid copy.deepcopy in SamplingBatchInfo]
+**Learning:** `copy.deepcopy(sampling_info)` in `python/sglang/srt/speculative/eagle_info.py` and `python/sglang/srt/speculative/ngram_info.py` introduces significant CPU overhead in the hot loop of speculative decoding because `SamplingBatchInfo` contains many primitive lists and tensors. Deepcopy takes excessive time verifying cycle references across PyTorch structures.
+**Action:** Replaced `copy.deepcopy` with a bespoke `.clone()` method on `SamplingBatchInfo` that leverages `dataclasses.replace` along with shallow copying mutable sub-structures (e.g., `list()`, `dict()`) and recursively cloning `BatchedPenalizerOrchestrator`. This provides massive speedups for speculative decode inference while maintaining full safety.

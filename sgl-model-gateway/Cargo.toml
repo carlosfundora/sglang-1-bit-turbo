@@ -118,6 +118,7 @@ once_cell = "1.21.3"
 # CRDT for Mesh state synchronization
 crdts = "7.3"
 redis = { version = "0.27.6", features = ["tokio-comp", "json", "connection-manager"] }
+rs_gfxgraph_core = { path = "crates/rs_gfxgraph_core" }
 
 
 # wasm dependencies
@@ -200,6 +201,7 @@ opt-level = 1
 
 [workspace]
 members = [
+    "crates/rs_gfxgraph_core",
     "smg-file-verifier",
     "bindings/python"
 ]

@@ -18,7 +18,7 @@ name = "smg_file_verifier"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies.pyo3]
-version = "0.27"
+version = "0.28.3"
 features = ["extension-module"]
 optional = true
 
