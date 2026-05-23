@@ -248,6 +248,32 @@ class SamplingBatchInfo:
     ):
         pass
 
+    def clone(self) -> "SamplingBatchInfo":
+        # Create a shallow copy of the dataclass
+        new_info = dataclasses.replace(self)
+
+        # Deep clone lists and dicts that might be mutated, but avoid deepcopy for tensors
+        if self.custom_params is not None:
+            new_info.custom_params = list(self.custom_params)
+
+        if self.custom_logit_processor is not None:
+            # The custom logit processor dict contains tensors, so we shallow copy the dict
+            # and let the tensors be passed by reference (they should not be mutated in-place)
+            new_info.custom_logit_processor = dict(self.custom_logit_processor)
+
+        if self.grammars is not None:
+            new_info.grammars = list(self.grammars)
+
+        # Tensors can be safely shared since filter_batch typically assigns new tensor objects
+        # rather than mutating in-place, but just to be safe from some mutations, we might
+        # need to handle them carefully. However, standard decoding paths do assignments.
+        # Clone orchestrator since its filter method modifies internal states
+        if self.penalizer_orchestrator is not None:
+            new_info.penalizer_orchestrator = self.penalizer_orchestrator.clone()
+
+
+        return new_info
+
     def __len__(self):
         return len(self.temperatures)
 

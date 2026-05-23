@@ -15,3 +15,6 @@
 ## 2026-05-21 - [Replace copy.deepcopy with list() in hot loop]
 **Learning:** In highly asynchronous or batched contexts (like tokenizer management or IO handling), `copy.deepcopy()` is incredibly slow for copying simple primitive structures like lists of integers. It adds huge per-request processing time due to Python's internal tracking mechanisms for circular references.
 **Action:** Use shallow copy methods like `list(x)`, `x.copy()`, or `x[:]` when dealing with primitive 1D list structures rather than blindly utilizing deepcopy.
+## 2026-05-22 - [Avoid copy.deepcopy in SamplingBatchInfo]
+**Learning:** `copy.deepcopy(sampling_info)` in `python/sglang/srt/speculative/eagle_info.py` and `python/sglang/srt/speculative/ngram_info.py` introduces significant CPU overhead in the hot loop of speculative decoding because `SamplingBatchInfo` contains many primitive lists and tensors. Deepcopy takes excessive time verifying cycle references across PyTorch structures.
+**Action:** Replaced `copy.deepcopy` with a bespoke `.clone()` method on `SamplingBatchInfo` that leverages `dataclasses.replace` along with shallow copying mutable sub-structures (e.g., `list()`, `dict()`) and recursively cloning `BatchedPenalizerOrchestrator`. This provides massive speedups for speculative decode inference while maintaining full safety.
