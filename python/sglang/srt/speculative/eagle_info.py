@@ -1,6 +1,5 @@
 import logging
 import os
-from copy import copy
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -393,7 +392,7 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
         accept_length = torch.empty((bs,), dtype=torch.int32, device=batch.device)
 
         if bs != len(sampling_info):
-            sampling_info = copy.deepcopy(sampling_info)
+            sampling_info = sampling_info.clone()
             # NOTE: retrive_index are the indices of the requests that are kept.
             sampling_info.filter_batch(self.retrive_index.tolist(), self.retrive_index)
 

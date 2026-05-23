@@ -248,6 +248,40 @@ class SamplingBatchInfo:
     ):
         pass
 
+    def clone(self):
+        import copy
+
+        ret = copy.copy(self)
+        for field in [
+            "temperatures",
+            "top_ps",
+            "top_ks",
+            "min_ps",
+            "sampling_seed",
+            "vocab_mask",
+            "acc_linear_penalties",
+            "logit_bias",
+        ]:
+            val = getattr(self, field, None)
+            if val is not None:
+                setattr(ret, field, val.clone())
+
+        if self.custom_logit_processor is not None:
+            ret.custom_logit_processor = {
+                k: (v[0], v[1].clone()) for k, v in self.custom_logit_processor.items()
+            }
+
+        if self.custom_params is not None:
+            ret.custom_params = list(self.custom_params)
+
+        if self.grammars is not None:
+            ret.grammars = list(self.grammars)
+
+        if self.penalizer_orchestrator is not None:
+            ret.penalizer_orchestrator = copy.deepcopy(self.penalizer_orchestrator)
+
+        return ret
+
     def __len__(self):
         return len(self.temperatures)
 

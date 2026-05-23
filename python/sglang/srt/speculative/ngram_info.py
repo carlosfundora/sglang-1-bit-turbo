@@ -1,22 +1,19 @@
 from __future__ import annotations
 
-import copy
 import logging
 from typing import Optional, Tuple
 
 import torch
-import triton
-
-from sglang.srt.constrained.base_grammar_backend import BaseGrammarObject
-from sglang.srt.server_args import get_global_server_args
-
-logger = logging.getLogger(__name__)
 
 from dataclasses import dataclass
 
 import torch.nn.functional as F
 
+from sglang.srt.constrained.base_grammar_backend import BaseGrammarObject
+from sglang.srt.server_args import get_global_server_args
+
 from sglang.srt.environ import envs
+
 from sglang.srt.layers.attention.utils import create_flashinfer_kv_indices_triton
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.layers.sampler import apply_custom_logit_processor
@@ -35,6 +32,8 @@ from sglang.srt.speculative.spec_utils import (
     get_tree_spec_sampling_fn,
 )
 from sglang.srt.utils import is_cuda, is_hip, next_power_of_2
+
+logger = logging.getLogger(__name__)
 
 if is_cuda():
     from sgl_kernel import (
@@ -403,7 +402,7 @@ class NgramVerifyInput(SpecInput):
         sampling_info = batch.sampling_info
 
         if bs != len(sampling_info):
-            sampling_info = copy.deepcopy(sampling_info)
+            sampling_info = sampling_info.clone()
             # NOTE: retrive_index are the indices of the requests that are kept.
             sampling_info.filter_batch(self.retrive_index.tolist(), self.retrive_index)
 

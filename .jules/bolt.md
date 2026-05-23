@@ -15,3 +15,6 @@
 ## 2026-05-21 - [Replace copy.deepcopy with list() in hot loop]
 **Learning:** In highly asynchronous or batched contexts (like tokenizer management or IO handling), `copy.deepcopy()` is incredibly slow for copying simple primitive structures like lists of integers. It adds huge per-request processing time due to Python's internal tracking mechanisms for circular references.
 **Action:** Use shallow copy methods like `list(x)`, `x.copy()`, or `x[:]` when dealing with primitive 1D list structures rather than blindly utilizing deepcopy.
+## 2024-05-23 - SamplingBatchInfo Deepcopy Overhead
+**Learning:** Using `copy.deepcopy(sampling_info)` in the hot loop of speculative decoding (`eagle_info.py`, `ngram_info.py`) introduces severe CPU overhead due to Python's internal tracking for circular references and recursive traversal of PyTorch tensors.
+**Action:** Implement a custom `clone()` method for complex objects like `SamplingBatchInfo` that performs a shallow copy of the object and selectively calls `.clone()` on tensor fields, while safely handling nested non-tensor objects.
