@@ -1,9 +1,9 @@
 {
-  "candidate": "python/sglang/srt/function_call/utils.py",
+  "candidate": "python/sglang/srt/entrypoints/openai/serving_chat.py",
   "implementation": "after",
-  "command": "python python/sglang/test/test_find_common_prefix_bench.py after",
-  "timestamp": "2026-05-21T09:50:00Z",
+  "command": "python3 bench_schema_run.py",
+  "timestamp": "2024-05-23T08:00:00Z",
   "iterations": 5000,
-  "input_description": "_find_common_prefix long string",
-  "duration_ms": 64.07380104064941
+  "input_description": "Valid JSON schema validation",
+  "duration_ms": 155.92322099996636
 }

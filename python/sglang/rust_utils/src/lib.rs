@@ -240,7 +240,7 @@ fn trim_overlap(existing_text: &str, new_chunk: &str) -> String {
     let mut max_overlap = 0;
 
     for i in 1..=max_possible {
-        if existing_text.ends_with(&new_chunk[..i]) {
+        if new_chunk.is_char_boundary(i) && existing_text.ends_with(&new_chunk[..i]) {
             max_overlap = i;
         }
     }
@@ -378,7 +378,10 @@ impl RustReasoningState {
                 self.buffer.clear();
                 self.in_reasoning = false;
                 let normal_text = current_text[end_idx + think_end_token.len()..].to_string();
-                return Ok((Some(normal_text), Some(reasoning_text.trim_end().to_string())));
+                return Ok((
+                    Some(normal_text),
+                    Some(reasoning_text.trim_end().to_string()),
+                ));
             }
         }
 
@@ -470,7 +473,9 @@ fn process_content_for_template_format<'py>(
                                     } else {
                                         None
                                     }
-                                } else { None };
+                                } else {
+                                    None
+                                };
 
                                 let mut url = String::new();
                                 let mut detail = "auto".to_string();
@@ -511,7 +516,7 @@ fn process_content_for_template_format<'py>(
                                 let new_part = PyDict::new(py);
                                 new_part.set_item("type", "image")?;
                                 processed_content_parts.append(new_part)?;
-                            },
+                            }
                             "video_url" => {
                                 let video_obj = chunk.get_item("video_url")?;
                                 let video_dict = if let Some(obj) = video_obj {
@@ -520,7 +525,9 @@ fn process_content_for_template_format<'py>(
                                     } else {
                                         None
                                     }
-                                } else { None };
+                                } else {
+                                    None
+                                };
 
                                 let mut url = String::new();
                                 let mut max_dynamic_patch: Option<Py<PyAny>> = None;
@@ -552,7 +559,7 @@ fn process_content_for_template_format<'py>(
                                 let new_part = PyDict::new(py);
                                 new_part.set_item("type", "video")?;
                                 processed_content_parts.append(new_part)?;
-                            },
+                            }
                             "audio_url" => {
                                 let mut url = String::new();
                                 let audio_obj = chunk.get_item("audio_url")?;
@@ -576,7 +583,7 @@ fn process_content_for_template_format<'py>(
                                 let new_part = PyDict::new(py);
                                 new_part.set_item("type", "audio")?;
                                 processed_content_parts.append(new_part)?;
-                            },
+                            }
                             "text" => {
                                 if use_dpsk_v32_encoding {
                                     if let Some(text_val) = chunk.get_item("text")? {
@@ -587,7 +594,7 @@ fn process_content_for_template_format<'py>(
                                 } else {
                                     processed_content_parts.append(chunk)?;
                                 }
-                            },
+                            }
                             _ => {}
                         }
                     }
@@ -615,7 +622,6 @@ fn process_content_for_template_format<'py>(
         }
 
         return Ok(new_msg);
-
     } else if content_format == "string" {
         let mut text_parts = Vec::new();
 
@@ -651,7 +657,10 @@ fn process_content_for_template_format<'py>(
         return Ok(new_msg);
     }
 
-    Err(pyo3::exceptions::PyValueError::new_err(format!("Invalid content format: {}", content_format)))
+    Err(pyo3::exceptions::PyValueError::new_err(format!(
+        "Invalid content format: {}",
+        content_format
+    )))
 }
 
 fn compute_sha256(path: &Path) -> PyResult<(String, u64)> {
@@ -737,6 +746,19 @@ fn find_common_prefix(s1: &str, s2: &str) -> String {
     s1[..prefix_len].to_string()
 }
 
+#[pyfunction]
+fn is_valid_json_schema(schema_str: &str) -> PyResult<()> {
+    let schema_json: serde_json::Value = serde_json::from_str(schema_str)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
+    match jsonschema::JSONSchema::options().compile(&schema_json) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Invalid JSON Schema: {}",
+            e
+        ))),
+    }
+}
+
 #[pymodule]
 fn sglang_rust_utils(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(find_common_prefix, m)?)?;
@@ -750,6 +772,7 @@ fn sglang_rust_utils(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pack_sampling_params, m)?)?;
     m.add_class::<RustReasoningState>()?;
     m.add_function(wrap_pyfunction!(process_content_for_template_format, m)?)?;
+    m.add_function(wrap_pyfunction!(is_valid_json_schema, m)?)?;
     Ok(())
 }
 
