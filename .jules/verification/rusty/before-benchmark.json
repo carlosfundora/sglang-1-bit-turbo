@@ -1,9 +1,9 @@
 {
-  "candidate": "python/sglang/srt/function_call/utils.py",
+  "candidate": "python/sglang/utils.py",
   "implementation": "before",
-  "command": "python python/sglang/test/test_find_common_prefix_bench.py before",
-  "timestamp": "2026-05-21T09:49:01Z",
-  "iterations": 5000,
-  "input_description": "_find_common_prefix long string",
-  "duration_ms": 11619.39811706543
+  "command": "python python/sglang/test/test_utils_find_printable_text_bench.py",
+  "timestamp": "2026-05-23T22:19:57Z",
+  "iterations": 1000000,
+  "input_description": "find_printable_text (pure python)",
+  "duration_ms": 3426.80025100708
 }

@@ -372,25 +372,6 @@ def _is_chinese_char(cp: int):
     return False
 
 
-def find_printable_text(text: str):
-    """Returns the longest printable substring of text that contains only entire words."""
-    # Borrowed from https://github.com/huggingface/transformers/blob/061580c82c2db1de9139528243e105953793f7a2/src/transformers/generation/streamers.py#L99
-
-    # After the symbol for a new line, we flush the cache.
-    if text.endswith("\n"):
-        return text
-    # If the last token is a CJK character, we print the characters.
-    elif len(text) > 0 and _is_chinese_char(ord(text[-1])):
-        return text
-    # Otherwise if the penultimate token is a CJK character, we print the characters except for the last one.
-    elif len(text) > 1 and _is_chinese_char(ord(text[-2])):
-        return text[:-1]
-    # Otherwise, prints until the last space char (simple heuristic to avoid printing incomplete words,
-    # which may change with the subsequent token -- there are probably smarter ways to do this!)
-    else:
-        return text[: text.rfind(" ") + 1]
-
-
 class LazyImport:
     """Lazy import to make `import sglang` run faster."""
 
@@ -673,11 +654,30 @@ class TypeBasedDispatcher:
 
 
 try:
-    from sglang.sglang_rust_utils import trim_overlap
+    from sglang.sglang_rust_utils import find_printable_text, trim_overlap
 except Exception:
     try:
-        from sglang_rust_utils import trim_overlap
+        from sglang_rust_utils import find_printable_text, trim_overlap
     except Exception:
+
+        def find_printable_text(text: str):
+            """Returns the longest printable substring of text that contains only entire words."""
+            # Borrowed from https://github.com/huggingface/transformers/blob/061580c82c2db1de9139528243e105953793f7a2/src/transformers/generation/streamers.py#L99
+
+            # After the symbol for a new line, we flush the cache.
+            if text.endswith("\n"):
+                return text
+            # If the last token is a CJK character, we print the characters.
+            elif len(text) > 0 and _is_chinese_char(ord(text[-1])):
+                return text
+            # Otherwise if the penultimate token is a CJK character, we print the characters except for the last one.
+            elif len(text) > 1 and _is_chinese_char(ord(text[-2])):
+                return text[:-1]
+            # Otherwise, prints until the last space char (simple heuristic to avoid printing incomplete words,
+            # which may change with the subsequent token -- there are probably smarter ways to do this!)
+            else:
+                return text[: text.rfind(" ") + 1]
+
 
         def trim_overlap(existing_text, new_chunk):
             """

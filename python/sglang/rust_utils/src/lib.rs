@@ -718,6 +718,53 @@ fn sha256_manifest<'py>(
     Ok(manifest)
 }
 
+fn is_chinese_char(cp: u32) -> bool {
+    (cp >= 0x4E00 && cp <= 0x9FFF)
+        || (cp >= 0x3400 && cp <= 0x4DBF)
+        || (cp >= 0x20000 && cp <= 0x2A6DF)
+        || (cp >= 0x2A700 && cp <= 0x2B73F)
+        || (cp >= 0x2B740 && cp <= 0x2B81F)
+        || (cp >= 0x2B820 && cp <= 0x2CEAF)
+        || (cp >= 0xF900 && cp <= 0xFAFF)
+        || (cp >= 0x2F800 && cp <= 0x2FA1F)
+}
+
+#[pyfunction]
+fn find_printable_text(text: &str) -> String {
+    if text.ends_with('\n') {
+        return text.to_string();
+    }
+
+    let char_count = text.chars().count();
+
+    if char_count > 0 {
+        if let Some(last_char) = text.chars().last() {
+            if is_chinese_char(last_char as u32) {
+                return text.to_string();
+            }
+        }
+    }
+
+    if char_count > 1 {
+        if let Some(penultimate_char) = text.chars().nth(char_count - 2) {
+            if is_chinese_char(penultimate_char as u32) {
+                let mut iter = text.char_indices().rev();
+                let _ = iter.next(); // Skip the last character
+                if let Some((idx, _)) = iter.next() {
+                    let end_idx = idx + penultimate_char.len_utf8();
+                    return text[..end_idx].to_string();
+                }
+            }
+        }
+    }
+
+    if let Some(rfind_idx) = text.rfind(' ') {
+        return text[..=rfind_idx].to_string();
+    }
+
+    "".to_string()
+}
+
 #[pyfunction]
 fn find_common_prefix(s1: &str, s2: &str) -> String {
     let mut prefix_len = 0;
@@ -739,6 +786,7 @@ fn find_common_prefix(s1: &str, s2: &str) -> String {
 
 #[pymodule]
 fn sglang_rust_utils(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(find_printable_text, m)?)?;
     m.add_function(wrap_pyfunction!(find_common_prefix, m)?)?;
     m.add_function(wrap_pyfunction!(trim_overlap, m)?)?;
     m.add_function(wrap_pyfunction!(find_files, m)?)?;
