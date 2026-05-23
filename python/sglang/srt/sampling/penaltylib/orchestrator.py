@@ -5,6 +5,7 @@ import weakref
 from typing import TYPE_CHECKING, Optional, Set, Type
 
 import torch
+import copy
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import ScheduleBatch
@@ -31,6 +32,26 @@ class BatchedPenalizerOrchestrator:
     @property
     def batch(self) -> ScheduleBatch | None:
         return self._batch_ref()
+
+    def clone(self) -> "BatchedPenalizerOrchestrator":
+        # Create a new instance with the same basic parameters
+        new_orchestrator = BatchedPenalizerOrchestrator(
+            vocab_size=self.vocab_size,
+            batch=self.batch,
+            penalizers=set(type(p) for p in self.penalizers.values()),
+        )
+
+        new_orchestrator.is_required = self.is_required
+
+        # Clone each penalizer's state
+        for p_type, p_instance in self.penalizers.items():
+            if hasattr(p_instance, "clone"):
+                new_orchestrator.penalizers[p_type] = p_instance.clone()
+            else:
+                # Fallback to copy.copy for penalizers if they don't have clone
+                new_orchestrator.penalizers[p_type] = copy.copy(p_instance)
+
+        return new_orchestrator
 
     @batch.setter
     def batch(self, value: Optional[ScheduleBatch]):
