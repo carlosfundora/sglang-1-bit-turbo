@@ -1,9 +1,9 @@
 {
-  "candidate": "python/sglang/srt/function_call/utils.py",
+  "candidate": "python/sglang/srt/parser/jinja_template_utils.py",
   "implementation": "after",
-  "command": "python python/sglang/test/test_find_common_prefix_bench.py after",
-  "timestamp": "2026-05-21T09:50:00Z",
+  "command": "python test_benchmark.py",
+  "timestamp": "2026-05-22T10:53:53Z",
   "iterations": 5000,
-  "input_description": "_find_common_prefix long string",
-  "duration_ms": 64.07380104064941
+  "input_description": "detect_jinja_template_content_format",
+  "duration_ms": 2.722501754760742
 }

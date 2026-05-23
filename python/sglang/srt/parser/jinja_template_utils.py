@@ -12,7 +12,7 @@ import transformers.utils.chat_template_utils as hf_chat_utils
 from sglang.srt.utils import ImageData
 
 try:
-    from sglang.sglang_rust_utils import process_content_for_template_format as rust_process
+    from sglang.sglang_rust_utils import process_content_for_template_format as rust_process, detect_jinja_template_content_format as rust_detect
     RUST_UTILS_AVAILABLE = True
 except ImportError:
     RUST_UTILS_AVAILABLE = False
@@ -85,6 +85,9 @@ def _try_extract_ast(chat_template: str):
 
 
 def detect_jinja_template_content_format(chat_template: str) -> str:
+    if RUST_UTILS_AVAILABLE:
+        return rust_detect(chat_template)
+
     """
     Detect whether a chat template expects 'string' or 'openai' content format.
 

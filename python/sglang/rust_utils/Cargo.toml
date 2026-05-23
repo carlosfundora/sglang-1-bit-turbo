@@ -19,6 +19,7 @@ hex = "0.4"
 ignore = "0.4"
 rayon = "1.10"
 sha2 = "0.10"
+regex = "1.12.3"
 
 [profile.release]
 lto = true
