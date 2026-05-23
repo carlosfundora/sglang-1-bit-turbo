@@ -718,8 +718,28 @@ fn sha256_manifest<'py>(
     Ok(manifest)
 }
 
+#[pyfunction]
+fn find_common_prefix(s1: &str, s2: &str) -> String {
+    let mut prefix_len = 0;
+    for (b1, b2) in s1.bytes().zip(s2.bytes()) {
+        if b1 == b2 {
+            prefix_len += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Ensure we don't slice inside a character boundary
+    while prefix_len > 0 && !s1.is_char_boundary(prefix_len) {
+        prefix_len -= 1;
+    }
+
+    s1[..prefix_len].to_string()
+}
+
 #[pymodule]
 fn sglang_rust_utils(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(find_common_prefix, m)?)?;
     m.add_function(wrap_pyfunction!(trim_overlap, m)?)?;
     m.add_function(wrap_pyfunction!(find_files, m)?)?;
     m.add_function(wrap_pyfunction!(sha256_manifest, m)?)?;
@@ -808,5 +828,12 @@ mod tests {
 
         let expected_all = hex::encode(Sha256::digest(b"1,2,3"));
         assert_eq!(saguaro_prefix_hash_parts(&parts, 0), expected_all);
+    }
+
+    #[test]
+    fn computes_common_prefix() {
+        assert_eq!(find_common_prefix("hello world", "hello friend"), "hello ");
+        assert_eq!(find_common_prefix("abc", "xyz"), "");
+        assert_eq!(find_common_prefix("café next", "café prev"), "café ");
     }
 }

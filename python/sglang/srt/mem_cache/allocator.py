@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Copyright 2025 SGLang Team
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,9 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""
-Page-aligned memory pool.
-"""
+from __future__ import annotations
 
 import abc
 from typing import TYPE_CHECKING
@@ -26,7 +22,7 @@ import torch
 import triton
 import triton.language as tl
 
-from sglang.srt.utils import get_bool_env_var, get_num_new_pages, next_power_of_2
+from sglang.srt.utils import get_bool_env_var, get_num_new_pages
 
 if TYPE_CHECKING:
     from sglang.srt.mem_cache.memory_pool import KVCache
@@ -235,34 +231,26 @@ def alloc_extend_naive(
 def alloc_extend_kernel(
     pre_lens_ptr,
     seq_lens_ptr,
+    cumsum_extend_lens_ptr,
+    cumsum_num_new_pages_ptr,
     last_loc_ptr,
     free_page_ptr,
     out_indices,
-    bs_upper: tl.constexpr,
     page_size: tl.constexpr,
 ):
     pid = tl.program_id(0)
-
-    load_offset = tl.arange(0, bs_upper)
-    seq_lens = tl.load(seq_lens_ptr + load_offset, mask=load_offset <= pid)
-    pre_lens = tl.load(pre_lens_ptr + load_offset, mask=load_offset <= pid)
-    extend_lens = seq_lens - pre_lens
 
     seq_len = tl.load(seq_lens_ptr + pid)
     pre_len = tl.load(pre_lens_ptr + pid)
     extend_len = seq_len - pre_len
 
-    sum_extend_lens = tl.sum(extend_lens)
+    sum_extend_lens = tl.load(cumsum_extend_lens_ptr + pid)
     output_start_loc = sum_extend_lens - extend_len
-
-    num_pages_after = (seq_lens + page_size - 1) // page_size
-    num_pages_before = (pre_lens + page_size - 1) // page_size
-    num_new_pages = num_pages_after - num_pages_before
 
     num_page_start_loc_self = (seq_len + page_size - 1) // page_size - (
         pre_len + page_size - 1
     ) // page_size
-    sum_num_new_pages = tl.sum(num_new_pages)
+    sum_num_new_pages = tl.load(cumsum_num_new_pages_ptr + pid)
     new_page_start_loc = sum_num_new_pages - num_page_start_loc_self
 
     # Part 1: fill the old partial page
@@ -320,29 +308,21 @@ def alloc_extend_kernel(
 @triton.jit
 def alloc_decode_kernel(
     seq_lens_ptr,
+    cumsum_num_new_pages_ptr,
     last_loc_ptr,
     free_page_ptr,
     out_indices,
-    bs_upper: tl.constexpr,
     page_size: tl.constexpr,
 ):
     pid = tl.program_id(0)
 
-    load_offset = tl.arange(0, bs_upper)
-    seq_lens = tl.load(seq_lens_ptr + load_offset, mask=load_offset <= pid)
-    pre_lens = tl.where(load_offset <= pid, seq_lens - 1, seq_lens)
-
     seq_len = tl.load(seq_lens_ptr + pid)
     pre_len = seq_len - 1
-
-    num_pages_after = (seq_lens + page_size - 1) // page_size
-    num_pages_before = (pre_lens + page_size - 1) // page_size
-    num_new_pages = num_pages_after - num_pages_before
 
     num_page_start_loc_self = (seq_len + page_size - 1) // page_size - (
         pre_len + page_size - 1
     ) // page_size
-    sum_num_new_pages = tl.sum(num_new_pages)
+    sum_num_new_pages = tl.load(cumsum_num_new_pages_ptr + pid)
     new_page_start_loc = sum_num_new_pages - num_page_start_loc_self
 
     if num_page_start_loc_self == 0:
@@ -424,13 +404,22 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             (extend_num_tokens,), dtype=torch.int64, device=self.device
         )
 
+        extend_lens = seq_lens - prefix_lens
+        cumsum_extend_lens = torch.cumsum(extend_lens, dim=0, dtype=torch.int64)
+
+        num_pages_after = (seq_lens + self.page_size - 1) // self.page_size
+        num_pages_before = (prefix_lens + self.page_size - 1) // self.page_size
+        num_new_pages = num_pages_after - num_pages_before
+        cumsum_num_new_pages = torch.cumsum(num_new_pages, dim=0, dtype=torch.int64)
+
         alloc_extend_kernel[(bs,)](
             prefix_lens,
             seq_lens,
+            cumsum_extend_lens,
+            cumsum_num_new_pages,
             last_loc,
             self.free_pages,
             out_indices,
-            next_power_of_2(bs),
             self.page_size,
         )
 
@@ -464,12 +453,18 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             self.merge_and_sort_free()
 
         out_indices = torch.empty((bs,), dtype=torch.int64, device=self.device)
+        pre_lens = seq_lens - 1
+        num_pages_after = (seq_lens + self.page_size - 1) // self.page_size
+        num_pages_before = (pre_lens + self.page_size - 1) // self.page_size
+        num_new_pages = num_pages_after - num_pages_before
+        cumsum_num_new_pages = torch.cumsum(num_new_pages, dim=0, dtype=torch.int64)
+
         alloc_decode_kernel[(bs,)](
             seq_lens,
+            cumsum_num_new_pages,
             last_loc,
             self.free_pages,
             out_indices,
-            next_power_of_2(bs),
             self.page_size,
         )
 
