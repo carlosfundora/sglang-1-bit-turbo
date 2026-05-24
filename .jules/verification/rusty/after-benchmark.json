@@ -1,9 +1,1 @@
-{
-  "candidate": "python/sglang/srt/parser/jinja_template_utils.py",
-  "implementation": "after",
-  "command": "python test_benchmark.py",
-  "timestamp": "2026-05-22T10:53:53Z",
-  "iterations": 5000,
-  "input_description": "detect_jinja_template_content_format",
-  "duration_ms": 2.722501754760742
-}
+{"candidate": "python/sglang/rust_utils/src/lib.rs (trim_overlap)", "implementation": "after", "duration_ms": 13}
