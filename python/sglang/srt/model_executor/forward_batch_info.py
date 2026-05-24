@@ -562,7 +562,8 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                     # causes OOB Q reads in the Triton kernel on RDNA2.
                     actual_tokens = ret.input_ids.shape[0] if ret.input_ids is not None else draft_num * bs
                     actual_per_seq = actual_tokens // max(bs, 1)
-                    import os as _os9, sys as _sys9
+                    import os as _os9
+                    import sys as _sys9
                     if _os9.environ.get("PHANTOM_VERIFY_SYNC"):
                         _sys9.stderr.write(
                             f"[FWD_BATCH] TARGET_VERIFY synthesis: draft_num={draft_num} "
@@ -1222,6 +1223,7 @@ def compute_position_triton(
     extend_start_loc = torch.empty(
         batch_size, dtype=torch.int32, device=extend_seq_lens.device
     )
+    cumsum_extend_seq_lens = extend_seq_lens.cumsum(dim=0, dtype=torch.int64)
 
     # Launch kernel
     compute_position_kernel[(batch_size,)](
@@ -1229,6 +1231,7 @@ def compute_position_triton(
         extend_start_loc,
         extend_prefix_lens,
         extend_seq_lens,
+        cumsum_extend_seq_lens,
         has_prefix,
     )
 
@@ -1241,6 +1244,7 @@ def compute_position_kernel(
     extend_start_loc,
     extend_prefix_lens,
     extend_seq_lens,
+    cumsum_extend_seq_lens,
     has_prefix: tl.constexpr,
 ):
     BLOCK_SIZE: tl.constexpr = 512
@@ -1249,10 +1253,10 @@ def compute_position_kernel(
     prefix_len = tl.load(extend_prefix_lens + pid) if has_prefix else 0
     seq_len = tl.load(extend_seq_lens + pid)
 
-    # NOTE: This can be slow for large bs
-    cumsum_start = tl.cast(0, tl.int64)
-    for i in range(pid):
-        cumsum_start += tl.load(extend_seq_lens + i)
+    if pid == 0:
+        cumsum_start = tl.cast(0, tl.int64)
+    else:
+        cumsum_start = tl.load(cumsum_extend_seq_lens + pid - 1)
 
     num_loop = tl.cdiv(seq_len, BLOCK_SIZE)
     for i in range(num_loop):

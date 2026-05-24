@@ -7,7 +7,7 @@ name = "sglang"
 dynamic = ["version"]
 description = "SGLang is a fast serving framework for large language models and vision language models."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 license = { file = "LICENSE" }
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -29,6 +29,7 @@ runtime_common = [
   "fastapi",
   "gguf",
   "interegular",
+  "jsonschema",
   "llguidance>=0.7.11,<0.8.0",
   "modelscope",
   "msgspec",
@@ -107,45 +108,20 @@ diffusion_hip = [
 
 # For Intel Gaudi(device : hpu) follow the installation guide
 # https://docs.vllm.ai/en/latest/getting_started/gaudi-installation.html
-srt_hpu = ["sglang[runtime_common]"]
+srt_hpu = []
 
 # https://docs.sglang.io/platforms/mthreads_gpu.md
 srt_musa = [
-    "sglang[runtime_common]",
-    "torch",
-    "torch_musa",
-    "torchada>=0.1.25",
-    "mthreads-ml-py",
-    "numpy<2.0",
 ]
 
 diffusion_musa = [
-  "sglang[diffusion_common]",
-  "st_attn==0.0.7",
-  "vsa==0.0.4",
-  "runai_model_streamer>=0.15.5",
-  "cache-dit==1.1.8",
 ]
 
 # https://docs.sglang.io/platforms/mps.md
 srt_mps = [
-    "sglang[runtime_common]",
-    "torch==2.9.1",
-    "torchao==0.9.0",
-    "torchaudio==2.9.1",
-    "torchvision",
 ]
 
 diffusion_mps = [
-  "sglang[diffusion_common]",
-  "cloudpickle==3.1.2",
-  "remote-pdb==2.1.0",
-  "cache-dit==1.2.3",
-  "addict==2.4.0",
-  "av==16.1.0",
-  "scikit-image==0.25.2",
-  "trimesh>=4.0.0",
-  "xatlas",
 ]
 
 test = [
@@ -165,13 +141,13 @@ all_hip = ["sglang[srt_hip]", "sglang[diffusion_hip]"]
 all_hpu = ["sglang[srt_hpu]"]
 all_musa = ["sglang[srt_musa]", "sglang[diffusion_musa]"]
 all_mps = ["sglang[srt_mps]", "sglang[diffusion_mps]"]
-all = ["sglang[srt]", "sglang[diffusion]"]
+all = ["sglang[all_hip]"]
 
-dev = ["sglang[all]", "sglang[test]"]
+dev = ["sglang[dev_hip]"]
 dev_hip = ["sglang[all_hip]", "sglang[test]"]
-dev_hpu = ["sglang[all_hpu]", "sglang[test]"]
-dev_musa = ["sglang[all_musa]", "sglang[test]"]
-dev_mps = ["sglang[all_mps]", "sglang[test]"]
+dev_hpu = []
+dev_musa = []
+dev_mps = []
 
 [project.urls]
 "Homepage" = "https://github.com/sgl-project/sglang"
@@ -212,3 +188,19 @@ exclude = [
 root = ".."
 version_file = "sglang/_version.py"
 git_describe_command = ["git", "describe", "--tags", "--long", "--match", "v*"]
+
+[tool.uv]
+index-strategy = "unsafe-best-match"
+environments = [
+  "sys_platform == 'linux' and platform_machine == 'x86_64' and implementation_name == 'cpython'",
+]
+
+[[tool.uv.index]]
+name = "pytorch-rocm72"
+url = "https://download.pytorch.org/whl/rocm7.2"
+
+[tool.uv.sources]
+torch = { index = "pytorch-rocm72" }
+torchaudio = { index = "pytorch-rocm72" }
+torchvision = { index = "pytorch-rocm72" }
+triton-rocm = { index = "pytorch-rocm72" }
