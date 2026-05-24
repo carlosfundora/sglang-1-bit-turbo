@@ -14,6 +14,11 @@ from fastapi import Request
 from fastapi.responses import ORJSONResponse, StreamingResponse
 from jsonschema import Draft202012Validator, SchemaError
 
+try:
+    from sglang.sglang_rust_utils import check_schema_fast
+except ImportError:
+    check_schema_fast = None
+
 from sglang.srt.entrypoints.openai.encoding_dsv32 import encode_messages
 from sglang.srt.entrypoints.openai.protocol import (
     ChatCompletionRequest,
@@ -215,10 +220,17 @@ class OpenAIServingChat(OpenAIServingBase):
         for i, tool in enumerate(request.tools or []):
             if tool.function.parameters is None:
                 continue
-            try:
-                Draft202012Validator.check_schema(tool.function.parameters)
-            except SchemaError as e:
-                return f"Tool {i} function has invalid 'parameters' schema: {str(e)}"
+
+            if check_schema_fast is not None:
+                try:
+                    check_schema_fast(tool.function.parameters)
+                except ValueError as e:
+                    return f"Tool {i} function has invalid 'parameters' schema: {str(e)}"
+            else:
+                try:
+                    Draft202012Validator.check_schema(tool.function.parameters)
+                except SchemaError as e:
+                    return f"Tool {i} function has invalid 'parameters' schema: {str(e)}"
 
         max_output_tokens = request.max_completion_tokens or request.max_tokens
         server_context_length = self.tokenizer_manager.server_args.context_length
@@ -490,7 +502,7 @@ class OpenAIServingChat(OpenAIServingBase):
                     return_dict=False,
                     **extra_template_kwargs,
                 )
-            except Exception as e:
+            except Exception:
                 # If the first attempt fails, try with flat function-only format.
                 # Some templates (e.g. Mistral) expect tools without the OpenAI wrapper.
                 tools = (

@@ -407,7 +407,10 @@ impl RustReasoningState {
                 self.buffer.clear();
                 self.in_reasoning = false;
                 let normal_text = current_text[end_idx + think_end_token.len()..].to_string();
-                return Ok((Some(normal_text), Some(reasoning_text.trim_end().to_string())));
+                return Ok((
+                    Some(normal_text),
+                    Some(reasoning_text.trim_end().to_string()),
+                ));
             }
         }
 
@@ -499,7 +502,9 @@ fn process_content_for_template_format<'py>(
                                     } else {
                                         None
                                     }
-                                } else { None };
+                                } else {
+                                    None
+                                };
 
                                 let mut url = String::new();
                                 let mut detail = "auto".to_string();
@@ -540,7 +545,7 @@ fn process_content_for_template_format<'py>(
                                 let new_part = PyDict::new(py);
                                 new_part.set_item("type", "image")?;
                                 processed_content_parts.append(new_part)?;
-                            },
+                            }
                             "video_url" => {
                                 let video_obj = chunk.get_item("video_url")?;
                                 let video_dict = if let Some(obj) = video_obj {
@@ -549,7 +554,9 @@ fn process_content_for_template_format<'py>(
                                     } else {
                                         None
                                     }
-                                } else { None };
+                                } else {
+                                    None
+                                };
 
                                 let mut url = String::new();
                                 let mut max_dynamic_patch: Option<Py<PyAny>> = None;
@@ -581,7 +588,7 @@ fn process_content_for_template_format<'py>(
                                 let new_part = PyDict::new(py);
                                 new_part.set_item("type", "video")?;
                                 processed_content_parts.append(new_part)?;
-                            },
+                            }
                             "audio_url" => {
                                 let mut url = String::new();
                                 let audio_obj = chunk.get_item("audio_url")?;
@@ -605,7 +612,7 @@ fn process_content_for_template_format<'py>(
                                 let new_part = PyDict::new(py);
                                 new_part.set_item("type", "audio")?;
                                 processed_content_parts.append(new_part)?;
-                            },
+                            }
                             "text" => {
                                 if use_dpsk_v32_encoding {
                                     if let Some(text_val) = chunk.get_item("text")? {
@@ -616,7 +623,7 @@ fn process_content_for_template_format<'py>(
                                 } else {
                                     processed_content_parts.append(chunk)?;
                                 }
-                            },
+                            }
                             _ => {}
                         }
                     }
@@ -644,7 +651,6 @@ fn process_content_for_template_format<'py>(
         }
 
         return Ok(new_msg);
-
     } else if content_format == "string" {
         let mut text_parts = Vec::new();
 
@@ -680,7 +686,10 @@ fn process_content_for_template_format<'py>(
         return Ok(new_msg);
     }
 
-    Err(pyo3::exceptions::PyValueError::new_err(format!("Invalid content format: {}", content_format)))
+    Err(pyo3::exceptions::PyValueError::new_err(format!(
+        "Invalid content format: {}",
+        content_format
+    )))
 }
 
 fn compute_sha256(path: &Path) -> PyResult<(String, u64)> {
@@ -780,6 +789,8 @@ fn sglang_rust_utils(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustReasoningState>()?;
     m.add_function(wrap_pyfunction!(process_content_for_template_format, m)?)?;
     m.add_function(wrap_pyfunction!(detect_jinja_template_content_format, m)?)?;
+    m.add_class::<FastJSONSchemaValidator>()?;
+    m.add_function(wrap_pyfunction!(check_schema_fast, m)?)?;
     Ok(())
 }
 
@@ -866,4 +877,13 @@ mod tests {
         assert_eq!(find_common_prefix("abc", "xyz"), "");
         assert_eq!(find_common_prefix("café next", "café prev"), "café ");
     }
+}
+
+pub mod jsonschema_validator;
+use jsonschema_validator::FastJSONSchemaValidator;
+
+#[pyfunction]
+fn check_schema_fast(schema_dict: &Bound<'_, PyDict>) -> PyResult<()> {
+    let _ = FastJSONSchemaValidator::new(schema_dict)?;
+    Ok(())
 }

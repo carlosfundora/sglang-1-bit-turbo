@@ -1,1 +1,11 @@
-{"candidate": "python/sglang/rust_utils/src/lib.rs (trim_overlap)", "implementation": "before", "duration_ms": 13}
+{
+  "candidate": "python/sglang/srt/entrypoints/openai/serving_chat.py",
+  "implementation": "before",
+  "command": "python3 bench_jsonschema.py",
+  "timestamp": "2024-05-24T08:16:00Z",
+  "iterations": 10000,
+  "input_description": "draft202012 schema validation",
+  "duration_ms": 32758.32,
+  "throughput": "305.27 ops/sec",
+  "notes": "Python jsonschema library is extremely slow."
+}
