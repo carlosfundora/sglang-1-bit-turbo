@@ -187,6 +187,49 @@ class RDNA2Ops:
             logger.debug(f"RDNA2 RoPE fallback: {e}")
             return None
 
+    # ──── Fused QKNorm + RoPE ────
+
+    def fused_qknorm_rope(
+        self,
+        qkv: Tensor,
+        q_weight: Tensor,
+        k_weight: Tensor,
+        cos_sin_cache: Tensor,
+        position_ids: Tensor,
+        num_heads_q: int,
+        num_heads_k: int,
+        num_heads_v: int,
+        head_dim: int,
+        rotary_dim: int,
+        eps: float = 1e-6,
+        is_neox: bool = True,
+    ) -> Optional[bool]:
+        """Fused per-head QKNorm + RoPE. Returns True on success, None on fallback."""
+        if not self.probe():
+            return None
+        try:
+            from .fused_qknorm_rope import fused_qknorm_rope as _fused
+
+            _fused(
+                qkv,
+                q_weight,
+                k_weight,
+                cos_sin_cache,
+                position_ids,
+                num_heads_q,
+                num_heads_k,
+                num_heads_v,
+                head_dim,
+                rotary_dim,
+                eps,
+                is_neox,
+            )
+            return True
+        except Exception as e:
+            self._compilation_errors.append(("fused_qknorm_rope", str(e)))
+            logger.debug(f"RDNA2 fused QKNorm+RoPE fallback: {e}")
+            return None
+
     # ──── Activations ────
 
     def silu_and_mul(self, input: Tensor) -> Optional[Tensor]:
@@ -228,6 +271,7 @@ class RDNA2Ops:
                 "rmsnorm": self._check_kernel("rmsnorm"),
                 "fp8_dequant": self._check_kernel("fp8_dequant"),
                 "rope": self._check_kernel("rope"),
+                "fused_qknorm_rope": self._check_kernel("fused_qknorm_rope"),
                 "activations": self._check_kernel("activations"),
             },
         }
