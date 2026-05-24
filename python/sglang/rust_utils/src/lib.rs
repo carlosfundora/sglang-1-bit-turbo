@@ -269,7 +269,7 @@ fn trim_overlap(existing_text: &str, new_chunk: &str) -> String {
     let mut max_overlap = 0;
 
     for i in 1..=max_possible {
-        if existing_text.ends_with(&new_chunk[..i]) {
+        if new_chunk.is_char_boundary(i) && existing_text.ends_with(&new_chunk[..i]) {
             max_overlap = i;
         }
     }
