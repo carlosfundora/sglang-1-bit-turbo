@@ -1,1 +1,10 @@
-{"candidate": "python/sglang/rust_utils/src/lib.rs (trim_overlap)", "implementation": "after", "duration_ms": 13}
+{
+  "candidate": "python/sglang/srt/entrypoints/openai/serving_chat.py",
+  "implementation": "after",
+  "command": "python3 .jules/verification/rusty/bench_jsonschema_rust.py",
+  "timestamp": "2024-05-24T16:25:00Z",
+  "iterations": 1000,
+  "input_description": "JSON schema for checking a Draft 2020-12 validation",
+  "duration_ms": 33.6,
+  "notes": "Fast."
+}

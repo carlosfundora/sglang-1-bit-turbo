@@ -13,6 +13,7 @@ import orjson
 from fastapi import Request
 from fastapi.responses import ORJSONResponse, StreamingResponse
 from jsonschema import Draft202012Validator, SchemaError
+from sglang.sglang_rust_utils import check_jsonschema
 
 from sglang.srt.entrypoints.openai.encoding_dsv32 import encode_messages
 from sglang.srt.entrypoints.openai.protocol import (
@@ -216,8 +217,8 @@ class OpenAIServingChat(OpenAIServingBase):
             if tool.function.parameters is None:
                 continue
             try:
-                Draft202012Validator.check_schema(tool.function.parameters)
-            except SchemaError as e:
+                check_jsonschema(orjson.dumps(tool.function.parameters).decode("utf-8"))
+            except ValueError as e:
                 return f"Tool {i} function has invalid 'parameters' schema: {str(e)}"
 
         max_output_tokens = request.max_completion_tokens or request.max_tokens

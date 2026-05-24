@@ -780,6 +780,7 @@ fn sglang_rust_utils(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustReasoningState>()?;
     m.add_function(wrap_pyfunction!(process_content_for_template_format, m)?)?;
     m.add_function(wrap_pyfunction!(detect_jinja_template_content_format, m)?)?;
+    m.add_function(wrap_pyfunction!(check_jsonschema, m)?)?;
     Ok(())
 }
 
@@ -866,4 +867,20 @@ mod tests {
         assert_eq!(find_common_prefix("abc", "xyz"), "");
         assert_eq!(find_common_prefix("café next", "café prev"), "café ");
     }
+}
+
+
+
+#[pyfunction]
+fn check_jsonschema(schema_str: &str) -> PyResult<bool> {
+    let schema: serde_json::Value = serde_json::from_str(schema_str).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid schema JSON: {}", e))
+    })?;
+
+    // We only want to check if the schema itself is valid.
+    let _validator = jsonschema::validator_for(&schema).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid schema definition: {}", e))
+    })?;
+
+    Ok(true)
 }
