@@ -673,10 +673,10 @@ class TypeBasedDispatcher:
 
 
 try:
-    from sglang.sglang_rust_utils import trim_overlap
+    from sglang.sglang_rust_utils import find_printable_text, trim_overlap
 except Exception:
     try:
-        from sglang_rust_utils import trim_overlap
+        from sglang_rust_utils import find_printable_text, trim_overlap
     except Exception:
 
         def trim_overlap(existing_text, new_chunk):

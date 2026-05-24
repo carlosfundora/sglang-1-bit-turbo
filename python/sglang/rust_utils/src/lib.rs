@@ -1,6 +1,8 @@
 use pyo3::prelude::*;
 
+use jsonschema::validator_for;
 use regex::Regex;
+use serde_json::Value;
 use std::sync::OnceLock;
 
 static ITERATION_RE: OnceLock<Regex> = OnceLock::new();
@@ -28,7 +30,7 @@ fn detect_jinja_template_content_format(chat_template: &str) -> PyResult<String>
     Ok("string".to_string())
 }
 
-use pyo3::types::{PyAny, PyDict, PyList, PyString};
+use pyo3::types::{PyAny, PyDict, PyList};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -747,6 +749,80 @@ fn sha256_manifest<'py>(
     Ok(manifest)
 }
 
+fn is_chinese_char(cp: u32) -> bool {
+    (0x4E00..=0x9FFF).contains(&cp)
+        || (0x3400..=0x4DBF).contains(&cp)
+        || (0x20000..=0x2A6DF).contains(&cp)
+        || (0x2A700..=0x2B73F).contains(&cp)
+        || (0x2B740..=0x2B81F).contains(&cp)
+        || (0x2B820..=0x2CEAF).contains(&cp)
+        || (0xF900..=0xFAFF).contains(&cp)
+        || (0x2F800..=0x2FA1F).contains(&cp)
+}
+
+#[pyfunction]
+fn find_printable_text(text: &str) -> String {
+    if text.ends_with('\n') {
+        return text.to_string();
+    }
+
+    if text.is_empty() {
+        return String::new();
+    }
+
+    if text
+        .chars()
+        .last()
+        .is_some_and(|last_char| is_chinese_char(last_char as u32))
+    {
+        return text.to_string();
+    }
+
+    let mut rev_indices = text.char_indices().rev();
+    let _last = rev_indices.next();
+    if let Some((idx, penultimate_char)) = rev_indices.next() {
+        if is_chinese_char(penultimate_char as u32) {
+            return text[..idx + penultimate_char.len_utf8()].to_string();
+        }
+    }
+
+    if let Some(space_idx) = text.rfind(' ') {
+        return text[..=space_idx].to_string();
+    }
+
+    String::new()
+}
+
+fn compile_jsonschema_value(schema: Value) -> PyResult<()> {
+    validator_for(&schema).map_err(|err| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid schema definition: {err}"))
+    })?;
+    Ok(())
+}
+
+#[pyfunction]
+fn check_jsonschema(schema_str: &str) -> PyResult<bool> {
+    let schema = serde_json::from_str::<Value>(schema_str).map_err(|err| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid schema JSON: {err}"))
+    })?;
+    compile_jsonschema_value(schema)?;
+    Ok(true)
+}
+
+#[pyfunction]
+fn check_schema_fast(schema: &Bound<'_, PyAny>) -> PyResult<()> {
+    let schema_json = schema
+        .py()
+        .import("json")?
+        .getattr("dumps")?
+        .call1((schema,))?
+        .extract::<String>()?;
+    let schema = serde_json::from_str::<Value>(&schema_json).map_err(|err| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid schema JSON: {err}"))
+    })?;
+    compile_jsonschema_value(schema)
+}
+
 #[pyfunction]
 fn find_common_prefix(s1: &str, s2: &str) -> String {
     let mut prefix_len = 0;
@@ -768,6 +844,7 @@ fn find_common_prefix(s1: &str, s2: &str) -> String {
 
 #[pymodule]
 fn sglang_rust_utils(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(find_printable_text, m)?)?;
     m.add_function(wrap_pyfunction!(find_common_prefix, m)?)?;
     m.add_function(wrap_pyfunction!(trim_overlap, m)?)?;
     m.add_function(wrap_pyfunction!(find_files, m)?)?;
@@ -780,6 +857,8 @@ fn sglang_rust_utils(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustReasoningState>()?;
     m.add_function(wrap_pyfunction!(process_content_for_template_format, m)?)?;
     m.add_function(wrap_pyfunction!(detect_jinja_template_content_format, m)?)?;
+    m.add_function(wrap_pyfunction!(check_jsonschema, m)?)?;
+    m.add_function(wrap_pyfunction!(check_schema_fast, m)?)?;
     Ok(())
 }
 
