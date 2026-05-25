@@ -7,3 +7,21 @@ Attention optimizations ported from gfxATOM.
 - triton_mha: Standard MHA with fused operations
 - backends: Backend orchestration
 """
+
+from . import (
+    aiter_attention,
+    aiter_mla,
+    backends,
+    deepseek_v4_attn,
+    gdn_attn,
+    triton_mha,
+)
+
+__all__ = [
+    "aiter_attention",
+    "aiter_mla",
+    "backends",
+    "deepseek_v4_attn",
+    "gdn_attn",
+    "triton_mha",
+]

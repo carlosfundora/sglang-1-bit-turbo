@@ -12,10 +12,13 @@ import triton.language as tl
 
 import aiter
 
-fp8_dtype = aiter.dtypes.fp8
+# FP8 dtype: Use native PyTorch float8_e4m3fn for proper finfo
+# aiter.dtypes.fp8 maps to torch.uint8 which lacks finfo, 
+# but torch.float8_e4m3fn is the proper FP8 format
+fp8_dtype = torch.float8_e4m3fn if hasattr(torch, 'float8_e4m3fn') else aiter.dtypes.fp8
 
 DTYPE_MAX = torch.finfo(fp8_dtype).max
-DTYPE_MIN = -DTYPE_MAX
+DTYPE_MIN = torch.finfo(fp8_dtype).min
 
 
 @triton.heuristics(

@@ -5,3 +5,17 @@ Fundamental operation optimizations ported from gfxATOM.
 - activation_optimized: Fused activation operations
 - rotary_embedding: RoPE embedding generation
 """
+
+from . import (
+    activation_optimized,
+    layernorm_optimized,
+    linear_optimized,
+    rotary_embedding,
+)
+
+__all__ = [
+    "activation_optimized",
+    "layernorm_optimized",
+    "linear_optimized",
+    "rotary_embedding",
+]

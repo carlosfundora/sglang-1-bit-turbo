@@ -5,3 +5,17 @@ Advanced operation optimizations ported from gfxATOM (optional).
 - topK: Efficient top-K selection
 - split_chunk: Memory-efficient chunking
 """
+
+from . import (
+    moe_optimized,
+    sparse_attn_v4,
+    split_chunk,
+    topK,
+)
+
+__all__ = [
+    "moe_optimized",
+    "sparse_attn_v4",
+    "split_chunk",
+    "topK",
+]
