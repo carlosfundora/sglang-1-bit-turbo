@@ -248,6 +248,8 @@ class SamplingBatchInfo:
     ):
         pass
 
+    # ⚡ Bolt Optimization: Removed shadowing clone() method that incorrectly used copy.deepcopy().
+    # The remaining clone() method now safely uses .clone() for orchestrator and shallow copies elsewhere.
     def clone(self) -> "SamplingBatchInfo":
         # Create a shallow copy of the dataclass
         new_info = dataclasses.replace(self)
@@ -465,19 +467,6 @@ class SamplingBatchInfo:
         self.need_min_p_sampling |= other.need_min_p_sampling
 
         self.adjusted_merge_batch(other)
-
-    def clone(self) -> "SamplingBatchInfo":
-        import copy
-
-        ret = dataclasses.replace(self)
-        if ret.custom_params is not None:
-            ret.custom_params = list(ret.custom_params)
-        if ret.custom_logit_processor is not None:
-            ret.custom_logit_processor = ret.custom_logit_processor.copy()
-        if ret.penalizer_orchestrator is not None:
-            ret.penalizer_orchestrator = copy.deepcopy(ret.penalizer_orchestrator)
-        return ret
-
     def copy_for_forward(self):
         # Accumulate the penalty into a pre-allocated buffer to get rid of the dependency of `penalizer_orchestrator` later
         self.update_penalties()
