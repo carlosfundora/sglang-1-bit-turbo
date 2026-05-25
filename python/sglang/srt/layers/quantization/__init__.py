@@ -17,7 +17,6 @@ class DummyConfig:
 CompressedTensorsConfig = DummyConfig
 
 from sglang.srt.layers.quantization.auto_round import AutoRoundConfig
-from sglang.srt.layers.quantization.awq import AWQConfig, AWQMarlinConfig
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.quantization.bitsandbytes import BitsAndBytesConfig
 from sglang.srt.layers.quantization.blockwise_int8 import BlockInt8Config
@@ -36,6 +35,12 @@ from sglang.srt.layers.quantization.petit import PetitNvFp4Config
 from sglang.srt.layers.quantization.qoq import QoQConfig
 from sglang.srt.layers.quantization.quark.quark import QuarkConfig
 from sglang.srt.layers.quantization.turboquant import TurboquantConfig
+
+try:
+    from sglang.srt.layers.quantization.awq import AWQConfig, AWQMarlinConfig
+except Exception:
+    AWQConfig = None
+    AWQMarlinConfig = None
 
 try:
     from sglang.srt.layers.quantization.gemlite_quant import (
@@ -103,6 +108,14 @@ BASE_QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "auto-round": AutoRoundConfig,
     "turboquant": TurboquantConfig,
 }
+
+if AWQConfig is None:
+    BASE_QUANTIZATION_METHODS.pop("modelopt_int4_awq", None)
+    BASE_QUANTIZATION_METHODS.pop("modelopt_w4a8_awq", None)
+    BASE_QUANTIZATION_METHODS.pop("modelopt_nvfp4_awq", None)
+    BASE_QUANTIZATION_METHODS.pop("awq", None)
+if AWQMarlinConfig is None:
+    BASE_QUANTIZATION_METHODS.pop("awq_marlin", None)
 
 if GemLiteConfig is not None:
     BASE_QUANTIZATION_METHODS["gemlite"] = GemLiteConfig

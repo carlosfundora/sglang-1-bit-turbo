@@ -37,8 +37,22 @@ _is_xpu = is_xpu()
 _MOE_PADDING_SIZE = 128 if bool(int(os.getenv("SGLANG_MOE_PADDING", "0"))) else 0
 
 
+def _fallback_silu_and_mul(inp: torch.Tensor, out: torch.Tensor) -> None:
+    half = inp.shape[-1] // 2
+    out.copy_(torch.nn.functional.silu(inp[..., :half]) * inp[..., half:])
+
+
+def _fallback_gelu_and_mul(inp: torch.Tensor, out: torch.Tensor) -> None:
+    half = inp.shape[-1] // 2
+    out.copy_(torch.nn.functional.gelu(inp[..., :half]) * inp[..., half:])
+
+
 if _is_cuda or _is_hip:
-    from sgl_kernel import gelu_and_mul, silu_and_mul
+    try:
+        from sgl_kernel import gelu_and_mul, silu_and_mul
+    except Exception:
+        gelu_and_mul = _fallback_gelu_and_mul
+        silu_and_mul = _fallback_silu_and_mul
 
     if _is_hip:
         _has_vllm = False
@@ -60,13 +74,20 @@ if _is_cuda or _is_hip:
 elif _is_cpu and _is_cpu_amx_available:
     pass
 elif _is_xpu:
-    from sgl_kernel import moe_sum_reduce, silu_and_mul
+    try:
+        from sgl_kernel import moe_sum_reduce, silu_and_mul
+    except Exception:
+        moe_sum_reduce = None
+        silu_and_mul = _fallback_silu_and_mul
 
 
 if _is_cuda or _is_hip or _is_xpu:
-    from sgl_kernel import (  # noqa: F401
-        moe_align_block_size as sgl_moe_align_block_size,
-    )
+    try:
+        from sgl_kernel import (  # noqa: F401
+            moe_align_block_size as sgl_moe_align_block_size,
+        )
+    except Exception:
+        sgl_moe_align_block_size = None
 
 
 @dataclass

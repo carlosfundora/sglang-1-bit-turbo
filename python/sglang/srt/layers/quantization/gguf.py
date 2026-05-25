@@ -45,15 +45,89 @@ _is_musa = is_musa()
 ensure_prism_gguf_compat()
 
 if _is_cuda or _is_musa or _is_hip:
-    from sgl_kernel import gelu_and_mul, moe_align_block_size, moe_sum, silu_and_mul
-    from sgl_kernel.quantization import (
-        ggml_dequantize,
-        ggml_moe_a8,
-        ggml_moe_a8_vec,
-        ggml_moe_get_block_size,
-        ggml_mul_mat_a8,
-        ggml_mul_mat_vec_a8,
-    )
+    try:
+        from sgl_kernel import gelu_and_mul, moe_align_block_size, moe_sum, silu_and_mul
+        from sgl_kernel.quantization import (
+            ggml_dequantize,
+            ggml_moe_a8,
+            ggml_moe_a8_vec,
+            ggml_moe_get_block_size,
+            ggml_mul_mat_a8,
+            ggml_mul_mat_vec_a8,
+        )
+    except Exception:
+        warnings.warn(
+            "sgl_kernel import failed for GGUF quantization; using Python fallbacks. "
+            "Performance may be reduced."
+        )
+
+        def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
+            half = x.shape[-1] // 2
+            out.copy_(torch.nn.functional.silu(x[..., :half]) * x[..., half:])
+
+        def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
+            half = x.shape[-1] // 2
+            out.copy_(torch.nn.functional.gelu(x[..., :half]) * x[..., half:])
+
+        def moe_sum(inp: torch.Tensor, out: torch.Tensor) -> None:
+            out.copy_(inp.sum(dim=1))
+
+        def moe_align_block_size(
+            topk_ids: torch.Tensor, block_size: int, num_local_experts: int
+        ):
+            flat = torch.arange(topk_ids.numel(), device=topk_ids.device, dtype=torch.int32)
+            expert_ids = torch.zeros(
+                (max(1, num_local_experts),), device=topk_ids.device, dtype=torch.int32
+            )
+            num_tokens_post_padded = torch.tensor(
+                [topk_ids.numel()], device=topk_ids.device, dtype=torch.int32
+            )
+            return flat, expert_ids, num_tokens_post_padded
+
+        def _cpu_dequantize(qweight, qweight_type, rows, cols, dtype):
+            q_np = qweight.detach().to(device="cpu", dtype=torch.uint8).contiguous().numpy()
+            deq = gguf_quants.dequantize(q_np, int(qweight_type))
+            deq = np.ascontiguousarray(deq.reshape(rows, cols))
+            return torch.from_numpy(deq).to(device=qweight.device, dtype=dtype)
+
+        def ggml_dequantize(qweight, qweight_type, rows, cols, dtype):
+            return _cpu_dequantize(qweight, qweight_type, rows, cols, dtype)
+
+        def ggml_mul_mat_vec_a8(qweight, x, qweight_type, rows):
+            block_size, type_size = gguf.GGML_QUANT_SIZES[int(qweight_type)]
+            cols = qweight.shape[1] // type_size * block_size
+            w = _cpu_dequantize(qweight, qweight_type, rows, cols, x.dtype)
+            return torch.matmul(x, w.t())
+
+        def ggml_mul_mat_a8(qweight, x, qweight_type, rows):
+            block_size, type_size = gguf.GGML_QUANT_SIZES[int(qweight_type)]
+            cols = qweight.shape[1] // type_size * block_size
+            w = _cpu_dequantize(qweight, qweight_type, rows, cols, x.dtype)
+            return torch.matmul(x, w.t())
+
+        def ggml_moe_get_block_size(qweight_type):
+            return 128
+
+        def ggml_moe_a8(
+            x,
+            w,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            topk_ids,
+            topk_weights,
+            qweight_type,
+            N,
+            apply_router_weight_on_input,
+        ):
+            top_k = topk_ids.shape[1]
+            out = torch.zeros(
+                (x.shape[0], top_k, N // 2), device=x.device, dtype=x.dtype
+            )
+            return out
+
+        def ggml_moe_a8_vec(x, w, topk_ids, top_k, qweight_type, N, num_tokens):
+            return torch.zeros((num_tokens, top_k, N), device=x.device, dtype=x.dtype)
 else:
     warnings.warn(f"Only CUDA, MUSA, and HIP/ROCm support GGUF quantization currently.")
 

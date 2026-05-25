@@ -20,7 +20,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-<<<<<<< HEAD
 try:
     from sglang.sglang_rust_utils import (
         find_files as _rust_find_files,
@@ -35,15 +34,13 @@ except Exception:
     except Exception:
         _rust_find_files = None
         _rust_sha256_manifest = None
-=======
+
 def _get_rust_verifier():
     try:
         from sglang_router import sglang_router_rs
         return sglang_router_rs
     except ImportError:
         return None
-
->>>>>>> e0905f017488c752faeed9aedcf62d0ec397d020
 
 # ======== Data Format ========
 
