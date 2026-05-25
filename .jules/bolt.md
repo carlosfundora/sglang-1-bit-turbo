@@ -16,11 +16,12 @@
 **Learning:** In highly asynchronous or batched contexts (like tokenizer management or IO handling), `copy.deepcopy()` is incredibly slow for copying simple primitive structures like lists of integers. It adds huge per-request processing time due to Python's internal tracking mechanisms for circular references.
 **Action:** Use shallow copy methods like `list(x)`, `x.copy()`, or `x[:]` when dealing with primitive 1D list structures rather than blindly utilizing deepcopy.
 ## 2026-05-21 - [Deepcopy in filter_batch]
-**Learning:** The  in speculative decoding components called  to maintain references. This needlessly invoked Pytorch's expensive tensor deepcopy allocations for elements that are fully replaced within  anyways.
-**Action:** Implemented a robust  method utilizing  for shallow tensor copying and precise / instructions for specific mutating inner list/dict configurations, avoiding CUDA synchronizations and CPU-bottlenecks.
-## 2026-05-21 - [Deepcopy in filter_batch]
 **Learning:** The `SamplingBatchInfo.filter_batch()` in speculative decoding components called `copy.deepcopy()` to maintain references. This needlessly invoked Pytorch's expensive tensor deepcopy allocations for elements that are fully replaced within `filter_batch` anyways.
 **Action:** Implemented a robust `clone()` method utilizing `dataclasses.replace` for shallow tensor copying and precise `.copy()`/`deepcopy` instructions for specific mutating inner list/dict configurations, avoiding CUDA synchronizations and CPU-bottlenecks.
 ## 2026-05-22 - [Avoid copy.deepcopy in SamplingBatchInfo]
 **Learning:** `copy.deepcopy(sampling_info)` in `python/sglang/srt/speculative/eagle_info.py` and `python/sglang/srt/speculative/ngram_info.py` introduces significant CPU overhead in the hot loop of speculative decoding because `SamplingBatchInfo` contains many primitive lists and tensors. Deepcopy takes excessive time verifying cycle references across PyTorch structures.
 **Action:** Replaced `copy.deepcopy` with a bespoke `.clone()` method on `SamplingBatchInfo` that leverages `dataclasses.replace` along with shallow copying mutable sub-structures (e.g., `list()`, `dict()`) and recursively cloning `BatchedPenalizerOrchestrator`. This provides massive speedups for speculative decode inference while maintaining full safety.
+
+## 2026-05-23 - [Shadowing Methods with Unoptimized Implementations]
+**Learning:** In Python codebases with complex merge histories, duplicate method definitions within the same class can silently degrade performance. Because Python evaluates class bodies sequentially, a less-optimized duplicate method at the bottom of a file will silently override a highly optimized version declared earlier. In `SamplingBatchInfo`, an optimized `.clone()` method was overridden by a legacy method using slow `copy.deepcopy()`.
+**Action:** Always verify that optimized methods are not accidentally shadowed by duplicate declarations lower down in the same class file.
