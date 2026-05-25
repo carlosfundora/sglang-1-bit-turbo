@@ -84,6 +84,7 @@ from sglang.srt.configs import (
     NemotronHConfig,
     Olmo3Config,
     Qwen3_5Config,
+    Qwen3_5TextConfig,
     Qwen3_5MoeConfig,
     Qwen3NextConfig,
     Step3p5Config,
@@ -119,6 +120,7 @@ _CONFIG_REGISTRY: List[Type[PretrainedConfig]] = [
     NemotronHConfig,
     DeepseekVLV2Config,
     Qwen3_5Config,
+    Qwen3_5TextConfig,
     Qwen3_5MoeConfig,
     JetNemotronConfig,
     JetVLMConfig,
@@ -158,7 +160,12 @@ def get_rope_config(config):
     """
     rope_params = getattr(config, "rope_parameters", None)
     if rope_params is not None:
-        return rope_params["rope_theta"], rope_params
+        if isinstance(rope_params, dict) and len(rope_params) == 0:
+            return config.rope_theta, None
+        rope_theta = rope_params.get("rope_theta", getattr(config, "rope_theta", None))
+        if rope_theta is None:
+            raise KeyError("rope_theta")
+        return rope_theta, rope_params
     return config.rope_theta, getattr(config, "rope_scaling", None)
 
 

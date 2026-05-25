@@ -138,8 +138,13 @@ class RotaryEmbedding(MultiPlatformOp):
         # use CPU to compute the cache and then move it to GPU. However, we
         # create the cache on GPU for faster initialization. This may cause
         # a slight numerical difference between the HF implementation and ours.
+        # On HIP/RDNA2, constructing the initial RoPE frequency tensor on device
+        # can segfault inside torch's default-device dispatch during model init.
+        # Build on CPU first, then let downstream paths move/cache as needed.
         init_device = (
-            "cpu" if get_global_server_args().rl_on_policy_target is not None else None
+            "cpu"
+            if _is_hip or get_global_server_args().rl_on_policy_target is not None
+            else None
         )
         inv_freq = 1.0 / (
             base
@@ -157,7 +162,13 @@ class RotaryEmbedding(MultiPlatformOp):
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         """Compute the cos and sin cache."""
         inv_freq = self._compute_inv_freq(self.base)
-        t = torch.arange(self.max_position_embeddings, dtype=torch.float)
+        if _is_hip:
+            inv_freq = inv_freq.to(device="cpu")
+            t = torch.arange(
+                self.max_position_embeddings, dtype=torch.float, device="cpu"
+            )
+        else:
+            t = torch.arange(self.max_position_embeddings, dtype=torch.float)
 
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos()

@@ -570,8 +570,12 @@ class GGUFLinearMethod(LinearMethodBase):
             concat_side = sum(x.size(0) for x in data_container)
             # Pad the quantized weights to dense tensor, and create a map
             # with the location of each shard in the padded tensor.
+            # HIP/RDNA2 can crash when allocating/filling this large padded
+            # quant tensor directly on device during model init. Build on CPU
+            # first, then move once populated.
+            padded_data_device = "cpu" if _is_hip else qweight.device
             padded_data = torch.zeros(
-                (concat_side, padded_side), dtype=dtype, device=qweight.device
+                (concat_side, padded_side), dtype=dtype, device=padded_data_device
             )
             # (dim0_start, dim0_end, dim1_size)
             shard_offset_map = dict[str, tuple[int, int, int]]()
@@ -580,8 +584,13 @@ class GGUFLinearMethod(LinearMethodBase):
                 start = sum(x.size(0) for x in data_container[:id_in_container])
                 end = start + data_container[id_in_container].size(0)
                 size = data_container[id_in_container].size(1)
-                padded_data[start:end, :size] = data_container[id_in_container]
+                src = data_container[id_in_container]
+                if padded_data.device.type != src.device.type:
+                    src = src.to(device=padded_data.device, non_blocking=False)
+                padded_data[start:end, :size] = src
                 shard_offset_map[idx] = (start, end, size)
+            if padded_data.device != qweight.device:
+                padded_data = padded_data.to(device=qweight.device, non_blocking=False)
             qweight.data_container.clear()
             padded_param = Parameter(padded_data, requires_grad=False)
             set_weight_attrs(padded_param, vars(qweight))

@@ -641,7 +641,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.init_routed_experts_capturer()
 
         if self.device == "cuda" or self.device == "musa":
-            self.init_cublas()
+            if not _is_hip:
+                self.init_cublas()
             self.init_attention_backend()
             self.kernel_warmup()
             self.init_device_graphs()

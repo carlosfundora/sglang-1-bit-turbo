@@ -87,6 +87,16 @@ def write_cache_indices(
     prefix_tensors: list[torch.Tensor],
     req_to_token_pool: ReqToTokenPool,
 ):
+    _validate_cache_write_inputs(
+        out_cache_loc=out_cache_loc,
+        req_pool_indices_cpu=req_pool_indices_cpu,
+        prefix_lens_cpu=prefix_lens_cpu,
+        seq_lens_cpu=seq_lens_cpu,
+        extend_lens_cpu=extend_lens_cpu,
+        prefix_tensors=prefix_tensors,
+        max_context_len=req_to_token_pool.req_to_token.shape[1],
+    )
+
     if support_triton(get_global_server_args().attention_backend):
         prefix_pointers = torch.tensor(
             [t.data_ptr() for t in prefix_tensors],
@@ -105,6 +115,16 @@ def write_cache_indices(
             out_cache_loc,
             req_to_token_pool.req_to_token.shape[1],
         )
+    elif torch.version.hip is not None:
+        _write_cache_indices_hip_rowwise(
+            out_cache_loc=out_cache_loc,
+            req_pool_indices_cpu=req_pool_indices_cpu,
+            prefix_lens_cpu=prefix_lens_cpu,
+            seq_lens_cpu=seq_lens_cpu,
+            extend_lens_cpu=extend_lens_cpu,
+            prefix_tensors=prefix_tensors,
+            req_to_token_pool=req_to_token_pool,
+        )
     else:
         pt = 0
         for i in range(req_pool_indices_cpu.shape[0]):
@@ -122,6 +142,95 @@ def write_cache_indices(
                 out_cache_loc[pt : pt + extend_len],
             )
             pt += extend_len
+
+
+def _validate_cache_write_inputs(
+    out_cache_loc: torch.Tensor,
+    req_pool_indices_cpu: torch.Tensor,
+    prefix_lens_cpu: torch.Tensor,
+    seq_lens_cpu: torch.Tensor,
+    extend_lens_cpu: torch.Tensor,
+    prefix_tensors: list[torch.Tensor],
+    max_context_len: int,
+):
+    num_reqs = req_pool_indices_cpu.shape[0]
+    if (
+        prefix_lens_cpu.shape[0] != num_reqs
+        or seq_lens_cpu.shape[0] != num_reqs
+        or extend_lens_cpu.shape[0] != num_reqs
+        or len(prefix_tensors) != num_reqs
+    ):
+        raise RuntimeError(
+            "write_cache_indices input shape mismatch: req/prefix/seq/extend lengths diverged"
+        )
+
+    expected_total_extend = int(extend_lens_cpu.sum().item())
+    if out_cache_loc.numel() != expected_total_extend:
+        raise RuntimeError(
+            f"write_cache_indices out_cache_loc mismatch: got {out_cache_loc.numel()} "
+            f"entries but expected {expected_total_extend}"
+        )
+
+    for i in range(num_reqs):
+        req_idx = int(req_pool_indices_cpu[i].item())
+        prefix_len = int(prefix_lens_cpu[i].item())
+        seq_len = int(seq_lens_cpu[i].item())
+        extend_len = int(extend_lens_cpu[i].item())
+        if req_idx < 0:
+            raise RuntimeError(f"write_cache_indices invalid req idx {req_idx} at position {i}")
+        if not (0 <= prefix_len <= seq_len <= max_context_len):
+            raise RuntimeError(
+                "write_cache_indices invalid lens at "
+                f"{i}: prefix={prefix_len}, seq={seq_len}, max_ctx={max_context_len}"
+            )
+        if (seq_len - prefix_len) != extend_len:
+            raise RuntimeError(
+                "write_cache_indices inconsistent extend len at "
+                f"{i}: seq-prefix={seq_len - prefix_len} vs extend={extend_len}"
+            )
+        if prefix_tensors[i].numel() < prefix_len:
+            raise RuntimeError(
+                "write_cache_indices prefix tensor too short at "
+                f"{i}: tensor={prefix_tensors[i].numel()} vs prefix={prefix_len}"
+            )
+
+
+def _write_cache_indices_hip_rowwise(
+    out_cache_loc: torch.Tensor,
+    req_pool_indices_cpu: torch.Tensor,
+    prefix_lens_cpu: torch.Tensor,
+    seq_lens_cpu: torch.Tensor,
+    extend_lens_cpu: torch.Tensor,
+    prefix_tensors: list[torch.Tensor],
+    req_to_token_pool: ReqToTokenPool,
+):
+    req_to_token = req_to_token_pool.req_to_token
+    device = req_to_token.device
+    pt = 0
+
+    for i in range(req_pool_indices_cpu.shape[0]):
+        req_idx = int(req_pool_indices_cpu[i].item())
+        prefix_len = int(prefix_lens_cpu[i].item())
+        seq_len = int(seq_lens_cpu[i].item())
+        extend_len = int(extend_lens_cpu[i].item())
+        row = req_to_token[req_idx]
+        row_cpu = row.to("cpu", dtype=req_to_token.dtype, non_blocking=False)
+
+        if prefix_len > 0:
+            row_cpu.narrow(0, 0, prefix_len).copy_(
+                prefix_tensors[i][:prefix_len].to(
+                    device="cpu", dtype=req_to_token.dtype, non_blocking=False
+                )
+            )
+
+        if extend_len > 0:
+            row_cpu.narrow(0, prefix_len, extend_len).copy_(
+                out_cache_loc[pt : pt + extend_len].to(
+                    device="cpu", dtype=req_to_token.dtype, non_blocking=False
+                )
+            )
+        row.copy_(row_cpu.to(device=device, dtype=req_to_token.dtype, non_blocking=False))
+        pt += extend_len
 
 
 def get_last_loc(

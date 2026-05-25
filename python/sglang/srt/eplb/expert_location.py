@@ -219,22 +219,31 @@ class ExpertLocationMetadata:
         logical_to_all_physical_map: torch.Tensor,
     ):
         _, num_physical_experts = physical_to_logical_map.shape
-
-        logical_to_all_physical_map_padded = F.pad(
-            logical_to_all_physical_map,
+        # ROCm stacks can crash on some tiny tensor pad/count_nonzero ops during
+        # scheduler startup; do this metadata shaping on CPU and copy back.
+        logical_to_all_physical_map_cpu = logical_to_all_physical_map.cpu()
+        logical_to_all_physical_map_padded_cpu = F.pad(
+            logical_to_all_physical_map_cpu,
             (0, num_physical_experts - logical_to_all_physical_map.shape[-1]),
             value=-1,
         )
 
-        logical_to_all_physical_map_num_valid = torch.count_nonzero(
-            logical_to_all_physical_map != -1, dim=-1
+        logical_to_all_physical_map_num_valid_cpu = torch.count_nonzero(
+            logical_to_all_physical_map_cpu != -1, dim=-1
+        )
+
+        logical_to_all_physical_map_padded = logical_to_all_physical_map_padded_cpu.to(
+            server_args.device
+        )
+        logical_to_all_physical_map_num_valid = (
+            logical_to_all_physical_map_num_valid_cpu.to(server_args.device)
         )
 
         return ExpertLocationMetadata(
             physical_to_logical_map=physical_to_logical_map,
             physical_to_logical_map_cpu=physical_to_logical_map.cpu(),
             logical_to_all_physical_map=logical_to_all_physical_map_padded,
-            logical_to_all_physical_map_cpu=logical_to_all_physical_map_padded.cpu(),
+            logical_to_all_physical_map_cpu=logical_to_all_physical_map_padded_cpu,
             logical_to_all_physical_map_num_valid=logical_to_all_physical_map_num_valid,
             logical_to_rank_dispatch_physical_map=(
                 compute_logical_to_rank_dispatch_physical_map(

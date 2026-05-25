@@ -139,13 +139,47 @@ class ReqToTokenPool:
         self.max_context_len = max_context_len
         self.device = device
         with memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
-            self.req_to_token = torch.zeros(
-                (size, max_context_len), dtype=torch.int32, device=device
-            )
+            if _is_hip:
+                req_to_token = torch.zeros((size, max_context_len), dtype=torch.int32)
+                self.req_to_token = req_to_token.to(device=device, non_blocking=False)
+            else:
+                self.req_to_token = torch.zeros(
+                    (size, max_context_len), dtype=torch.int32, device=device
+                )
         self.free_slots = list(range(size))
 
     def write(self, indices, values):
-        self.req_to_token[indices] = values
+        if _is_hip:
+            # HIP can crash on advanced indexing assignment here during prefill.
+            # Handle common tuple row/slice writes without advanced indexing.
+            if isinstance(indices, tuple):
+                row_idx, col_idx = indices
+                row = self.req_to_token[row_idx]
+                values = values.to(device=row.device, dtype=row.dtype, non_blocking=False)
+                if isinstance(col_idx, slice):
+                    start = 0 if col_idx.start is None else int(col_idx.start)
+                    stop = row.shape[0] if col_idx.stop is None else int(col_idx.stop)
+                    step = 1 if col_idx.step is None else int(col_idx.step)
+                    if step == 1:
+                        length = max(stop - start, 0)
+                        if length > 0:
+                            row.narrow(0, start, length).copy_(values[:length])
+                    else:
+                        row[col_idx].copy_(values)
+                else:
+                    row[col_idx].copy_(values)
+            else:
+                self.req_to_token.index_copy_(
+                    0,
+                    indices.to(torch.int64),
+                    values.to(
+                        device=self.req_to_token.device,
+                        dtype=self.req_to_token.dtype,
+                        non_blocking=False,
+                    ),
+                )
+        else:
+            self.req_to_token[indices] = values
 
     def available_size(self):
         return len(self.free_slots)
@@ -842,6 +876,12 @@ class MHATokenToKVPool(KVCache):
         )
 
     def _create_buffers(self):
+        def _alloc_kv_tensor(shape: tuple[int, ...]) -> torch.Tensor:
+            if _is_hip:
+                cpu_t = torch.zeros(shape, dtype=self.store_dtype)
+                return cpu_t.to(device=self.device, non_blocking=False)
+            return torch.zeros(shape, dtype=self.store_dtype, device=self.device)
+
         with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
             with (
                 torch.cuda.use_mem_pool(self.custom_mem_pool)
@@ -851,40 +891,37 @@ class MHATokenToKVPool(KVCache):
                 # [size, head_num, head_dim] for each layer
                 # The padded slot 0 is used for writing dummy outputs from padded tokens.
                 self.k_buffer = [
-                    torch.zeros(
-                        (self.size + self.page_size, self.head_num, self.head_dim),
-                        dtype=self.store_dtype,
-                        device=self.device,
+                    _alloc_kv_tensor(
+                        (self.size + self.page_size, self.head_num, self.head_dim)
                     )
                     for _ in range(self.layer_num)
                 ]
                 self.v_buffer = [
-                    torch.zeros(
-                        (self.size + self.page_size, self.head_num, self.v_head_dim),
-                        dtype=self.store_dtype,
-                        device=self.device,
+                    _alloc_kv_tensor(
+                        (self.size + self.page_size, self.head_num, self.v_head_dim)
                     )
                     for _ in range(self.layer_num)
                 ]
 
-        self.k_data_ptrs = torch.tensor(
-            [x.data_ptr() for x in self.k_buffer],
-            dtype=torch.uint64,
-            device=self.device,
+        k_ptrs = torch.tensor([x.data_ptr() for x in self.k_buffer], dtype=torch.uint64)
+        v_ptrs = torch.tensor([x.data_ptr() for x in self.v_buffer], dtype=torch.uint64)
+        if _is_hip:
+            self.k_data_ptrs = k_ptrs
+            self.v_data_ptrs = v_ptrs
+            self.data_ptrs = torch.cat([k_ptrs, v_ptrs], dim=0).to(
+                device=self.device, non_blocking=False
+            )
+        else:
+            self.k_data_ptrs = k_ptrs.to(device=self.device)
+            self.v_data_ptrs = v_ptrs.to(device=self.device)
+            self.data_ptrs = torch.cat([self.k_data_ptrs, self.v_data_ptrs], dim=0)
+        data_strides = torch.tensor(
+            [np.prod(x.shape[1:]) * x.dtype.itemsize for x in self.k_buffer + self.v_buffer]
         )
-        self.v_data_ptrs = torch.tensor(
-            [x.data_ptr() for x in self.v_buffer],
-            dtype=torch.uint64,
-            device=self.device,
-        )
-        self.data_ptrs = torch.cat([self.k_data_ptrs, self.v_data_ptrs], dim=0)
-        self.data_strides = torch.tensor(
-            [
-                np.prod(x.shape[1:]) * x.dtype.itemsize
-                for x in self.k_buffer + self.v_buffer
-            ],
-            device=self.device,
-        )
+        if _is_hip:
+            self.data_strides = data_strides.to(device=self.device, non_blocking=False)
+        else:
+            self.data_strides = data_strides.to(device=self.device)
 
     def _clear_buffers(self):
         del self.k_buffer

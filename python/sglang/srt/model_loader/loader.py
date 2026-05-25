@@ -116,6 +116,7 @@ from sglang.srt.model_loader.weight_utils import (
 from sglang.srt.utils import (
     get_bool_env_var,
     get_device_capability,
+    is_hip,
     is_npu,
     is_pin_memory_available,
     rank0_log,
@@ -128,6 +129,7 @@ if TYPE_CHECKING:
     from sglang.srt.layers.quantization.base_config import QuantizationConfig
 
 _is_npu = is_npu()
+_is_hip = is_hip()
 # ModelOpt: QUANT_CFG_CHOICES is imported from modelopt_utils.py
 # which contains the complete mapping of quantization config choices
 
@@ -303,6 +305,12 @@ def _initialize_model(
     if load_config.draft_model_idx is not None:
         kwargs["draft_model_idx"] = load_config.draft_model_idx
 
+    if _is_hip:
+        # HIP/RDNA2 can segfault during parameter construction when a global
+        # default device context points at GPU. Instantiate on CPU, then rely on
+        # existing loader/device placement paths.
+        with torch.device("cpu"):
+            return model_class(**kwargs)
     return model_class(**kwargs)
 
 

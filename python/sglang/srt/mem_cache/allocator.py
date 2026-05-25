@@ -27,6 +27,24 @@ from sglang.srt.utils import get_bool_env_var, get_num_new_pages
 if TYPE_CHECKING:
     from sglang.srt.mem_cache.memory_pool import KVCache
 
+_IS_HIP = getattr(torch.version, "hip", None) is not None
+
+
+def _int64_range(start: int, end: int, device: str):
+    if _IS_HIP:
+        return torch.arange(start, end, dtype=torch.int64).to(
+            device=device, non_blocking=False
+        )
+    return torch.arange(start, end, dtype=torch.int64, device=device)
+
+
+def _int64_empty(device: str):
+    if _IS_HIP:
+        return torch.empty((0,), dtype=torch.int64).to(
+            device=device, non_blocking=False
+        )
+    return torch.empty((0,), dtype=torch.int64, device=device)
+
 
 class BaseTokenToKVPoolAllocator(abc.ABC):
     @abc.abstractmethod
@@ -126,12 +144,10 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
 
     def clear(self):
         # The padded slot 0 is used for writing dummy outputs from padded tokens.
-        self.free_pages = torch.arange(
-            1, self.size + 1, dtype=torch.int64, device=self.device
-        )
+        self.free_pages = _int64_range(1, self.size + 1, self.device)
         self.is_not_in_free_group = True
         self.free_group = []
-        self.release_pages = torch.empty((0,), dtype=torch.int64, device=self.device)
+        self.release_pages = _int64_empty(self.device)
 
     def available_size(self):
         # To avoid minor "len(free_pages) * 1" overhead
@@ -500,12 +516,10 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
 
     def clear(self):
         # The padded slot 0 is used for writing dummy outputs from padded tokens.
-        self.free_pages = torch.arange(
-            1, self.num_pages + 1, dtype=torch.int64, device=self.device
-        )
+        self.free_pages = _int64_range(1, self.num_pages + 1, self.device)
         self.is_not_in_free_group = True
         self.free_group = []
-        self.release_pages = torch.empty((0,), dtype=torch.int64, device=self.device)
+        self.release_pages = _int64_empty(self.device)
 
     def get_cpu_copy(self, indices):
         return self._kvcache.get_cpu_copy(indices)
