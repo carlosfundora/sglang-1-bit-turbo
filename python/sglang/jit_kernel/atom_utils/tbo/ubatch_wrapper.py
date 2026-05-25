@@ -10,7 +10,7 @@ from typing import Any, Optional
 import torch
 import torch.nn as nn
 
-from atom.utils.forward_context import (
+from sglang.jit_kernel.atom_utils.forward_context import (
     Context,
     ForwardContext,
     get_forward_context,

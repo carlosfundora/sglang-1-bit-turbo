@@ -7,7 +7,7 @@ from typing import Optional
 
 import torch
 
-from atom.utils.forward_context import AttentionMetaData
+from sglang.jit_kernel.atom_utils.forward_context import AttentionMetaData
 
 logger = logging.getLogger("atom")
 

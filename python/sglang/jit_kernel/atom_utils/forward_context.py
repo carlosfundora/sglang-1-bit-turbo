@@ -10,10 +10,21 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Set, Union
 
 import numpy as np
 import torch
-from atom.config import Config, KVCacheTensor, ParallelConfig
+
+# Minimal stubs for atom.config types used only as type annotations here.
+# ATOM-RS does not depend on gfxATOM's atom.config package.
+class Config:
+    pass
+
+class KVCacheTensor:
+    pass
+
+class ParallelConfig:
+    data_parallel_size: int = 1
+    data_parallel_rank: int = 0
 
 if TYPE_CHECKING:
-    from atom.plugin.attention import MetadataForPluginMode
+    MetadataForPluginMode = Any
 
 
 class AttnState(Enum):
@@ -503,19 +514,23 @@ def get_kvconnector(role: str = "worker", config: Optional[Config] = None) -> An
             return None
 
         if _global_kvconnector is None:
-            from atom.kv_transfer.disaggregation import KVConnectorFactory
-
-            _global_kvconnector = KVConnectorFactory.create_connector(
-                config, role="worker"
-            )
+            try:
+                from atom.kv_transfer.disaggregation import KVConnectorFactory
+                _global_kvconnector = KVConnectorFactory.create_connector(
+                    config, role="worker"
+                )
+            except ImportError:
+                pass
             _logger.debug("Initialized global KVConnector at tp_rank %d", tp_rank)
 
     elif role == "scheduler":
-        from atom.kv_transfer.disaggregation import KVConnectorFactory
-
-        _global_kvconnector_scheduler = KVConnectorFactory.create_connector(
-            config, role="scheduler"
-        )
+        try:
+            from atom.kv_transfer.disaggregation import KVConnectorFactory
+            _global_kvconnector_scheduler = KVConnectorFactory.create_connector(
+                config, role="scheduler"
+            )
+        except ImportError:
+            pass
         _logger.debug("Initialized global KVConnectorScheduler")
         return _global_kvconnector_scheduler
 

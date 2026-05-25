@@ -6,7 +6,11 @@ from typing import Callable, Optional
 
 import torch
 
-from atom.config import get_current_atom_config
+try:
+    from atom.config import get_current_atom_config
+except ImportError:
+    def get_current_atom_config():
+        return None
 
 
 def tbo_overlap_enabled() -> bool:
