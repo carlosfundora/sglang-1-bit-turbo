@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, List, Optional
 import torch
 import torch.nn.functional as F
 import triton.language as tl
+import warnings
 
 from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
 from sglang.srt.utils import (
@@ -48,11 +49,40 @@ _use_sgl_xpu = use_intel_xpu_backend()
 from sglang.srt.server_args import get_global_server_args
 
 if _is_cuda:
-    from sgl_kernel import gelu_and_mul, moe_sum_reduce, silu_and_mul
+    try:
+        from sgl_kernel import gelu_and_mul, moe_sum_reduce, silu_and_mul
+    except (ImportError, OSError) as exc:
+        warnings.warn(
+            f"sgl_kernel MoE ops unavailable on CUDA path; using Python fallbacks. ({exc})"
+        )
+
+        def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
+            half = x.shape[-1] // 2
+            out.copy_(torch.nn.functional.silu(x[..., :half]) * x[..., half:])
+
+        def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
+            half = x.shape[-1] // 2
+            out.copy_(torch.nn.functional.gelu(x[..., :half]) * x[..., half:])
+
+        def moe_sum_reduce(inp: torch.Tensor, out: torch.Tensor) -> None:
+            out.copy_(inp.sum(dim=1))
 elif _is_cpu and _is_cpu_amx_available:
     pass
 elif _is_hip:
-    from sgl_kernel import gelu_and_mul, silu_and_mul
+    try:
+        from sgl_kernel import gelu_and_mul, silu_and_mul
+    except (ImportError, OSError) as exc:
+        warnings.warn(
+            f"sgl_kernel MoE ops unavailable on HIP path; using Python fallbacks. ({exc})"
+        )
+
+        def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
+            half = x.shape[-1] // 2
+            out.copy_(torch.nn.functional.silu(x[..., :half]) * x[..., half:])
+
+        def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
+            half = x.shape[-1] // 2
+            out.copy_(torch.nn.functional.gelu(x[..., :half]) * x[..., half:])
 
     if _use_aiter:
         try:
@@ -62,7 +92,19 @@ elif _is_hip:
     # Note: vllm_ops is not needed for HIP when _use_aiter=False
     # because the code uses moe_sum_reduce_triton as fallback (line 619)
 elif _is_xpu:
-    from sgl_kernel import moe_sum_reduce, silu_and_mul
+    try:
+        from sgl_kernel import moe_sum_reduce, silu_and_mul
+    except (ImportError, OSError) as exc:
+        warnings.warn(
+            f"sgl_kernel MoE ops unavailable on XPU path; using Python fallbacks. ({exc})"
+        )
+
+        def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
+            half = x.shape[-1] // 2
+            out.copy_(torch.nn.functional.silu(x[..., :half]) * x[..., half:])
+
+        def moe_sum_reduce(inp: torch.Tensor, out: torch.Tensor) -> None:
+            out.copy_(inp.sum(dim=1))
 
 # Try to import vllm_ops for non-CUDA/HIP/XPU platforms
 _has_vllm_ops = False

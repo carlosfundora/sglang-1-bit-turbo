@@ -30,12 +30,19 @@ if TYPE_CHECKING:
     from sglang.srt.speculative.eagle_info import EagleVerifyInput
 
 
-if _is_cuda:
-    from sgl_kernel import fast_topk
-elif _is_hip:
-    from sgl_kernel import fast_topk
-else:
+try:
+    if _is_cuda or _is_hip:
+        from sgl_kernel import fast_topk
+    else:
+        from sglang.srt.utils.common import fast_topk
+except (ImportError, OSError) as exc:
     from sglang.srt.utils.common import fast_topk
+
+    logger = logging.getLogger(__name__)
+    logger.warning(
+        "sgl_kernel.fast_topk unavailable (%s); falling back to torch fast_topk implementation.",
+        exc,
+    )
 
 
 logger = logging.getLogger(__name__)

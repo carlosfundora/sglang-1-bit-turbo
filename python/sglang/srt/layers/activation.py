@@ -79,9 +79,50 @@ _is_hip = is_hip()
 _is_xpu = is_xpu()
 
 if _is_cuda or _is_xpu:
-    from sgl_kernel import gelu_and_mul, gelu_tanh_and_mul, silu_and_mul
+    try:
+        from sgl_kernel import gelu_and_mul, gelu_tanh_and_mul, silu_and_mul
+    except (ImportError, OSError) as exc:
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "sgl_kernel activation ops unavailable; using torch fallbacks. (%s)", exc
+        )
+
+        def silu_and_mul(x: torch.Tensor, out: torch.Tensor) -> None:
+            d = x.shape[-1] // 2
+            out.copy_(F.silu(x[..., :d]) * x[..., d:])
+
+        def gelu_and_mul(x: torch.Tensor, out: torch.Tensor) -> None:
+            d = x.shape[-1] // 2
+            out.copy_(F.gelu(x[..., :d]) * x[..., d:])
+
+        def gelu_tanh_and_mul(x: torch.Tensor, out: torch.Tensor) -> None:
+            d = x.shape[-1] // 2
+            out.copy_(F.gelu(x[..., :d], approximate="tanh") * x[..., d:])
 elif _is_hip:
-    from sgl_kernel import gelu_and_mul, gelu_quick, gelu_tanh_and_mul, silu_and_mul
+    try:
+        from sgl_kernel import gelu_and_mul, gelu_quick, gelu_tanh_and_mul, silu_and_mul
+    except (ImportError, OSError) as exc:
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "sgl_kernel activation ops unavailable on HIP; using torch fallbacks. (%s)",
+            exc,
+        )
+
+        def silu_and_mul(x: torch.Tensor, out: torch.Tensor) -> None:
+            d = x.shape[-1] // 2
+            out.copy_(F.silu(x[..., :d]) * x[..., d:])
+
+        def gelu_and_mul(x: torch.Tensor, out: torch.Tensor) -> None:
+            d = x.shape[-1] // 2
+            out.copy_(F.gelu(x[..., :d]) * x[..., d:])
+
+        def gelu_tanh_and_mul(x: torch.Tensor, out: torch.Tensor) -> None:
+            d = x.shape[-1] // 2
+            out.copy_(F.gelu(x[..., :d], approximate="tanh") * x[..., d:])
+
+        def gelu_quick(x: torch.Tensor, out: torch.Tensor) -> None:
+            d = x.shape[-1]
+            out.copy_(x * torch.sigmoid(1.702 * x))
 
 if is_npu():
     import torch_npu

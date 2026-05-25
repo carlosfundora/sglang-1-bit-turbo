@@ -17,7 +17,13 @@ from sglang.srt.utils import is_cuda, is_hip
 _is_cuda = is_cuda()
 _is_hip = is_hip()
 if _is_cuda or _is_hip:
-    from sgl_kernel.kvcacheio import transfer_kv_all_layer_mla
+    try:
+        from sgl_kernel.kvcacheio import transfer_kv_all_layer_mla
+    except (ImportError, OSError) as exc:
+        def transfer_kv_all_layer_mla(*args, **kwargs):
+            raise RuntimeError(
+                "HiSparse KV transfer requires sgl_kernel.kvcacheio, but it is unavailable."
+            ) from exc
 else:
 
     def transfer_kv_all_layer_mla(*args, **kwargs):

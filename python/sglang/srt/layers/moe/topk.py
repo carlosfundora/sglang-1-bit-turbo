@@ -77,7 +77,11 @@ _is_xpu = is_xpu()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
 if _is_cuda:
-    from sgl_kernel import moe_fused_gate
+    try:
+        from sgl_kernel import moe_fused_gate
+    except (ImportError, OSError) as e:
+        moe_fused_gate = None
+        logger.warning("sgl_kernel.moe_fused_gate unavailable; fallback paths will be used. (%s)", e)
 
     try:
         from flashinfer.fused_moe import fused_topk_deepseek as _fused_topk_deepseek
@@ -116,16 +120,43 @@ if _is_cuda:
 
     try:
         from sgl_kernel import kimi_k2_moe_fused_gate
-    except ImportError as e:
-        pass
+    except (ImportError, OSError):
+        kimi_k2_moe_fused_gate = None
 
 if _is_cuda or _is_hip or _is_xpu:
-    from sgl_kernel import topk_softmax
+    try:
+        from sgl_kernel import topk_softmax
+    except (ImportError, OSError) as e:
+        logger.warning(
+            "sgl_kernel.topk_softmax unavailable; using torch fallback. (%s)",
+            e,
+        )
+
+        def topk_softmax(topk_weights, topk_ids, gating_output, renormalize):
+            scores = F.softmax(gating_output, dim=-1, dtype=torch.float32)
+            w, i = torch.topk(scores, k=topk_weights.shape[1], dim=-1)
+            if renormalize:
+                w = w / (w.sum(dim=-1, keepdim=True) + 1e-20)
+            topk_weights.copy_(w)
+            topk_ids.copy_(i.to(torch.int32))
 
     try:
         from sgl_kernel import topk_sigmoid
-    except ImportError:
-        pass
+    except (ImportError, OSError) as e:
+        logger.warning(
+            "sgl_kernel.topk_sigmoid unavailable; using torch fallback. (%s)",
+            e,
+        )
+
+        def topk_sigmoid(topk_weights, topk_ids, gating_output, renormalize, correction_bias):
+            scores = torch.sigmoid(gating_output)
+            if correction_bias is not None:
+                scores = scores + correction_bias
+            w, i = torch.topk(scores, k=topk_weights.shape[1], dim=-1)
+            if renormalize:
+                w = w / (w.sum(dim=-1, keepdim=True) + 1e-20)
+            topk_weights.copy_(w.to(torch.float32))
+            topk_ids.copy_(i.to(torch.int32))
 if _use_aiter:
     try:
         from aiter import biased_grouped_topk as aiter_biased_grouped_topk

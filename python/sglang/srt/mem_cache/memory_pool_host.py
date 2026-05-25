@@ -44,21 +44,42 @@ _is_npu = is_npu()
 _is_xpu = is_xpu()
 _is_mps = is_mps()
 if not (_is_npu or _is_xpu or _is_mps):
-    from sgl_kernel.kvcacheio import (
-        transfer_kv_all_layer,
-        transfer_kv_all_layer_direct_lf_pf,
-        transfer_kv_all_layer_lf_pf,
-        transfer_kv_all_layer_lf_ph,
-        transfer_kv_all_layer_mla,
-        transfer_kv_all_layer_mla_lf_pf,
-        transfer_kv_direct,
-        transfer_kv_per_layer,
-        transfer_kv_per_layer_direct_pf_lf,
-        transfer_kv_per_layer_mla,
-        transfer_kv_per_layer_mla_pf_lf,
-        transfer_kv_per_layer_pf_lf,
-        transfer_kv_per_layer_ph_lf,
-    )
+    try:
+        from sgl_kernel.kvcacheio import (
+            transfer_kv_all_layer,
+            transfer_kv_all_layer_direct_lf_pf,
+            transfer_kv_all_layer_lf_pf,
+            transfer_kv_all_layer_lf_ph,
+            transfer_kv_all_layer_mla,
+            transfer_kv_all_layer_mla_lf_pf,
+            transfer_kv_direct,
+            transfer_kv_per_layer,
+            transfer_kv_per_layer_direct_pf_lf,
+            transfer_kv_per_layer_mla,
+            transfer_kv_per_layer_mla_pf_lf,
+            transfer_kv_per_layer_pf_lf,
+            transfer_kv_per_layer_ph_lf,
+        )
+    except (ImportError, OSError) as exc:
+        def _kvcacheio_unavailable(*args, **kwargs):
+            raise RuntimeError(
+                "sgl_kernel.kvcacheio is unavailable on this runtime. "
+                "Disable KV offload/disaggregation paths or rebuild sgl_kernel."
+            ) from exc
+
+        transfer_kv_all_layer = _kvcacheio_unavailable
+        transfer_kv_all_layer_direct_lf_pf = _kvcacheio_unavailable
+        transfer_kv_all_layer_lf_pf = _kvcacheio_unavailable
+        transfer_kv_all_layer_lf_ph = _kvcacheio_unavailable
+        transfer_kv_all_layer_mla = _kvcacheio_unavailable
+        transfer_kv_all_layer_mla_lf_pf = _kvcacheio_unavailable
+        transfer_kv_direct = _kvcacheio_unavailable
+        transfer_kv_per_layer = _kvcacheio_unavailable
+        transfer_kv_per_layer_direct_pf_lf = _kvcacheio_unavailable
+        transfer_kv_per_layer_mla = _kvcacheio_unavailable
+        transfer_kv_per_layer_mla_pf_lf = _kvcacheio_unavailable
+        transfer_kv_per_layer_pf_lf = _kvcacheio_unavailable
+        transfer_kv_per_layer_ph_lf = _kvcacheio_unavailable
 if _is_npu:
     from sgl_kernel_npu.kvcacheio import TransferDirection, transfer_kv_dim_exchange
 

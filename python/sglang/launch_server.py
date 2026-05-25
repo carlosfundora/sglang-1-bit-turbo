@@ -42,6 +42,28 @@ def setup_atom_backend_with_flags(server_args):
 
     register_atom_backend()
 
+    model_impl = getattr(server_args, "model_impl", "auto")
+    if model_impl not in {"auto", "sglang"}:
+        logger.info(
+            "Skipping ATOM backend auto-routing for model_impl=%s to preserve runtime behavior.",
+            model_impl,
+        )
+        return server_args
+
+    get_model_config = getattr(server_args, "get_model_config", None)
+    if callable(get_model_config):
+        try:
+            model_config = get_model_config()
+            if getattr(model_config, "is_audio_understandable_model", False) or getattr(
+                model_config, "is_audio_model", False
+            ):
+                logger.info(
+                    "Skipping ATOM backend auto-routing for audio-capable model to keep transcription endpoints stable."
+                )
+                return server_args
+        except Exception as exc:
+            logger.debug("Unable to infer audio model capability: %s", exc)
+
     if server_args.atom_wave32 and server_args.decode_attention_backend is None:
         server_args.decode_attention_backend = "atom"
 

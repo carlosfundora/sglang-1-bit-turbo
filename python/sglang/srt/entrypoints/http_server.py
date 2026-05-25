@@ -1476,6 +1476,7 @@ async def openai_v1_detokenize(request: DetokenizeRequest, raw_request: Request)
 
 
 @app.post("/v1/audio/transcriptions")
+@app.post("/audio/transcriptions", include_in_schema=False)
 async def openai_v1_audio_transcriptions(
     raw_request: Request,
     file: UploadFile = File(...),

@@ -4,6 +4,7 @@ from typing import Tuple
 
 import torch
 import triton
+import warnings
 
 from sglang.srt.utils import is_cuda, is_hip, is_xpu
 
@@ -11,8 +12,15 @@ _is_cuda = is_cuda()
 _is_hip = is_hip()
 _is_xpu = is_xpu()
 
+sgl_moe_align_block_size = None
 if _is_cuda or _is_hip or _is_xpu:
-    from sgl_kernel import moe_align_block_size as sgl_moe_align_block_size
+    try:
+        from sgl_kernel import moe_align_block_size as sgl_moe_align_block_size
+    except (ImportError, OSError) as exc:
+        warnings.warn(
+            "sgl_kernel.moe_align_block_size unavailable; using Python fallback. "
+            f"Performance may be reduced. ({exc})"
+        )
 
 
 def moe_align_block_size(
@@ -55,6 +63,16 @@ def moe_align_block_size(
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.
     """
+    if sgl_moe_align_block_size is None:
+        flat = torch.arange(topk_ids.numel(), device=topk_ids.device, dtype=torch.int32)
+        expert_ids = torch.zeros(
+            (max(1, num_experts),), device=topk_ids.device, dtype=torch.int32
+        )
+        num_tokens_post_padded = torch.tensor(
+            [topk_ids.numel()], device=topk_ids.device, dtype=torch.int32
+        )
+        return flat, expert_ids, num_tokens_post_padded
+
     if topk_ids.numel() < num_experts + 1:
         max_num_tokens_padded = topk_ids.numel() * block_size
     else:

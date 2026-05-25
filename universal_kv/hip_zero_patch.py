@@ -119,13 +119,16 @@ def _fill_via_cpu(t: torch.Tensor, value) -> None:
 
 def _patched_fill_(self: torch.Tensor, value) -> torch.Tensor:
     if self.is_cuda and self.data_ptr() != 0:
-        contig = self if self.is_contiguous() else self.contiguous()
+        if not self.is_contiguous():
+            raise RuntimeError(
+                "[hip_zero_patch] fill_ on non-contiguous CUDA tensors is unsupported "
+                "under gfx1031+gfx1030 override. Call contiguous() first."
+            )
+        contig = self
         if value == 0:
             _memset_zero(contig)
         else:
             _fill_via_cpu(contig, value)
-        if not self.is_contiguous():
-            self.copy_(contig)
         return self
     return _orig_fill_(self, value)
 
@@ -133,7 +136,10 @@ def _patched_fill_(self: torch.Tensor, value) -> torch.Tensor:
 def _patched_zero_(self: torch.Tensor) -> torch.Tensor:
     if self.is_cuda and self.data_ptr() != 0:
         if not self.is_contiguous():
-            self = self.contiguous()
+            raise RuntimeError(
+                "[hip_zero_patch] zero_ on non-contiguous CUDA tensors is unsupported "
+                "under gfx1031+gfx1030 override. Call contiguous() first."
+            )
         _memset_zero(self)
         return self
     return _orig_zero_(self)
@@ -280,7 +286,6 @@ def apply() -> None:
     global _applied
     if _applied:
         return
-    torch.cuda.init()
     torch.Tensor.fill_ = _patched_fill_
     torch.Tensor.zero_ = _patched_zero_
     torch.zeros = _patched_zeros
@@ -390,5 +395,5 @@ def validate() -> bool:
         return False
 
 
-# Auto-apply on import
-apply()
+# Intentionally not auto-applying on import.
+# Activation is controlled by callers (e.g. sglang.__init__) for deterministic startup behavior.

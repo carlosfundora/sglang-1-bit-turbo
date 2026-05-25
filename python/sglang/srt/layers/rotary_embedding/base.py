@@ -108,15 +108,19 @@ class RotaryEmbedding(MultiPlatformOp):
         ):
             # rotary_embedding from sglang.jit_kernel.rope and vllm._custom_ops has the same implementation.
             # TODO: Test on different devices and remove this conditional.
-            if _is_cuda:
-                from sglang.jit_kernel.rope import rotary_embedding
-            elif _is_hip:
-                from sgl_kernel import rotary_embedding
-            else:
-                from vllm._custom_ops import rotary_embedding
+            try:
+                if _is_cuda:
+                    from sglang.jit_kernel.rope import rotary_embedding
+                elif _is_hip:
+                    from sgl_kernel import rotary_embedding
+                else:
+                    from vllm._custom_ops import rotary_embedding
 
-            self.use_fallback_kernel = True
-            self.fallback_rotary_embedding = rotary_embedding
+                self.use_fallback_kernel = True
+                self.fallback_rotary_embedding = rotary_embedding
+            except (ImportError, OSError):
+                # On HIP with broken sgl_kernel ABI, keep using non-fallback path.
+                self.use_fallback_kernel = False
         else:
             self.use_fallback_kernel = False
 

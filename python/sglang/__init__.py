@@ -1,10 +1,34 @@
 # SGLang public APIs
 
+import os as _os
+import pathlib as _pathlib
+import sys as _sys
+
+# ROCm gfx1030 workaround (AMD RX 6700 XT with HSA_OVERRIDE_GFX_VERSION=10.3.0)
+# MUST run BEFORE any torch import to patch torch.zeros/ones/fill_ before torch caches pointers
+try:
+    import universal_kv.hip_zero_patch as _hip_zero_patch
+    _hip_zero_patch.apply()
+    if _os.environ.get("SGLANG_STRICT_PROVENANCE") == "1":
+        _repo_root = _pathlib.Path(__file__).resolve().parents[2]
+        _patch_path = _pathlib.Path(_hip_zero_patch.__file__).resolve()
+        if not str(_patch_path).startswith(str(_repo_root)):
+            raise RuntimeError(
+                "hip_zero_patch provenance mismatch: "
+                f"{_patch_path} is outside {_repo_root}. "
+                "Use a single source tree for sglang + universal_kv."
+            )
+except ImportError:
+    if _os.environ.get("HSA_OVERRIDE_GFX_VERSION") == "10.3.0":
+        raise RuntimeError(
+            "Failed to load universal_kv.hip_zero_patch while HSA_OVERRIDE_GFX_VERSION=10.3.0. "
+            "This configuration requires the patch to avoid ROCm fill-kernel segfaults."
+        )
+    pass  # patch not required when gfx1030 override is not active
+
 # Install stubs early for platforms where certain dependencies are unavailable
 # (e.g. macOS/MPS has no triton, and torch.mps lacks Stream / set_device /
 # get_device_properties).  This must run before any downstream imports.
-import sys as _sys
-
 if _sys.platform == "darwin":
     try:
         import torch as _torch
@@ -22,6 +46,9 @@ if _sys.platform == "darwin":
         del _torch
     except ImportError:
         pass
+
+del _os
+del _pathlib
 del _sys
 
 # Frontend Language APIs
