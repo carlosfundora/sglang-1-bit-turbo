@@ -277,7 +277,12 @@ class GroupCoordinator:
         self.device_module = torch.get_device_module(self.device)
 
         for ranks in group_ranks:
-            active_ranks = torch.ones(len(ranks), dtype=torch.int32, device=self.device)
+            # Single-rank setups do not need device-side rank masks and creating
+            # CUDA/HIP tensors here can crash unstable ROCm stacks at startup.
+            if len(ranks) == 1:
+                active_ranks = torch.ones(len(ranks), dtype=torch.int32)
+            else:
+                active_ranks = torch.ones(len(ranks), dtype=torch.int32, device=self.device)
             active_ranks_cpu = torch.ones(len(ranks), dtype=torch.int32)
             if "mooncake" in torch_distributed_backend:
                 from mooncake.ep import MooncakeBackendOptions

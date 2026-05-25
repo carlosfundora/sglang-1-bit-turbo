@@ -59,6 +59,10 @@ try:
     # not be registered.  Do a lightweight probe to verify.
     if _is_cuda:
         _cpp_kernel_available = True
+    elif _is_hip:
+        # Import-time probing of this op on HIP can segfault on some ROCm stacks.
+        # Defer to Triton/PyTorch fallback paths for stability.
+        _cpp_kernel_available = False
     else:
         # On HIP/other backends the op may or may not be compiled in.
         # Try calling with zero-sized tensors; if the op is missing it

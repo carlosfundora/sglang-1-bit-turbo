@@ -42,16 +42,23 @@ except Exception:
     AWQConfig = None
     AWQMarlinConfig = None
 
-try:
-    from sglang.srt.layers.quantization.gemlite_quant import (
-        GemLiteConfig,
-        GemLiteAWQConfig,
-        GemLiteGPTQConfig,
-    )
-except ImportError:
+if torch.version.hip is not None:
+    # gemlite imports can crash the process on ROCm during module init.
+    # Keep gemlite disabled on HIP and continue with other quant backends.
     GemLiteConfig = None
     GemLiteAWQConfig = None
     GemLiteGPTQConfig = None
+else:
+    try:
+        from sglang.srt.layers.quantization.gemlite_quant import (
+            GemLiteConfig,
+            GemLiteAWQConfig,
+            GemLiteGPTQConfig,
+        )
+    except Exception:
+        GemLiteConfig = None
+        GemLiteAWQConfig = None
+        GemLiteGPTQConfig = None
 from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config
 from sglang.srt.layers.quantization.w8a8_fp8 import W8A8Fp8Config
 from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8Config

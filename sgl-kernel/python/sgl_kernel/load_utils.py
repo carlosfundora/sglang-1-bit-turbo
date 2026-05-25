@@ -28,6 +28,8 @@ def _get_compute_capability():
 def _filter_compiled_extensions(file_list):
     """Filter and prioritize compiled extensions over Python source files."""
     compiled_extensions = [".so", ".pyd", ".dll"]  # Common compiled extension suffixes
+    py_tag = f"cpython-{os.sys.version_info.major}{os.sys.version_info.minor}"
+    preferred_compiled_files = []
     compiled_files = []
     other_files = []
 
@@ -37,12 +39,15 @@ def _filter_compiled_extensions(file_list):
         if any(
             str(path).endswith(ext) or ext in str(path) for ext in compiled_extensions
         ):
-            compiled_files.append(file_path)
+            if py_tag in path.name:
+                preferred_compiled_files.append(file_path)
+            else:
+                compiled_files.append(file_path)
         else:
             other_files.append(file_path)
 
-    # Return compiled files first, then others
-    return compiled_files + other_files
+    # Return interpreter-matching compiled files first, then other compiled files.
+    return preferred_compiled_files + compiled_files + other_files
 
 
 def _load_architecture_specific_ops():
