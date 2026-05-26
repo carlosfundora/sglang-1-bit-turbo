@@ -1,9 +1,9 @@
 {
-  "candidate": "python/sglang/srt/mem_cache/mamba_radix_cache.py",
+  "candidate": "python/sglang/srt/parser/harmony_parser.py",
   "implementation": "before",
-  "command": "python3 bench_mamba.py",
-  "timestamp": "2026-05-20T08:08:11Z",
-  "iterations": 5000,
-  "input_description": "5000 inserts of length 4 prefix cache keys",
-  "duration_ms": 1500.0
+  "command": "python3 test_harmony_benchmark.py",
+  "timestamp": "2026-05-18T23:42:45Z",
+  "iterations": 50000,
+  "input_description": "Streaming harmony chunks",
+  "duration_ms": 2522.1734046936035
 }

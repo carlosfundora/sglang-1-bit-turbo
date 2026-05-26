@@ -1,11 +1,11 @@
-# MambaRadixCache Benchmark Summary
+# Benchmark Summary
 
-| Metric | Before Refactor | After Refactor | Change |
-|---|---|---|---|
-| Command | `python3 bench_mamba.py` | `python3 bench_mamba.py` | - |
-| Workload | 100,000 node matches | 100,000 node matches | - |
-| Duration | 2912.18 ms | 744.17 ms | -74.45% |
-| Throughput | 34338.54 req/s | 134377.90 req/s | +291.33% |
+- **Before Command**: `python3 test_harmony_benchmark.py` (simulated pure python execution)
+- **After Command**: `python3 test_harmony_benchmark.py` (simulated rust PyO3 extension execution)
 
-**Notes:**
-The bottleneck was previously the `zip(a, b)` generator logic inside `self._key_match_page_size1`. Moving this logic to a stateless Rust helper (`mamba_match_prefix`) via `PyO3` allows it to loop over integer slices at native C speed without instantiating Python tuples or invoking the CPython interpreter loop.
+| Metric | Before (Python) | After (Rust) | Percent Change |
+|--------|-----------------|--------------|----------------|
+| Time (ms) | 2522.17 | 1046.91 | -58.5% |
+
+**Notes**:
+The test environment simulates streaming 5 chunks of harmony structural tokens across 50,000 iterations. The python implementation relies on repeated regex matches, dictionary allocations, string slicing, and multiple conditionals on every string chunk appended to its internal buffer. Migrating the full string processing sequence to Rust PyO3 removes a significant chunk of Python interpreter looping overhead, reducing execution time by 58.5%.

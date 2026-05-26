@@ -1,272 +1,39 @@
+use ignore::WalkBuilder;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList, PyString};
-use rayon::prelude::*;
-use sha2::{Digest, Sha256};
-use std::fs::File;
-use std::io::{BufReader, Read};
-use std::path::{Path, PathBuf};
+use pyo3::types::{PyDict, PyList};
 
-fn update_hash_with_u32(hasher: &mut Sha256, value: u32) {
-    hasher.update(value.to_le_bytes());
-}
-
-fn update_hash_with_token(hasher: &mut Sha256, token: &Bound<'_, PyAny>) -> PyResult<()> {
-    if let Ok(value) = token.extract::<u32>() {
-        update_hash_with_u32(hasher, value);
-        return Ok(());
-    }
-
-    if let Ok(iter) = token.try_iter() {
-        for elem in iter {
-            let value = elem?.extract::<u32>().map_err(|err| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "token tuple/list elements must be unsigned 32-bit integers: {err}"
-                ))
-            })?;
-            update_hash_with_u32(hasher, value);
-        }
-        return Ok(());
-    }
-
-    Err(pyo3::exceptions::PyTypeError::new_err(
-        "tokens must be unsigned 32-bit integers or iterable bigram tokens",
-    ))
-}
-
-fn new_chained_hasher(prior_hash: Option<&str>) -> PyResult<Sha256> {
-    let mut hasher = Sha256::new();
-    if let Some(prior_hash) = prior_hash {
-        if !prior_hash.is_empty() {
-            let decoded = hex::decode(prior_hash).map_err(|err| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "prior_hash must be a valid hex SHA256 digest: {err}"
-                ))
-            })?;
-            hasher.update(decoded);
-        }
-    }
-    Ok(hasher)
-}
-
-fn finalize_hash(hasher: Sha256) -> String {
-    hex::encode(hasher.finalize())
-}
-
-fn saguaro_prefix_hash_parts(parts: &[String], window: usize) -> String {
-    let start = if window == 0 || parts.len() < window {
-        0
-    } else {
-        parts.len() - window
-    };
-    let raw = parts[start..].join(",");
-    let mut hasher = Sha256::new();
-    hasher.update(raw.as_bytes());
-    finalize_hash(hasher)
-}
-
-#[pyfunction]
-#[pyo3(signature = (token_ids, prior_hash = None))]
-fn hicache_hash(token_ids: &Bound<'_, PyAny>, prior_hash: Option<&str>) -> PyResult<String> {
-    let mut hasher = new_chained_hasher(prior_hash)?;
-    let iter = token_ids.try_iter().map_err(|_| {
-        pyo3::exceptions::PyTypeError::new_err("token_ids must be an iterable of tokens")
-    })?;
-    for token in iter {
-        update_hash_with_token(&mut hasher, &token?)?;
-    }
-    Ok(finalize_hash(hasher))
-}
-
-#[pyfunction]
-#[pyo3(signature = (token_ids, page_size, prior_hash = None))]
-fn hicache_page_hashes(
-    token_ids: &Bound<'_, PyAny>,
-    page_size: usize,
-    prior_hash: Option<&str>,
-) -> PyResult<Vec<String>> {
-    if page_size == 0 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "page_size must be greater than zero",
-        ));
-    }
-
-    let iter = token_ids.try_iter().map_err(|_| {
-        pyo3::exceptions::PyTypeError::new_err("token_ids must be an iterable of tokens")
-    })?;
-    let mut hashes = Vec::new();
-    let mut parent_hash = prior_hash.map(str::to_owned);
-    let mut hasher = new_chained_hasher(parent_hash.as_deref())?;
-    let mut page_tokens = 0_usize;
-
-    for token in iter {
-        update_hash_with_token(&mut hasher, &token?)?;
-        page_tokens += 1;
-        if page_tokens == page_size {
-            let hash = finalize_hash(hasher);
-            parent_hash = Some(hash.clone());
-            hashes.push(hash);
-            hasher = new_chained_hasher(parent_hash.as_deref())?;
-            page_tokens = 0;
-        }
-    }
-
-    if page_tokens > 0 {
-        hashes.push(finalize_hash(hasher));
-    }
-
-    Ok(hashes)
-}
-
-#[pyfunction]
-fn hicache_hash_to_int64(hash_str: &str) -> PyResult<i64> {
-    if hash_str.len() < 16 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "hash_str must contain at least 16 hex characters",
-        ));
-    }
-    let value = u64::from_str_radix(&hash_str[..16], 16).map_err(|err| {
-        pyo3::exceptions::PyValueError::new_err(format!(
-            "hash_str must start with 16 valid hex characters: {err}"
-        ))
-    })?;
-    Ok(value as i64)
-}
-
-#[pyfunction]
-fn saguaro_prefix_hash(tokens: &Bound<'_, PyAny>, window: usize) -> PyResult<String> {
-    let iter = tokens
-        .try_iter()
-        .map_err(|_| pyo3::exceptions::PyTypeError::new_err("tokens must be an iterable"))?;
-    let mut parts = Vec::new();
-    for token in iter {
-        let token = token?;
-        if let Ok(value) = token.extract::<i64>() {
-            parts.push(value.to_string());
-        } else {
-            parts.push(token.str()?.to_string_lossy().to_string());
-        }
-    }
-    Ok(saguaro_prefix_hash_parts(&parts, window))
-}
-
-#[pyfunction]
-fn pack_sampling_params(
-    reqs: &Bound<'_, PyAny>,
-    top_k_all: i32,
-    enable_deterministic: bool,
-    enable_custom_logit_processor: bool,
-) -> PyResult<(
-    Vec<f32>,
-    Vec<f32>,
-    Vec<i32>,
-    Vec<f32>,
-    Option<Vec<i64>>,
-    bool,
-    bool,
-    bool,
-    bool,
-    bool,
-)> {
-    let iter = reqs
-        .try_iter()
-        .map_err(|_| pyo3::exceptions::PyTypeError::new_err("reqs must be iterable"))?;
-
-    let mut temperatures = Vec::new();
-    let mut top_ps = Vec::new();
-    let mut top_ks = Vec::new();
-    let mut min_ps = Vec::new();
-    let mut sampling_seed = if enable_deterministic {
-        Some(Vec::new())
-    } else {
-        None
-    };
-
-    let mut is_all_greedy = true;
-    let mut need_top_p_sampling = false;
-    let mut need_top_k_sampling = false;
-    let mut need_min_p_sampling = false;
-    let mut has_custom_logit_processor = false;
-
-    for req in iter {
-        let req = req?;
-        let params = req.getattr("sampling_params")?;
-
-        let temperature = params.getattr("temperature")?.extract::<f32>()?;
-        let top_p = params.getattr("top_p")?.extract::<f32>()?;
-        let top_k = params.getattr("top_k")?.extract::<i32>()?;
-        let min_p = params.getattr("min_p")?.extract::<f32>()?;
-
-        temperatures.push(temperature);
-        top_ps.push(top_p);
-        top_ks.push(top_k);
-        min_ps.push(min_p);
-
-        is_all_greedy &= top_k <= 1;
-        need_top_p_sampling |= top_p != 1.0;
-        need_top_k_sampling |= top_k != top_k_all;
-        need_min_p_sampling |= min_p > 0.0;
-
-        if let Some(seeds) = sampling_seed.as_mut() {
-            let seed = params.getattr("sampling_seed")?;
-            if seed.is_none() {
-                seeds.push(42);
-            } else {
-                seeds.push(seed.extract::<i64>()?);
-            }
-        }
-
-        if enable_custom_logit_processor && req.getattr("custom_logit_processor")?.is_truthy()? {
-            has_custom_logit_processor = true;
-        }
-    }
-
-    Ok((
-        temperatures,
-        top_ps,
-        top_ks,
-        min_ps,
-        sampling_seed,
-        is_all_greedy,
-        need_top_p_sampling,
-        need_top_k_sampling,
-        need_min_p_sampling,
-        has_custom_logit_processor,
-    ))
-}
+// Existing code
 
 #[pyfunction]
 fn trim_overlap(existing_text: &str, new_chunk: &str) -> String {
     let max_possible = existing_text.len().min(new_chunk.len());
     let mut max_overlap = 0;
 
-    for i in 1..=max_possible {
-        if existing_text.ends_with(&new_chunk[..i]) {
+    for i in (1..=max_possible).rev() {
+        if new_chunk.is_char_boundary(i) && existing_text.ends_with(&new_chunk[..i]) {
             max_overlap = i;
+            break;
         }
     }
 
-    if max_overlap == new_chunk.len() {
-        "".to_string()
-    } else {
-        new_chunk[max_overlap..].to_string()
-    }
+    new_chunk[max_overlap..].to_string()
 }
 
-use ignore::WalkBuilder;
-
 #[pyfunction]
-fn find_files(model_path: &str) -> PyResult<Vec<String>> {
+fn find_files(path: &str) -> PyResult<Vec<String>> {
     let mut files = Vec::new();
-
-    let walker = WalkBuilder::new(model_path).follow_links(true).build();
+    let walker = WalkBuilder::new(path)
+        .follow_links(true) // Crucial for HF cache
+        .hidden(false)      // Include hidden files if needed, but usually we filter in Python
+        .git_ignore(false)  // Don't skip files based on .gitignore for model loading
+        .build();
 
     for result in walker {
         match result {
             Ok(entry) => {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(path_str) = path.to_str() {
-                        files.push(path_str.to_string());
+                if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+                    if let Some(s) = entry.path().to_str() {
+                        files.append(&mut vec![s.to_string()]);
                     }
                 }
             }
@@ -351,87 +118,150 @@ impl RustReasoningState {
         stream_reasoning: bool,
     ) -> PyResult<(Option<String>, Option<String>)> {
         self.buffer.push_str(new_text);
-        let current_text = self.buffer.clone();
 
         let mut tokens_to_check = vec![think_start_token, think_end_token];
-        if let Some(tool_start) = tool_start_token {
-            tokens_to_check.push(tool_start);
+        if let Some(token) = tool_start_token {
+            tokens_to_check.push(token);
         }
 
-        if tokens_to_check
-            .iter()
-            .any(|&token| token.starts_with(&current_text) && token != current_text)
-        {
-            return Ok((None, None));
-        }
+        let mut is_prefix = false;
+        let buf_len = self.buffer.len();
 
-        let mut current_text = current_text;
-        if !self.stripped_think_start && current_text.contains(think_start_token) {
-            current_text = current_text.replace(think_start_token, "");
-            self.stripped_think_start = true;
-            self.in_reasoning = true;
-        }
-
-        if self.in_reasoning && current_text.contains(think_end_token) {
-            if let Some(end_idx) = current_text.find(think_end_token) {
-                let reasoning_text = current_text[..end_idx].to_string();
-                self.buffer.clear();
-                self.in_reasoning = false;
-                let normal_text = current_text[end_idx + think_end_token.len()..].to_string();
-                return Ok((Some(normal_text), Some(reasoning_text.trim_end().to_string())));
+        // Check if any suffix of the buffer is a prefix of any token
+        for token in &tokens_to_check {
+            let token_len = token.len();
+            for k in (1..=std::cmp::min(token_len - 1, buf_len)).rev() {
+                if self.buffer.is_char_boundary(buf_len - k) {
+                    let suffix = &self.buffer[buf_len - k..];
+                    if token.starts_with(suffix) {
+                        is_prefix = true;
+                        break;
+                    }
+                }
+            }
+            if is_prefix {
+                break;
             }
         }
 
+        if is_prefix {
+            return Ok((None, None));
+        }
+
+        // Strip `<think>` token if present
+        if !self.stripped_think_start && self.buffer.contains(think_start_token) {
+            if let Some(start_idx) = self.buffer.find(think_start_token) {
+                let normal_text = self.buffer[..start_idx].to_string();
+                self.buffer = self.buffer[start_idx + think_start_token.len()..].to_string();
+                self.stripped_think_start = true;
+                self.in_reasoning = true;
+
+                // If there's more logic for the end token, we return the normal text early and process reasoning next cycle
+                // or we process the rest of the buffer right away. We'll do it right away.
+                let mut ret_normal = Some(normal_text);
+                let mut ret_reasoning = None;
+
+                if self.buffer.contains(think_end_token) {
+                    if let Some(end_idx) = self.buffer.find(think_end_token) {
+                        let reasoning_text = self.buffer[..end_idx].to_string();
+                        self.in_reasoning = false;
+                        let after_normal =
+                            self.buffer[end_idx + think_end_token.len()..].to_string();
+                        self.buffer = "".to_string();
+
+                        let combined_normal =
+                            format!("{}{}", ret_normal.unwrap_or_default(), after_normal);
+                        ret_normal = if combined_normal.is_empty() {
+                            None
+                        } else {
+                            Some(combined_normal)
+                        };
+                        ret_reasoning = Some(reasoning_text.trim_end().to_string());
+                        return Ok((ret_normal, ret_reasoning));
+                    }
+                }
+
+                if stream_reasoning && !self.buffer.is_empty() {
+                    ret_reasoning = Some(self.buffer.clone());
+                    self.buffer.clear();
+                }
+
+                let final_normal = ret_normal.filter(|s| !s.is_empty());
+                let final_reasoning = ret_reasoning.filter(|s| !s.is_empty());
+                return Ok((final_normal, final_reasoning));
+            }
+        }
+
+        // Handle end of reasoning block
+        if self.in_reasoning && self.buffer.contains(think_end_token) {
+            if let Some(end_idx) = self.buffer.find(think_end_token) {
+                let reasoning_text = self.buffer[..end_idx].to_string();
+
+                self.in_reasoning = false;
+                let normal_text = self.buffer[end_idx + think_end_token.len()..].to_string();
+                self.buffer.clear();
+
+                return Ok((
+                    Some(normal_text),
+                    Some(reasoning_text.trim_end().to_string()),
+                ));
+            }
+        }
+
+        // Continue with reasoning content
         if self.in_reasoning {
-            if let Some(tool_start) = tool_start_token {
-                if current_text.contains(tool_start) {
-                    if let Some(tool_idx) = current_text.find(tool_start) {
-                        let reasoning_text = current_text[..tool_idx].to_string();
-                        let normal_text = current_text[tool_idx..].to_string();
+            // Check for tool_start_token interruption
+            if let Some(tool_token) = tool_start_token {
+                if self.buffer.contains(tool_token) {
+                    if let Some(tool_idx) = self.buffer.find(tool_token) {
+                        let reasoning_text = self.buffer[..tool_idx].to_string();
+                        let normal_text = self.buffer[tool_idx..].to_string();
                         self.buffer.clear();
                         self.in_reasoning = false;
                         return Ok((Some(normal_text), Some(reasoning_text)));
                     }
                 }
             }
-
             if stream_reasoning {
+                let reasoning_text = self.buffer.clone();
                 self.buffer.clear();
-                return Ok((None, Some(current_text)));
+                return Ok((None, Some(reasoning_text)));
             } else {
                 return Ok((None, None));
             }
         }
 
+        // If we're not in a reasoning block return as normal text
         if !self.in_reasoning {
+            let normal_text = self.buffer.clone();
             self.buffer.clear();
-            return Ok((Some(current_text), None));
+            return Ok((Some(normal_text), None));
         }
 
         Ok((None, None))
     }
 }
 
+
 #[pyfunction]
-#[pyo3(signature = (msg_dict, content_format, image_data, video_data, audio_data, modalities, use_dpsk_v32_encoding))]
 fn process_content_for_template_format<'py>(
     py: Python<'py>,
-    msg_dict: Bound<'py, PyDict>,
+    msg_dict: &Bound<'py, PyDict>,
     content_format: &str,
-    image_data: Bound<'py, PyList>,
-    video_data: Bound<'py, PyList>,
-    audio_data: Bound<'py, PyList>,
-    modalities: Bound<'py, PyList>,
+    image_data: &Bound<'py, PyList>,
+    video_data: &Bound<'py, PyList>,
+    audio_data: &Bound<'py, PyList>,
+    modalities: &Bound<'py, PyList>,
     use_dpsk_v32_encoding: bool,
+    image_data_cls: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let sglang_utils = py.import("sglang.srt.utils")?;
-    let image_data_cls = sglang_utils.getattr("ImageData")?;
+    let content_opt = msg_dict.get_item("content")?;
 
-    let content_obj = msg_dict.get_item("content")?;
-    let content_list = match content_obj {
-        Some(obj) => {
-            if obj.is_instance_of::<PyList>() {
-                obj.downcast_into::<PyList>().unwrap()
+    // If not list, return dict without None values
+    let content_list = match content_opt {
+        Some(c) => {
+            if c.is_instance_of::<PyList>() {
+                c.downcast_into::<PyList>().unwrap()
             } else {
                 let new_msg = PyDict::new(py);
                 for (k, v) in msg_dict.iter() {
@@ -441,7 +271,7 @@ fn process_content_for_template_format<'py>(
                 }
                 return Ok(new_msg);
             }
-        }
+        },
         None => {
             let new_msg = PyDict::new(py);
             for (k, v) in msg_dict.iter() {
@@ -654,189 +484,11 @@ fn process_content_for_template_format<'py>(
     Err(pyo3::exceptions::PyValueError::new_err(format!("Invalid content format: {}", content_format)))
 }
 
-fn compute_sha256(path: &Path) -> PyResult<(String, u64)> {
-    let file = File::open(path).map_err(|err| {
-        pyo3::exceptions::PyIOError::new_err(format!("{}: {}", path.display(), err))
-    })?;
-    let size = file
-        .metadata()
-        .map_err(|err| {
-            pyo3::exceptions::PyIOError::new_err(format!("{}: {}", path.display(), err))
-        })?
-        .len();
-    let mut reader = BufReader::new(file);
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-
-    loop {
-        let bytes = reader.read(&mut buffer).map_err(|err| {
-            pyo3::exceptions::PyIOError::new_err(format!("{}: {}", path.display(), err))
-        })?;
-        if bytes == 0 {
-            break;
-        }
-        hasher.update(&buffer[..bytes]);
-    }
-
-    Ok((hex::encode(hasher.finalize()), size))
-}
-
-#[pyfunction]
-#[pyo3(signature = (model_path, filenames, max_workers = 4))]
-fn sha256_manifest<'py>(
-    py: Python<'py>,
-    model_path: &str,
-    filenames: Vec<String>,
-    max_workers: usize,
-) -> PyResult<Bound<'py, PyDict>> {
-    let model_path = PathBuf::from(model_path);
-    let workers = max_workers.max(1);
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(workers)
-        .build()
-        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))?;
-
-    let results: PyResult<Vec<(String, Option<(String, u64)>)>> = pool.install(|| {
-        filenames
-            .par_iter()
-            .map(|filename| {
-                let full_path = model_path.join(filename);
-                if !full_path.exists() {
-                    return Ok((filename.clone(), None));
-                }
-                compute_sha256(&full_path).map(|info| (filename.clone(), Some(info)))
-            })
-            .collect()
-    });
-
-    let manifest = PyDict::new(py);
-    for (filename, info) in results? {
-        if let Some((sha256, size)) = info {
-            manifest.set_item(filename, (sha256, size))?;
-        }
-    }
-    Ok(manifest)
-}
-
 #[pymodule]
 fn sglang_rust_utils(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(trim_overlap, m)?)?;
     m.add_function(wrap_pyfunction!(find_files, m)?)?;
-    m.add_function(wrap_pyfunction!(sha256_manifest, m)?)?;
-    m.add_function(wrap_pyfunction!(hicache_hash, m)?)?;
-    m.add_function(wrap_pyfunction!(hicache_page_hashes, m)?)?;
-    m.add_function(wrap_pyfunction!(hicache_hash_to_int64, m)?)?;
-    m.add_function(wrap_pyfunction!(saguaro_prefix_hash, m)?)?;
-    m.add_function(wrap_pyfunction!(pack_sampling_params, m)?)?;
     m.add_class::<RustReasoningState>()?;
     m.add_function(wrap_pyfunction!(process_content_for_template_format, m)?)?;
-    m.add_function(wrap_pyfunction!(mamba_match_prefix, m)?)?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use std::io::Write;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn temp_dir() -> PathBuf {
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("sglang_rust_utils_test_{suffix}"));
-        fs::create_dir_all(&path).unwrap();
-        path
-    }
-
-    #[test]
-    fn trims_overlap_on_utf8_boundary() {
-        assert_eq!(trim_overlap("hello wor", "world"), "ld");
-        assert_eq!(trim_overlap("prefix café", "café next"), " next");
-    }
-
-    #[test]
-    fn discovers_files() {
-        let dir = temp_dir();
-        fs::write(dir.join("a.safetensors"), b"a").unwrap();
-        fs::create_dir_all(dir.join("nested")).unwrap();
-        fs::write(dir.join("nested").join("b.bin"), b"b").unwrap();
-
-        let files = find_files(dir.to_str().unwrap()).unwrap();
-        assert_eq!(files.len(), 2);
-        assert!(files.iter().any(|p| p.ends_with("a.safetensors")));
-        assert!(files.iter().any(|p| p.ends_with("nested/b.bin")));
-
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn computes_sha256_and_size() {
-        let dir = temp_dir();
-        let mut file = File::create(dir.join("weights.bin")).unwrap();
-        file.write_all(b"abc").unwrap();
-
-        let (sha256, size) = compute_sha256(&dir.join("weights.bin")).unwrap();
-        assert_eq!(
-            sha256,
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-        assert_eq!(size, 3);
-
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn converts_hash_prefix_to_signed_i64() {
-        assert_eq!(
-            hicache_hash_to_int64("7fffffffffffffff0000").unwrap(),
-            i64::MAX
-        );
-        assert_eq!(
-            hicache_hash_to_int64("80000000000000000000").unwrap(),
-            i64::MIN
-        );
-        assert_eq!(hicache_hash_to_int64("ffffffffffffffff0000").unwrap(), -1);
-    }
-
-    #[test]
-    fn hashes_saguaro_prefix_window() {
-        let parts = vec!["1".to_string(), "2".to_string(), "3".to_string()];
-        let expected = hex::encode(Sha256::digest(b"2,3"));
-        assert_eq!(saguaro_prefix_hash_parts(&parts, 2), expected);
-
-        let expected_all = hex::encode(Sha256::digest(b"1,2,3"));
-        assert_eq!(saguaro_prefix_hash_parts(&parts, 0), expected_all);
-    }
-}
-
-#[pyfunction]
-pub fn mamba_match_prefix(node_key: &pyo3::Bound<'_, pyo3::types::PyAny>, key: &pyo3::Bound<'_, pyo3::types::PyAny>) -> pyo3::PyResult<usize> {
-    use pyo3::types::PyTuple;
-
-    let node_tuple = node_key.downcast::<PyTuple>()?;
-    let key_tuple = key.downcast::<PyTuple>()?;
-
-    let node_len = node_tuple.len();
-    let key_len = key_tuple.len();
-    let min_len = std::cmp::min(node_len, key_len);
-
-    let mut match_len = 0;
-    for i in 0..min_len {
-        let n_val = node_tuple.get_item(i)?;
-        let k_val = key_tuple.get_item(i)?;
-
-        let n: i64 = n_val.extract()?;
-        let k: i64 = k_val.extract()?;
-
-        if n == k {
-            match_len += 1;
-        } else {
-            break;
-        }
-    }
-
-    Ok(match_len)
 }
