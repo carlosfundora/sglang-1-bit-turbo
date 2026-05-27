@@ -29,6 +29,9 @@
 ## 2026-05-23 - [Shadowing Methods with Unoptimized Implementations]
 **Learning:** In Python codebases with complex merge histories, duplicate method definitions within the same class can silently degrade performance. Because Python evaluates class bodies sequentially, a less-optimized duplicate method at the bottom of a file will silently override a highly optimized version declared earlier. In `SamplingBatchInfo`, an optimized `.clone()` method was overridden by a legacy method using slow `copy.deepcopy()`.
 **Action:** Always verify that optimized methods are not accidentally shadowed by duplicate declarations lower down in the same class file.
+## 2026-05-24 - [Vectorized _create_extend_after_decode_pytorch]
+**Learning:** `_create_extend_after_decode_pytorch` in speculative decoding used an explicit `for` loop combined with multiple CPU-GPU device synchronizations (e.g. `.cpu()`, `.item()`) to compute tensor indexing values. In large batch sizes, this synchronization drastically bottlenecks inference performance on ROCm systems.
+**Action:** Replaced the explicit looping logic and `.item()` access with fully vectorized PyTorch operations on the GPU (e.g., `torch.repeat_interleave`, `torch.cumsum`) to eliminate host-device syncs entirely and massively improve speed.
 
 ## 2026-05-27 - [Avoid copy.deepcopy for SamplingParams in Interpreter]
 **Learning:** In `sglang/lang/interpreter.py`'s `_resolve_sampling_params`, `copy.deepcopy()` is called per-generation step to clone the `default_sampling_para`. Since `SamplingParams` consists entirely of simple primitives (ints, floats, strings) and flat collections (lists of strings, dicts of floats), using `copy.deepcopy()` incurs immense unnecessary overhead from Python's memoization dict handling.

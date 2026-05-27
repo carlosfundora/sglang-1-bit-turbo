@@ -73,29 +73,25 @@ def _create_extend_after_decode_pytorch(
     Triton kernel.  On gfx1030, tl.sum() reductions in that kernel compute
     wrong offsets, writing self.positions to garbage GPU addresses and leaving
     it filled with uninitialized int64 values — which then explode in the
-    rotary embedding lookup.  This version is CPU-side and fully correct."""
-    accept_lens_cpu = accept_lens.detach().cpu().to(torch.int64)
-    seq_lens_cpu = seq_lens.detach().cpu().to(torch.int64)
-    verified_id_cpu = verified_id.detach().cpu()
-    bs = accept_lens_cpu.shape[0]
+    rotary embedding lookup."""
+    device = accept_lens.device
 
-    # prefix-sum of accept_lens → start offset in the flat positions buffer
-    cumsum = torch.zeros(bs + 1, dtype=torch.int64)
-    cumsum[1:] = torch.cumsum(accept_lens_cpu, dim=0)
+    cumsum = torch.zeros(accept_lens.shape[0] + 1, dtype=torch.int64, device=device)
+    cumsum[1:] = torch.cumsum(accept_lens, dim=0)
 
-    positions_cpu = torch.empty(positions.shape[0], dtype=torch.int64)
-    new_verified_id_cpu = torch.empty(bs, dtype=torch.int32)
+    # new_verified_id is the last token for each request
+    new_verified_id.copy_(verified_id[cumsum[1:] - 1])
 
-    for pid in range(bs):
-        start = int(cumsum[pid].item())
-        end = int(cumsum[pid + 1].item())
-        seq_len = int(seq_lens_cpu[pid].item())
-        al = end - start
-        positions_cpu[start:end] = torch.arange(seq_len - al, seq_len, dtype=torch.int64)
-        new_verified_id_cpu[pid] = verified_id_cpu[end - 1]
+    # Vectorized positions calculation
+    pid_per_elem = torch.repeat_interleave(
+        torch.arange(accept_lens.shape[0], device=device),
+        accept_lens
+    )
+    global_idx = torch.arange(positions.shape[0], device=device)
+    relative_idx = global_idx - cumsum[pid_per_elem]
+    seq_starts = seq_lens[pid_per_elem] - accept_lens[pid_per_elem]
 
-    positions.copy_(positions_cpu.to(device=positions.device))
-    new_verified_id.copy_(new_verified_id_cpu.to(device=new_verified_id.device))
+    positions.copy_(seq_starts + relative_idx)
 
 
 def _rocm_spec_debug_enabled() -> bool:
