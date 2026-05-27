@@ -2,7 +2,6 @@
 
 import asyncio
 import contextvars
-import copy
 import multiprocessing
 import queue
 import threading
@@ -807,8 +806,8 @@ class StreamExecutor:
         It also extends the stop tokens based on the chat template.
         """
 
-        # deepcopy is required because the dict has lists inside
-        clone = copy.deepcopy(self.default_sampling_para)
+        # deepcopy is no longer required because SglSamplingParams.clone() creates shallow copies of the lists
+        clone = self.default_sampling_para.clone()
 
         for item in [
             "max_new_tokens",
