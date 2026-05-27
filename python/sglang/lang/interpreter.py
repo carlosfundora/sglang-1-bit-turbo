@@ -808,7 +808,7 @@ class StreamExecutor:
         """
 
         # deepcopy is required because the dict has lists inside
-        clone = copy.deepcopy(self.default_sampling_para)
+        clone = self.default_sampling_para.clone()
 
         for item in [
             "max_new_tokens",

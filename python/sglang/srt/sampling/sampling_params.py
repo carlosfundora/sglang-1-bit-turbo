@@ -161,6 +161,21 @@ class SamplingParams:
         if sum(x is not None for x in grammars) > 1:
             raise ValueError("Only one of regex, json_schema, or ebnf can be set.")
 
+    def clone(self):
+        new_sp = self.__class__.__new__(self.__class__)
+        new_sp.__dict__ = self.__dict__.copy()
+        if getattr(self, "stop_strs", None) is not None:
+            new_sp.stop_strs = self.stop_strs[:] if isinstance(self.stop_strs, list) else self.stop_strs
+        if getattr(self, "stop_token_ids", None) is not None:
+            new_sp.stop_token_ids = self.stop_token_ids.copy() if isinstance(self.stop_token_ids, set) else self.stop_token_ids
+        if getattr(self, "stop_regex_strs", None) is not None:
+            new_sp.stop_regex_strs = self.stop_regex_strs[:] if isinstance(self.stop_regex_strs, list) else self.stop_regex_strs
+        if getattr(self, "custom_params", None) is not None:
+            new_sp.custom_params = self.custom_params.copy()
+        if getattr(self, "logit_bias", None) is not None:
+            new_sp.logit_bias = self.logit_bias.copy()
+        return new_sp
+
     def normalize(self, tokenizer):
         # Process stop strings
         if self.stop_strs is None:
