@@ -859,6 +859,7 @@ fn sglang_rust_utils(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(detect_jinja_template_content_format, m)?)?;
     m.add_function(wrap_pyfunction!(check_jsonschema, m)?)?;
     m.add_function(wrap_pyfunction!(check_schema_fast, m)?)?;
+    m.add_function(wrap_pyfunction!(dsv32_parser::parse_message_from_completion_text, m)?)?;
     Ok(())
 }
 
@@ -946,3 +947,5 @@ mod tests {
         assert_eq!(find_common_prefix("café next", "café prev"), "café ");
     }
 }
+
+pub mod dsv32_parser;

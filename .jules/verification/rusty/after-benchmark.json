@@ -1,1 +1,9 @@
-{"candidate": "python/sglang/rust_utils/src/lib.rs (trim_overlap)", "implementation": "after", "duration_ms": 13}
+{
+  "candidate": "python/sglang/srt/entrypoints/openai/encoding_dsv32.py (Rust)",
+  "implementation": "after",
+  "command": "python test_rust_parser.py",
+  "timestamp": "2026-05-27T12:16:57Z",
+  "iterations": 5000,
+  "input_description": "mock dsv32 tool call string (both normal and thinking)",
+  "duration_ms": 133.80908966064453
+}
