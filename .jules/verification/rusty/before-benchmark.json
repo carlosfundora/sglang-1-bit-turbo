@@ -1,1 +1,9 @@
-{"candidate": "python/sglang/rust_utils/src/lib.rs (trim_overlap)", "implementation": "before", "duration_ms": 13}
+{
+  "candidate": "python/sglang/srt/entrypoints/openai/encoding_dsv32.py",
+  "implementation": "before",
+  "command": "python python/sglang/test/test_encoding_dsv32.py before",
+  "timestamp": "2026-05-27T08:48:52Z",
+  "iterations": 1000,
+  "input_description": "parse_message_from_completion_text with 50 tool calls",
+  "duration_ms": 5406.44645690918
+}
