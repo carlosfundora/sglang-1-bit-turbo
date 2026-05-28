@@ -1278,28 +1278,29 @@ def compute_position_torch(
     # Safety guard: clamp values to a sane range to prevent multi-GiB arange OOM
     # (e.g. when int32 overflows or warmup generates garbage extend values)
     MAX_CONTEXT = 65536
-    pl_cpu = extend_prefix_lens.cpu()
-    sl_cpu = clamped_seq_lens.cpu()
-    bad_mask = (pl_cpu < 0) | (sl_cpu < 0) | (pl_cpu > MAX_CONTEXT) | (sl_cpu > MAX_CONTEXT)
+    bad_mask = (extend_prefix_lens < 0) | (clamped_seq_lens < 0) | (extend_prefix_lens > MAX_CONTEXT) | (clamped_seq_lens > MAX_CONTEXT)
     if bad_mask.any():
         import logging as _logging
+        pl_cpu = extend_prefix_lens.cpu()
+        sl_cpu = clamped_seq_lens.cpu()
         _logging.getLogger(__name__).warning(
             "compute_position_torch: CLAMPING bad extend values. "
             "extend_prefix_lens=%s extend_seq_lens=%s",
             pl_cpu.tolist(), sl_cpu.tolist(),
         )
-        pl_cpu = pl_cpu.clamp(0, MAX_CONTEXT)
-        sl_cpu = sl_cpu.clamp(1, MAX_CONTEXT)
-    positions = torch.cat(
-        [
-            torch.arange(
-                prefix_len.item(), prefix_len.item() + extend_len.item(),
-                device=extend_prefix_lens.device,
-            )
-            for prefix_len, extend_len in zip(pl_cpu, sl_cpu)
-        ],
-        axis=0,
-    )
+        extend_prefix_lens = extend_prefix_lens.clamp(0, MAX_CONTEXT)
+        clamped_seq_lens = clamped_seq_lens.clamp(1, MAX_CONTEXT)
+
+    # Vectorized compute to avoid CPU <-> GPU sync and python loops
+    base_positions = torch.repeat_interleave(extend_prefix_lens, clamped_seq_lens)
+    cumsum_seq_lens = torch.cumsum(clamped_seq_lens, dim=0)
+
+    total_len = cumsum_seq_lens[-1].item()
+    idx = torch.arange(total_len, device=extend_prefix_lens.device)
+    offsets = idx - torch.repeat_interleave(cumsum_seq_lens - clamped_seq_lens, clamped_seq_lens)
+
+    positions = base_positions + offsets
+
     extend_start_loc = torch.zeros_like(extend_seq_lens)
     extend_start_loc[1:] = torch.cumsum(extend_seq_lens[:-1], dim=0)
     return positions.to(torch.int64), extend_start_loc
