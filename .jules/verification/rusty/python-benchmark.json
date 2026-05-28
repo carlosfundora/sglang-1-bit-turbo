@@ -1,0 +1,9 @@
+{
+  "candidate": "python/sglang/srt/function_call/utils.py",
+  "implementation": "python",
+  "command": "python python/sglang/test/test_find_common_prefix_bench.py python",
+  "timestamp": "2026-05-26T08:35:18Z",
+  "iterations": 5000,
+  "input_description": "_find_common_prefix long string",
+  "duration_ms": 11248.27790260315
+}
