@@ -1,1 +1,3 @@
-# Benchmark Summary\n- before: 13ms\n- after: 13ms\n- change: fixed UTF-8 crash.
+# Benchmark Summary
+
+Task is blocked due to all viable candidates being superseded or architecturally constrained. No active refactor was committed.

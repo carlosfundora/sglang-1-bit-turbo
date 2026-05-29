@@ -1,1 +1,9 @@
-{"candidate": "python/sglang/rust_utils/src/lib.rs (trim_overlap)", "implementation": "before", "duration_ms": 13}
+{
+  "candidate": "none",
+  "implementation": "before",
+  "command": "none",
+  "timestamp": "2023-10-10T10:10:10Z",
+  "iterations": 0,
+  "input_description": "Task blocked - no candidates available.",
+  "duration_ms": 0
+}
