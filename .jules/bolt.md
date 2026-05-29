@@ -36,3 +36,7 @@
 ## 2026-05-27 - [Avoid copy.deepcopy for SamplingParams in Interpreter]
 **Learning:** In `sglang/lang/interpreter.py`'s `_resolve_sampling_params`, `copy.deepcopy()` is called per-generation step to clone the `default_sampling_para`. Since `SamplingParams` consists entirely of simple primitives (ints, floats, strings) and flat collections (lists of strings, dicts of floats), using `copy.deepcopy()` incurs immense unnecessary overhead from Python's memoization dict handling.
 **Action:** Implement a custom `.clone()` method on `SamplingParams` that allocates a new instance via `__new__`, copies `__dict__`, and selectively does shallow copies of mutable list/dict fields. This yields an ~18x speedup over `copy.deepcopy()` and avoids adding latency to SGL program execution.
+
+## 2026-05-28 - [Avoid copy.deepcopy in multi-turn benchmark inner loop]
+**Learning:** `replace(copy.deepcopy(request_func_input), prompt=copy.deepcopy(prev_messages))` inside the hot `benchmark` multi-turn loop unnecessarily creates an expensive deep copy of an entire dataclass and dictionary list, causing large overhead when simply appending prompts.
+**Action:** Use `replace(request_func_input, prompt=list(prev_messages))` to perform a lightweight shallow-copy that satisfies immutability requirements without the severe overhead of deep copying the full request structure and message list during benchmarking.
