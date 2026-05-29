@@ -5,6 +5,9 @@ use regex::Regex;
 use serde_json::Value;
 use std::sync::OnceLock;
 
+mod longbench;
+use longbench::extract_longbench_v2_answer;
+
 static ITERATION_RE: OnceLock<Regex> = OnceLock::new();
 
 #[pyfunction]
@@ -824,6 +827,11 @@ fn check_schema_fast(schema: &Bound<'_, PyAny>) -> PyResult<()> {
 }
 
 #[pyfunction]
+fn py_extract_longbench_v2_answer(response: &str) -> Option<String> {
+    extract_longbench_v2_answer(response)
+}
+
+#[pyfunction]
 fn find_common_prefix(s1: &str, s2: &str) -> String {
     let mut prefix_len = 0;
     for (b1, b2) in s1.bytes().zip(s2.bytes()) {
@@ -859,6 +867,7 @@ fn sglang_rust_utils(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(detect_jinja_template_content_format, m)?)?;
     m.add_function(wrap_pyfunction!(check_jsonschema, m)?)?;
     m.add_function(wrap_pyfunction!(check_schema_fast, m)?)?;
+    m.add_function(wrap_pyfunction!(py_extract_longbench_v2_answer, m)?)?;
     Ok(())
 }
 

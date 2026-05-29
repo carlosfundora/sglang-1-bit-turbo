@@ -1,1 +1,9 @@
-{"candidate": "python/sglang/rust_utils/src/lib.rs (trim_overlap)", "implementation": "after", "duration_ms": 13}
+{
+  "candidate": "python/sglang/test/simple_eval_longbench_v2.py",
+  "implementation": "after",
+  "command": "python python/sglang/test/test_longbench_v2_bench.py",
+  "timestamp": "2026-05-28T23:51:33Z",
+  "iterations": 100000,
+  "input_description": "extract_longbench_v2_answer (pure rust)",
+  "duration_ms": 112.43653297424316
+}
