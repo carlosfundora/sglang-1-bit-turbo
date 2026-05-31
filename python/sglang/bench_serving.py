@@ -12,7 +12,6 @@ python3 -m sglang.bench_serving --backend sglang --dataset-name random --num-pro
 
 import argparse
 import asyncio
-import copy
 import importlib.util
 import json
 import os
@@ -1144,9 +1143,7 @@ def wrap_multi_turn_request_func(request_func: Callable, backend: str) -> Callab
         for round_index in range(len(prompts)):
             prev_messages.append({"role": "user", "content": prompts[round_index]})
 
-            inner_input = replace(
-                copy.deepcopy(request_func_input), prompt=copy.deepcopy(prev_messages)
-            )
+            inner_input = replace(request_func_input, prompt=list(prev_messages))
             output = await request_func(
                 inner_input, pbar=pbar if round_index == len(prompts) - 1 else None
             )
