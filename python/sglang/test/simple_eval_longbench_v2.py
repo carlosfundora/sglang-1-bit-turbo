@@ -12,6 +12,14 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
+try:
+    from sglang.sglang_rust_utils import py_extract_longbench_v2_answer as rust_extract
+except ImportError:
+    try:
+        from sglang_rust_utils import py_extract_longbench_v2_answer as rust_extract
+    except ImportError:
+        rust_extract = None
+
 from transformers import AutoTokenizer
 
 from sglang.test import simple_eval_common as common
@@ -77,6 +85,9 @@ Format your response as follows: "The correct answer is (insert answer here)".""
 
 def extract_longbench_v2_answer(response: str) -> Optional[str]:
     """Extract answer from model response using official LongBench-v2 method."""
+    if rust_extract is not None:
+        return rust_extract(response)
+
     response = response.replace("*", "")
 
     # First try: "The correct answer is (A)"
