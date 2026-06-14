@@ -217,3 +217,22 @@ Re-ran §2 on the current stack (post attn_logits fix). Findings:
   are the RDNA2 decode kv_indices / req_to_token / split-KV scratch. Needs a rocgdb backtrace of the
   scheduler segfault to pinpoint the unstable tensor. NOTE the realized win is modest at small models
   (~+5%); bigger for deep models. Lower priority than it once seemed given decode is framework-bound.
+
+## gfxGRAPH installed system-wide + the precise remaining cuda-graph bug (2026-06-14)
+gfxGRAPH 0.3.4 is now pip-installed into the system python (/home/local/.local/lib/python3.12/
+site-packages/gfxgraph) so `import gfxgraph` + the fork's engine.py gfxGRAPH stats hooks work
+everywhere (no PYTHONPATH needed). With gfxGRAPH enabled (gfxgraph.enable() swaps
+torch.cuda.CUDAGraph -> BridgedCUDAGraph), the RDNA2 server cuda-graph crash is no longer an opaque
+SIGSEGV — it surfaces as a precise catchable error, localized to:
+
+  cuda_graph_runner.py:1282 replay -> graph.replay() -> BridgedCUDAGraph._run_eager ->
+  torch.AcceleratorError: CUDA error: illegal memory access (hipErrorIllegalAddress)
+
+KEY: gfxGRAPH's eager fallback (no real graph) ALSO hits the illegal access -> the bug is in the model
+decode forward running inside cuda_graph_runner's static buffers on RDNA2 (bs=1, triton decode reading
+kv_indices/req_to_token), NOT in graph capture/replay or gfxGRAPH. So gfxGRAPH is necessary (diagnosis
++ safe capture once fixed) but NOT sufficient — the cuda_graph_runner decode buffer bug must still be
+fixed for cuda-graph serving. Until then the RDNA2 default stays cuda-graph OFF. DEEP FIX (localized):
+the triton backend init_forward_metadata_replay_cuda_graph / RDNA2 decode_attention replay path sizes/
+fills the captured bs=1 kv_indices/req_to_token/split-KV scratch such that the decode kernel reads OOB;
+needs compute-sanitizer/rocm memcheck to nail the exact tensor. gfxGRAPH makes this iteration safe.
