@@ -6,6 +6,7 @@
 - Added `atom_fp8` KV cache dtype alias to normalize into `fp8_e4m3` during server argument post-processing.
 
 ### Changed
+- Made the `cpp_ngram` draft-tree flatten deterministic (`Node.next` is now an ordered `std::map`), so the n-gram speculative draft-token order and attention-mask row indices no longer depend on hash-table iteration order — reproducible speculation run-to-run. (Synthesized from the deterministic `rs_ngram_draft` Rust port.)
 - Registered a new `atom` attention backend path in `attention_registry` with explicit fallback to Triton when AITER is unavailable.
 - Updated MoE and FP8 backend initializers to map `atom` to existing stable execution paths (`triton` for MoE, `aiter` for FP8 GEMM).
 - Added server-args unit coverage for `atom`/`atom_fp8` CLI wiring.
