@@ -257,3 +257,20 @@ init_forward_metadata_{capture,replay}_cuda_graph). Findings:
   follows the scheduler subprocess), read the faulting kernel+tensor, fix the sizing/lifetime.
   Until then the RDNA2 default stays cuda-graph OFF (safe) + gfxGRAPH GUARD makes any force-enable
   diagnosable.
+
+## P1.5 GPU KV-codec feasibility — CONFIRMED viable on gfx1030 (2026-06-14)
+The rq3 ~1.4 t/s (§4) is a WIRING gap, not a hardware limit. Verified: our own
+`build/kernels/rotorquant-kv-hip` GPU codec (`rq_codec.hsaco`) runs BYTE-EXACT on gfx1030 —
+PLANAR3/PLANAR4/ISO3/ISO4 all PASS (recon_max_abs_diff 0.0). (The "aiter KV codec targets
+gfx950" note was about the *vendor* kernel; ours is gfx1030-native.) So a GPU rq/tq KV path
+is achievable here.
+Integration plan (substantial, well-scoped follow-up — not done, to avoid breaking the working
+CPU rq3 path without server validation):
+  1. Wrap `rq_codec.hsaco` (compress/decompress, modes PLANAR/ISO 3/4) as a torch op
+     (load_inline or hipModule), device-resident — same pattern as `rdna2_hip_decode`.
+  2. In `mem_cache/memory_pool.py` RotorQuant/TurboQuant pools, replace the CPU
+     `turboquant_engine` compress/decompress on the per-token set/get_kv_buffer path with the
+     GPU op (rs_kv_codec_bridge `gpu_codec.rs` is the rust counterpart).
+  3. Validate: `--kv-cache-dtype rq3` server run, assert coherent output + measure decode t/s
+     (target: from ~1.4 t/s toward fp16-class). tq3 likewise (its codec is the GPU-QR rotation +
+     Lloyd-Max — needs a GPU pack/unpack kernel too).
