@@ -160,7 +160,7 @@ Qwen2.5-0.5B **f16**, batch 1, input-len 512, output-len 64, `--disable-cuda-gra
 | `atom` (Hybrid AITER/Triton) | ~51–54 | ✅ |
 | `torch_native` (Torch SDPA) | 36.0 | ✅ (slowest working) |
 | `aiter` (AOTriton/AITER) | ~6 (erratic 6–59) | ⚠️ AITER not tuned for RDNA2 (targets MI3xx); very slow/unreliable |
-| `wave` (Wave DSL) | — | 🟥 FAILS: `ModuleNotFoundError: No module named 'wave_lang'` (dep not installed) |
+| `wave` (Wave DSL) | — | 🟥 NOT VIABLE on gfx1030: `wave_lang` (AMD/IREE Wave eDSL) absent + not pip-installable here, AND its kernels need matrix cores (`MMAType`) RDNA2 lacks. Don't pursue on RDNA2. |
 | `radix` | n/a | RadixAttention is the shared prefix-cache layer, not a standalone decode kernel |
 
 **KV-quant:** `--kv-cache-dtype tq3` (TurboQuant) 🟥 FAILS at pool init —
