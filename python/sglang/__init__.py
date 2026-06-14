@@ -1,5 +1,18 @@
 # SGLang public APIs
 
+# ROCm gfx1030 fill-kernel workaround (self-gating). On a gfx1031 GPU reported as
+# gfx1030 via HSA_OVERRIDE_GFX_VERSION=10.3.0, PyTorch's built-in fill/reduction
+# kernels SIGSEGV *iff* the torch binary has no gfx1030 kernels. auto_apply_if_needed()
+# detects that exact condition (reported arch not in torch.cuda.get_arch_list()) and
+# only patches then; it is a no-op when torch is built for gfx1030 (the normal case
+# here). Must run before downstream `from torch import zeros`-style binds.
+try:
+    import universal_kv.hip_zero_patch as _hip_zero_patch
+
+    _hip_zero_patch.auto_apply_if_needed()
+except ImportError:
+    pass
+
 # Install stubs early for platforms where certain dependencies are unavailable
 # (e.g. macOS/MPS has no triton, and torch.mps lacks Stream / set_device /
 # get_device_properties).  This must run before any downstream imports.
