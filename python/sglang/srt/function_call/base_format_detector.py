@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
@@ -21,6 +22,18 @@ from sglang.srt.function_call.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Optional Rust acceleration of the base streaming parser (rs_tool_parser_pyo3). Opt-in via
+# SGLANG_RUST_TOOL_PARSER=1 — the Rust StreamingDetector is byte-faithful to this base
+# implementation for the common bot_token-then-JSON formats, but a subclass with a non-trivial
+# has_tool_call() (beyond a substring check) should not enable it. Falls back to Python silently
+# if the extension is unavailable.
+try:
+    from rs_tool_parser_pyo3 import StreamingDetector as _RustStreamingDetector
+except ImportError:
+    _RustStreamingDetector = None
+
+_RUST_TOOL_PARSER_ENABLED = os.environ.get("SGLANG_RUST_TOOL_PARSER", "0") == "1"
 
 
 class BaseFormatDetector(ABC):
@@ -116,6 +129,36 @@ class BaseFormatDetector(ABC):
                 return i
         return 0
 
+    def _rust_parse_streaming_increment(
+        self, new_text: str, tools: List[Tool]
+    ) -> StreamingParseResult:
+        """Delegate one streaming increment to the Rust StreamingDetector (rs_tool_parser_pyo3).
+
+        The Rust detector is stateful and configured once from this instance's tokens; it returns
+        a dict which we marshal back into StreamingParseResult / ToolCallItem.
+        """
+        detector = getattr(self, "_rust_detector", None)
+        if detector is None:
+            detector = _RustStreamingDetector(
+                self.bot_token or "",
+                self.eot_token or "",
+                self.tool_call_separator,
+            )
+            self._rust_detector = detector
+        names = [t.function.name for t in tools if t.function.name]
+        out = detector.parse_streaming_increment(new_text, names)
+        return StreamingParseResult(
+            normal_text=out["normal_text"],
+            calls=[
+                ToolCallItem(
+                    tool_index=c["tool_index"],
+                    name=c["name"],
+                    parameters=c["parameters"],
+                )
+                for c in out["calls"]
+            ],
+        )
+
     def parse_streaming_increment(
         self, new_text: str, tools: List[Tool]
     ) -> StreamingParseResult:
@@ -134,6 +177,10 @@ class BaseFormatDetector(ABC):
 
         For incompatible formats, detectors should override this method with custom logic.
         """
+        # Optional Rust fast path (opt-in, byte-faithful to the logic below).
+        if _RUST_TOOL_PARSER_ENABLED and _RustStreamingDetector is not None:
+            return self._rust_parse_streaming_increment(new_text, tools)
+
         # Append new text to buffer
         self._buffer += new_text
         current_text = self._buffer
