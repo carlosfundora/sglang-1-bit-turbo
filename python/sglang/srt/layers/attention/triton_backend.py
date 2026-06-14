@@ -104,7 +104,9 @@ class TritonAttnBackend(AttentionBackend):
             _is_gfx1030 = True
         else:
             try:
-                import torch
+                # NOTE: use the module-level `torch` (line 9). A local `import torch` here would
+                # make `torch` a function-local for all of __init__, raising UnboundLocalError at
+                # the torch.compiler.disable(...) lines below (which run before this branch).
                 _is_gfx1030 = "gfx103" in torch.cuda.get_device_properties(0).gcnArchName
             except Exception:
                 _is_gfx1030 = False
