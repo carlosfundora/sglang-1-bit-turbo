@@ -68,7 +68,6 @@ def create_wave_backend(runner):
     return WaveAttnBackend(runner)
 
 
-<<<<<<< HEAD
 @register_attention_backend("atom")
 def create_atom_backend(runner):
     from sglang.srt.layers.attention.aiter_backend import AiterAttnBackend
@@ -100,7 +99,8 @@ def create_atom_backend(runner):
         "delegate_backend": "triton",
     }
     return backend
-=======
+
+
 @register_attention_backend("universal_broker")
 def create_universal_broker_backend(runner):
     from sglang.srt.layers.attention.universal_broker_backend import (
@@ -108,7 +108,6 @@ def create_universal_broker_backend(runner):
     )
 
     return UniversalBrokerAttnBackend(runner)
->>>>>>> e0905f017488c752faeed9aedcf62d0ec397d020
 
 
 @register_attention_backend("ascend")

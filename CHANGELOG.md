@@ -1,18 +1,14 @@
 # Changelog
 
 ## [Unreleased]
-<<<<<<< HEAD
 ### Added
 - Added `atom` wiring surfaces for attention, MoE runner backend flag parsing, and FP8 GEMM backend flag parsing.
 - Added `atom_fp8` KV cache dtype alias to normalize into `fp8_e4m3` during server argument post-processing.
 
-### Updated
+### Changed
 - Registered a new `atom` attention backend path in `attention_registry` with explicit fallback to Triton when AITER is unavailable.
 - Updated MoE and FP8 backend initializers to map `atom` to existing stable execution paths (`triton` for MoE, `aiter` for FP8 GEMM).
 - Added server-args unit coverage for `atom`/`atom_fp8` CLI wiring.
-=======
-
-### Changed
 - Optimized Triton attention backend kernel tuning (waves_per_eu, num_warps) for AMD RDNA2 (gfx1030) GPUs to prevent crashes and improve throughput.
 - Optimized attention hot loops for RDNA2 hardware.
 - Propagated RDNA2 default `mem_fraction_static` and `chunked_prefill_size` values in `server_args.py` when users do not set them explicitly.
@@ -21,7 +17,6 @@
 - Expanded `--kv-cache-dtype` choices with universal broker hybrid modes (`rq3_hybrid`, `univ_rq3`).
 - Added `UNIVERSAL_KV` host-tier pool name and a pinned host allocation helper for warm-tier spill plumbing.
 - Hardened `UniversalKVBroker` with GPU/RAM budget-aware hot-to-warm demotion, warm-tier eviction, and broker memory metrics for spill/eviction observability.
->>>>>>> e0905f017488c752faeed9aedcf62d0ec397d020
 
 ### Documentation
 - Created: `.jules/reports/research/repo-triangulation-20260427-024844.md`

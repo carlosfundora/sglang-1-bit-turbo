@@ -154,12 +154,9 @@ ATTENTION_BACKEND_CHOICES = [
     # AMD specific
     "aiter",
     "wave",
-<<<<<<< HEAD
     "atom",
     "atom_hybrid",
-=======
     "universal_broker",
->>>>>>> e0905f017488c752faeed9aedcf62d0ec397d020
     # Other platforms
     "intel_amx",
     "ascend",
