@@ -105,3 +105,35 @@ Outcome (high value):
   `attn_logits is None` bug (decode_attention.py:734) so the model forward works in the graph-runner
   path; THEN (2) enable real HIP-graph capture via GFXGRAPH_ENABLE_UNSAFE_GRAPH_CAPTURE and/or the
   Tier 2 native bridge. Order matters: (1) before (2), else capture replays a broken forward.
+
+## Step-1 fix applied + next layer
+- FIXED: `attn_logits is None` in forward_decode (allocate split-KV scratch on the fly). Commit
+  above. The eager-replay decode no longer AttributeErrors.
+- NEXT (🟥): the decode path then hits `CUDA error: illegal memory access` (hipErrorIllegalAddress)
+  under the cuda_graph_runner run_once buffers on RDNA2 — a deeper GPU memory bug (stale
+  kv_indices/req_to_token mapping or non-contiguous buffer, consistent with the gfxGRAPH contiguity
+  signal). Cascading failures here indicate the fork's custom RDNA2 cuda-graph integration is
+  unfinished. Two strategic options below.
+
+### Strategic option A — rebase onto current upstream sglang
+- Fork = ~11,375 commits (upstream base) + ~226 custom commits (RDNA2/atom/rotorquant/ngram/etc).
+  Currently on `forwardport/rdna2-20260519` (a forward-port already ~1 month behind upstream).
+- Pro: upstream ROCm support is maturing fast; rebasing trims the custom-maintenance burden and may
+  bring cleaner attention/graph code. The team already does forward-ports (it's the strategy).
+- Con: the cuda-graph bugs are in OUR CUSTOM code (decode_attention.py is a fork RDNA2 op; the
+  cuda_graph_runner RDNA2 path is ours) — a rebase will NOT auto-fix them and would likely DROP our
+  custom RDNA2 decode-attn for upstream's (which targets CDNA/MI300; gfx1030 RDNA2 is niche and may
+  not work). Re-applying 226 commits onto a fast base is conflict-heavy (we just resolved 5 committed
+  conflicts from the last forward-port).
+- Verdict: worth a DELIBERATE divergence audit as its own task (fetch upstream, compute merge-base,
+  triage which custom commits are superseded by upstream ROCm work vs still needed), NOT a quick fix
+  for the cuda-graph bug. Sanctioned RDNA2 fast path meanwhile = spec-decode (99 t/s, works) with
+  cuda-graph OFF.
+
+### Strategic option B — own a HIP flash-decode attention kernel (rust+hip)
+- The decode-attention is currently sglang's custom RDNA2 *Triton* op; we do NOT own a HIP version
+  (build/kernels has none; rust crates rs_fa3_kernel + rs_rdna2_kernels are the homes).
+- A graph-safe HIP flash-decoding kernel (contiguous buffers by construction, no Triton/graph-capture
+  fragility) would deterministically fix the decode path AND let cuda-graph capture succeed — bypassing
+  the cascading Triton+graph bugs entirely. Aligns with the rust+hip ownership direction. Substantial
+  (kernel-dev) but high-leverage; pairs with the existing tree-spec-sample/iqk/trellis kernels.
