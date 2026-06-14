@@ -149,3 +149,28 @@ Outcome (high value):
   capture can succeed on the deterministic kernel. The kernel + Rust binding + broker `SDPAKernel` are
   done; the remaining work is the sglang-side backend glue (fp16 path / KV-layout marshalling) +
   re-enabling capture.
+
+## Attention-backend + KV-quant sweep (measured 2026-06-14, RX 6700 XT gfx1030)
+Qwen2.5-0.5B **f16**, batch 1, input-len 512, output-len 64, `--disable-cuda-graph`, decode tok/s:
+
+| backend (`--attention-backend`) | decode tok/s | status |
+|---|---|---|
+| `universal_broker` (our unified KV-broker) | **~54–60** | ✅ best sglang backend (≈/> triton) |
+| `triton` (rdna2 two-stage) | 57.5 | ✅ |
+| `atom` (Hybrid AITER/Triton) | ~51–54 | ✅ |
+| `torch_native` (Torch SDPA) | 36.0 | ✅ (slowest working) |
+| `aiter` (AOTriton/AITER) | ~6 (erratic 6–59) | ⚠️ AITER not tuned for RDNA2 (targets MI3xx); very slow/unreliable |
+| `wave` (Wave DSL) | — | 🟥 FAILS: `ModuleNotFoundError: No module named 'wave_lang'` (dep not installed) |
+| `radix` | n/a | RadixAttention is the shared prefix-cache layer, not a standalone decode kernel |
+
+**KV-quant:** `--kv-cache-dtype tq3` (TurboQuant) 🟥 FAILS at pool init —
+`RuntimeError: Calling torch.geqrf on a CPU tensor requires compiling PyTorch with LAPACK`
+(TurboQuant's rotation does a CPU QR; the installed ROCm PyTorch has no LAPACK). Fix = move the
+geqrf to GPU (rocSOLVER) or build torch with LAPACK, or precompute the rotation. rq3 had the separate
+~1.4 t/s CPU-codec issue (§4).
+
+**Cross-engine (same f16 model, d512):** llama.cpp HIP fattn-vec **181 tok/s** ≫ best sglang
+(~60, universal_broker/triton) ≫ torch_native 36. Confirms the native-HIP stack advantage and
+motivates the HIP decode-attention backend (rs_rdna2_kernels::flash_decode) for sglang. **Lesson
+(bench, don't trust docs):** the prior "Triton ~7x slower than torch_native" doc claim was FALSE
+(Triton 1.6x faster); corrected.
