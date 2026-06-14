@@ -130,10 +130,22 @@ Outcome (high value):
   for the cuda-graph bug. Sanctioned RDNA2 fast path meanwhile = spec-decode (99 t/s, works) with
   cuda-graph OFF.
 
-### Strategic option B — own a HIP flash-decode attention kernel (rust+hip)
-- The decode-attention is currently sglang's custom RDNA2 *Triton* op; we do NOT own a HIP version
-  (build/kernels has none; rust crates rs_fa3_kernel + rs_rdna2_kernels are the homes).
-- A graph-safe HIP flash-decoding kernel (contiguous buffers by construction, no Triton/graph-capture
-  fragility) would deterministically fix the decode path AND let cuda-graph capture succeed — bypassing
-  the cascading Triton+graph bugs entirely. Aligns with the rust+hip ownership direction. Substantial
-  (kernel-dev) but high-leverage; pairs with the existing tree-spec-sample/iqk/trellis kernels.
+### Strategic option B — own a HIP flash-decode attention kernel (rust+hip)  ✅ BUILT 2026-06-14
+- The decode-attention is currently sglang's custom RDNA2 *Triton* op; we did NOT own a HIP version.
+  A 3-agent search confirmed nothing reusable exists anywhere (every asset is CPU/stub/Triton or FFI
+  to external AOTriton/AITER — the thing crashing). So we built one.
+- **DONE:** `rs_rdna2_kernels::flash_decode` (`projects/rust/crates/rs_rdna2_kernels/hip/flash_decode.cpp`)
+  + library copy `build/kernels/flash-decode-hip` (standalone `.hsaco`). One Wave32 warp/query, QK dot
+  via `__shfl_xor`, online softmax + output accumulator in registers — no LDS, no block barriers,
+  contiguous reads → deterministic and graph-capture-safe (the property §2 needs). f32 Q, int8 KV +
+  per-page-per-head descale, GQA, causal; head_dim multiple of 32, ≤256. Wired as the real `SDPAKernel`
+  (`Rdna2FlashDecodeKernel`) in `rs_universal_kv_broker_core` behind the `rocm` feature, replacing the
+  zeroed `RustWave32Kernel` / `-38` AOTriton stub. Verified exact vs CPU ref on RX 6700 XT (rust commit
+  72e4c19).
+- The int8-KV + descale path also gives §4 (rq3/tq3 KV-quant) a **GPU decode path** (was CPU-fallback
+  at ~1.4 t/s).
+- **REMAINING (next sprint):** wire this kernel into the sglang serving loop as a selectable attention
+  backend (replace the Triton `triton_ops/rdna2/decode_attention.py` decode path), so §2/§3 cuda-graph
+  capture can succeed on the deterministic kernel. The kernel + Rust binding + broker `SDPAKernel` are
+  done; the remaining work is the sglang-side backend glue (fp16 path / KV-layout marshalling) +
+  re-enabling capture.
