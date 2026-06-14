@@ -20,6 +20,18 @@ import gc
 import inspect
 import logging
 import os
+
+# gfxGRAPH: on RDNA2/ROCm, ensure the CUDA-Graph->HIP-Graph bridge is active in THIS
+# (scheduler) process before any capture, so cuda-graph capture/replay is the graceful
+# BridgedCUDAGraph (precise errors + eager fallback) rather than a raw SIGSEGV. No-op
+# off-ROCm or if gfxgraph isn't installed. Idempotent.
+if os.environ.get("GFXGRAPH", "").lower() in ("1", "debug", "validate"):
+    try:
+        import gfxgraph as _gfxgraph
+
+        _gfxgraph.enable()
+    except Exception:  # gfxgraph optional — never block startup on it
+        pass
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial

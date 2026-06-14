@@ -70,6 +70,14 @@ def apply_gfx1031_env() -> None:
         # RDNA2 kernel dispatch + gfxGRAPH activation gate
         "SGLANG_RDNA2_KERNELS": "1",
 
+        # gfxGRAPH: auto-enable the CUDA-Graph->HIP-Graph bridge + tier-1 capture
+        # safety on RDNA2. Harmless when cuda-graph is off (the default here); when
+        # cuda-graph is force-enabled (SGLANG_RDNA2_FORCE_CUDA_GRAPH=1) this gives the
+        # graceful BridgedCUDAGraph (precise errors / eager fallback) instead of a raw
+        # SIGSEGV, plus GUARD=1 auto-contiguifies capture tensors.
+        "GFXGRAPH": "1",
+        "GFXGRAPH_GUARD": "1",
+
         # Triton tuning for RDNA2
         "TRITON_PRINT_AUTOTUNING": "0",
 

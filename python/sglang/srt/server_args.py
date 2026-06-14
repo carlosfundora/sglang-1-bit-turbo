@@ -2676,6 +2676,23 @@ class ServerArgs:
                             "chunked_prefill_size"
                         )
 
+                    # RotorQuant/TurboQuant KV (rq*/tq*) allocate large codec working
+                    # buffers on top of the KV pool; at the default mem-fraction they OOM
+                    # on 12GB RDNA2 cards (verified 2026-06-14: tq3 OOMed until lowered).
+                    # Cap mem-fraction at 0.45 for these KV dtypes unless the user set it.
+                    _kvq = str(self.kv_cache_dtype or "").lower()
+                    if _kvq.startswith(("rq", "tq", "iso", "planar")) and (
+                        self.mem_fraction_static is None
+                        or self.mem_fraction_static > 0.45
+                    ):
+                        prev_mf = self.mem_fraction_static
+                        self.mem_fraction_static = 0.45
+                        logger.warning(
+                            "RDNA2: KV dtype %r needs codec working memory — capping "
+                            "mem-fraction-static %s -> 0.45 (override explicitly to change).",
+                            self.kv_cache_dtype, prev_mf,
+                        )
+
                     # RDNA2 bf16 crash: Triton kernels emit fdot2.bf16.bf16
                     # intrinsic which does not exist on gfx1030. This causes
                     # an LLVM crash during CUDA graph capture. Force fp16.
