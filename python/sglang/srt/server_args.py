@@ -157,6 +157,7 @@ ATTENTION_BACKEND_CHOICES = [
     "atom",
     "atom_hybrid",
     "universal_broker",
+    "rdna2_hip",
     # Other platforms
     "intel_amx",
     "ascend",

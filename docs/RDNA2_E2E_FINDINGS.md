@@ -174,3 +174,27 @@ geqrf to GPU (rocSOLVER) or build torch with LAPACK, or precompute the rotation.
 motivates the HIP decode-attention backend (rs_rdna2_kernels::flash_decode) for sglang. **Lesson
 (bench, don't trust docs):** the prior "Triton ~7x slower than torch_native" doc claim was FALSE
 (Triton 1.6x faster); corrected.
+
+## Native HIP decode backend `rdna2_hip` — built + measured (2026-06-14)
+Wired `rs_rdna2_kernels::flash_decode` into sglang as a real device-resident, paged-KV,
+fp16 decode backend (`--attention-backend rdna2_hip`): a torch load_inline HIP op
+(`rdna2_hip_decode.paged_decode`) operating in-place on the on-GPU KV cache via
+kv_indptr/kv_indices, wrapped by `Rdna2HipAttnBackend` (subclasses TritonAttnBackend,
+overrides only forward_decode, falls back to triton for MLA/sliding-window/softcap/
+quantized-KV/non-fp16). Numerically correct (maxerr ~1e-5 vs torch ref; MHA/GQA/varlen).
+
+**Result — EXPERIMENTAL, does NOT beat triton (premise disproved by measurement):**
+| input-len | triton | rdna2_hip |
+|---|---|---|
+| 512  | 57.5 | 52.1 |
+| 2048 | 58.6 | 37.6 |
+| 4096 | 56.9 | 27.0 |
+- d512: decode is matmul-bound, all sglang backends cluster 52–60 regardless of attention.
+- d2048/4096: rdna2_hip DEGRADES — it splits KV only across ≤4 warps in ONE block, so long
+  contexts serialize; triton/llama split KV across many BLOCKS scaling with seq_k.
+- **KEY FINDING:** the llama.cpp (181) vs sglang (~57) gap is sglang's per-token FRAMEWORK
+  overhead, NOT the attention kernel — swapping the attention kernel can't close it. The real
+  levers are reducing framework overhead and/or unblocking cuda-graph (§2), not a faster attn op.
+- TODO to make rdna2_hip win at long context: inter-block split-K (grid.y = parallel_blocks(seq_k)
+  + combine pass), mirroring llama.cpp fattn-vec / the flash-decode-hip "optimization headroom".
+- Default RDNA2 backends remain triton / universal_broker.

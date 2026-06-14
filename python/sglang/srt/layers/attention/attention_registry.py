@@ -132,6 +132,13 @@ def create_atom_backend(runner):
     return backend
 
 
+@register_attention_backend("rdna2_hip")
+def create_rdna2_hip_backend(runner):
+    from sglang.srt.layers.attention.rdna2_hip_backend import Rdna2HipAttnBackend
+
+    return Rdna2HipAttnBackend(runner)
+
+
 @register_attention_backend("universal_broker")
 def create_universal_broker_backend(runner):
     from sglang.srt.layers.attention.universal_broker_backend import (
