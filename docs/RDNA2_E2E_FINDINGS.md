@@ -78,3 +78,30 @@ Model: Qwen2.5-0.5B-Instruct. Each row is an independent finding; group the fixe
 3. (🟥, done) Keep the triton_backend import fix (§1) + add the backend-init smoke test.
 4. (🟨) Tool-parser reach: either accelerate the overriding detectors or document supported set (§6).
 5. (🟨) Crash-time VRAM release (§7). (✅) NGRAM losslessness A/B check (§5).
+
+---
+
+## gfxGRAPH deployment result (Tier 1) — and the true cuda-graph root cause
+
+Deployed gfxGRAPH v0.3.4 Tier 1 into sglang (GFXGRAPH=1 via sitecustomize so the spawned scheduler
+gets the `torch.cuda.CUDAGraph → BridgedCUDAGraph` monkey-patch). Workers logged
+"Enabling gfxGRAPH ... Native bridge loaded ... enabled successfully".
+
+Outcome (high value):
+- gfxGRAPH **converted the opaque hard SIGSEGV (§2) into a graceful eager fallback + a precise,
+  fixable Python error.** It safely refused the unsafe capture on ROCm/HIP 7.2.26015
+  ("disabled by default ... set GFXGRAPH_ENABLE_UNSAFE_GRAPH_CAPTURE") rather than crashing.
+- The eager-replay then surfaced the REAL blocker, independent of cuda-graph:
+  `triton_ops/rdna2/decode_attention.py:734  assert max_kv_splits == attn_logits.shape[2]`
+  -> `AttributeError: 'NoneType' object has no attribute 'shape'` (attn_logits is None in the
+  cuda_graph_runner run_once path). The RDNA2 decode-attention op is not wired for the graph-runner
+  code path — this is almost certainly what manifested as the §2 SIGSEGV too.
+
+### Tier 1 vs Tier 2 — recommendation
+- **Tier 1 (deploy now):** zero-build safety net + diagnostics. Turns RDNA2 graph segfaults into
+  graceful eager fallback with clear errors. Keep it on. BUT on ROCm 7.2 it defaults capture OFF, so
+  it gives NO throughput win by itself (eager ≈ --disable-cuda-graph).
+- **For the perf win you need BOTH, not Tier 1 alone:** (1) fix the sglang RDNA2 decode-attention
+  `attn_logits is None` bug (decode_attention.py:734) so the model forward works in the graph-runner
+  path; THEN (2) enable real HIP-graph capture via GFXGRAPH_ENABLE_UNSAFE_GRAPH_CAPTURE and/or the
+  Tier 2 native bridge. Order matters: (1) before (2), else capture replays a broken forward.
