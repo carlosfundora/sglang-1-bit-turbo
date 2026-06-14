@@ -82,7 +82,16 @@ def generate_rotation_matrix(d: int, seed: int = 42) -> torch.Tensor:
     if key not in _ROTATION_CACHE:
         gen = torch.Generator().manual_seed(seed)
         G = torch.randn(d, d, generator=gen)
-        Q, R = torch.linalg.qr(G)
+        # torch.linalg.qr on CPU needs LAPACK, which the ROCm PyTorch build lacks
+        # (geqrf RuntimeError). Run the QR on the GPU (rocSOLVER) when available and
+        # move the result back to CPU; the seeded G keeps it deterministic and the
+        # rotation stays a valid Haar orthogonal matrix. Falls back to CPU QR on
+        # non-HIP builds that ship LAPACK.
+        if torch.cuda.is_available():
+            Q, R = torch.linalg.qr(G.cuda())
+            Q, R = Q.cpu(), R.cpu()
+        else:
+            Q, R = torch.linalg.qr(G)
         diag_sign = torch.sign(torch.diag(R))
         diag_sign[diag_sign == 0] = 1.0
         Q = Q * diag_sign.unsqueeze(0)
