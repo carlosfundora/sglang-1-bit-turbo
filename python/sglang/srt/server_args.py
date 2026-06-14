@@ -2693,6 +2693,25 @@ class ServerArgs:
                         # Fewer KV splits for Wave32 (half the wavefront width)
                         self.triton_attention_num_kv_splits = 8
 
+                    # RDNA2 cuda-graph replay SIGSEGV in the serving loop: the
+                    # fork's custom RDNA2 cuda_graph_runner captures a buffer whose
+                    # address is invalid at replay (stale-address; AMD_SERIALIZE
+                    # doesn't help — verified 2026-06-14), so the DEFAULT server
+                    # (cuda-graph on) crashes the scheduler subprocess (exit -11) on
+                    # the first decode. bench_one_batch (non-serving path) is fine.
+                    # Until the cuda_graph_runner contiguity bug is fixed, default
+                    # cuda-graph OFF on RDNA2 so the server actually serves. Opt back
+                    # in (e.g. to test the fix) with SGLANG_RDNA2_FORCE_CUDA_GRAPH=1.
+                    if not self.disable_cuda_graph and not get_bool_env_var(
+                        "SGLANG_RDNA2_FORCE_CUDA_GRAPH"
+                    ):
+                        self.disable_cuda_graph = True
+                        logger.warning(
+                            "RDNA2: disabling cuda-graph by default (server-path "
+                            "replay SIGSEGVs on gfx1030; see docs/RDNA2_E2E_FINDINGS.md "
+                            "§2). Set SGLANG_RDNA2_FORCE_CUDA_GRAPH=1 to force-enable."
+                        )
+
                     logger.info(
                         f"RDNA2 config: attention={self.attention_backend}, "
                         f"dtype={self.dtype}, wave_size={wave_size}, "

@@ -198,3 +198,22 @@ quantized-KV/non-fp16). Numerically correct (maxerr ~1e-5 vs torch ref; MHA/GQA/
 - TODO to make rdna2_hip win at long context: inter-block split-K (grid.y = parallel_blocks(seq_k)
   + combine pass), mirroring llama.cpp fattn-vec / the flash-decode-hip "optimization headroom".
 - Default RDNA2 backends remain triton / universal_broker.
+
+## cuda-graph status re-tested on current stack (2026-06-14) + default hardened
+Re-ran §2 on the current stack (post attn_logits fix). Findings:
+- **bench_one_batch (non-serving path): cuda-graph WORKS** — capture + replay, no crash; Qwen2.5-0.5B
+  f16 d512 decode 62 vs 60 (--disable-cuda-graph), ~+4.5% (small model → small win; scales with depth).
+- **Real server (cuda_graph_runner serving path): STILL SIGSEGVs** — `scheduler_0 crashed exit -11` on the
+  first decode, with cuda-graph ON. Reproduced with overlap ON *and* `--disable-overlap-schedule`
+  (so it's NOT the overlap interaction), and with `AMD_SERIALIZE_KERNEL=3 AMD_SERIALIZE_COPY=3`
+  (no precise hipError surfaced → it's a hard stale-buffer-address segfault, NOT an async race).
+  Root cause stands: the fork's custom RDNA2 cuda_graph_runner captures a buffer whose address is
+  invalid at replay (matches the gfxGRAPH `graph_capture_copy_required` signal).
+- **So the DEFAULT server config (cuda-graph on) was crashing on gfx1030.** HARDENED: server_args now
+  auto-disables cuda-graph on RDNA2 (with a warning) so the default server actually serves; opt back in
+  with `SGLANG_RDNA2_FORCE_CUDA_GRAPH=1`. Verified: default server now returns HTTP 200, no crash.
+- **Remaining deep fix (to actually get cuda-graph serving perf):** in cuda_graph_runner, make every
+  captured decode buffer a STABLE pre-allocated static tensor (copy inputs in per replay) — the suspects
+  are the RDNA2 decode kv_indices / req_to_token / split-KV scratch. Needs a rocgdb backtrace of the
+  scheduler segfault to pinpoint the unstable tensor. NOTE the realized win is modest at small models
+  (~+5%); bigger for deep models. Lower priority than it once seemed given decode is framework-bound.
