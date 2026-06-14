@@ -54,8 +54,39 @@ def create_trtllm_mla_backend(runner):
     return TRTLLMMLABackend(runner)
 
 
+def _current_gpu_is_rdna() -> bool:
+    """True on RDNA (gfx10xx/11xx/12xx). AITER/CK kernels target CDNA only; on RDNA
+    the aiter backend falls back to aiter's `unified_attention`, a prefill-style
+    varlen kernel that does NO split-KV for single-token decode -> ~6 tok/s on
+    gfx1030 (measured). The fork's own triton decode (`decode_attention_fwd`,
+    two-stage split-KV) does ~57 tok/s on the same model, so prefer it on RDNA."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available() or not hasattr(torch.version, "hip"):
+            return False
+        arch = getattr(torch.cuda.get_device_properties(0), "gcnArchName", "")
+        base = arch.split(":")[0]
+        return base.startswith(("gfx10", "gfx11", "gfx12"))
+    except Exception:
+        return False
+
+
 @register_attention_backend("aiter")
 def create_aiter_backend(runner):
+    # On RDNA there is no CK/AITER decode kernel; AiterAttnBackend routes decode to
+    # aiter `unified_attention` (prefill-style, no split-KV) which is ~10x slower
+    # than the fork's triton decode on gfx1030. Resolve `aiter` to the fast triton
+    # backend on RDNA. (CDNA/MI keeps the real AITER path.)
+    if _current_gpu_is_rdna():
+        from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
+
+        logger.warning(
+            "aiter backend requested on an RDNA GPU (no CK/AITER decode kernels); "
+            "using the triton backend's split-KV decode instead (much faster on gfx10xx)."
+        )
+        return TritonAttnBackend(runner)
+
     from sglang.srt.layers.attention.aiter_backend import AiterAttnBackend
 
     return AiterAttnBackend(runner)
