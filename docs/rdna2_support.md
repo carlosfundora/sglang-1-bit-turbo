@@ -98,9 +98,10 @@ On RDNA2, graph capture requires serialization guards:
    input-len 512, `--disable-cuda-graph` → **triton 57.5 tok/s vs torch_native
    36.0 tok/s** decode. The earlier "Triton ~7x slower, always prefer
    torch_native" guidance is stale (older Triton/ROCm) — prefer `triton` for
-   decode now. NOTE both are far behind a native HIP flash-decode: llama.cpp's
-   fattn-vec on the same gfx1030 does ~163 tok/s on Qwen2.5-0.5B (q4_k_m) at the
-   same depth, which is why a HIP decode-attention backend (our
+   decode now. NOTE both are far behind a native HIP stack: on the SAME model and
+   SAME f16 weights (Qwen2.5-0.5B f16, d512), llama.cpp's HIP fattn-vec does
+   **~181 tok/s** vs sglang triton 57.5 / torch_native 36.0 (~3.15x). That whole-
+   stack gap (matmuls + HIP attention) is why a HIP decode-attention backend (our
    `rs_rdna2_kernels::flash_decode`) is the planned replacement for the Triton op.
 4. **Flash Attention**: Requires the Triton backend build
    (`FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE`). CK-based flash-attn
