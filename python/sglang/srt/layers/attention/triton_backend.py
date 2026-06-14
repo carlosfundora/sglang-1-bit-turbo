@@ -66,17 +66,21 @@ def _fill_prefix_sum_buffer(
 ) -> torch.Tensor:
     if is_hip() and os.getenv("SGLANG_ROCM_EXPERIMENTAL_PREFIX_CPU", "0") == "1":
         torch.cuda.synchronize(buffer.device)
+        # IMPORTANT: write into the STATIC `buffer` view and return that view.
+        # Returning a fresh tensor here (the old behavior) bakes a transient address
+        # into a captured CUDA/HIP graph, which is read at a stale/freed address on
+        # replay -> hipErrorIllegalAddress. Keep the cuda-graph-safe static buffer.
+        view = buffer[: length + 1]
+        if view.numel() > 0:
+            view[0] = 0
         if length <= 0:
-            return torch.zeros(1, dtype=buffer.dtype, device=buffer.device)
-
-        values = values[:length]
-        values_cpu = values.detach().to(device="cpu", dtype=torch.int32).contiguous()
+            return view
+        values_cpu = values[:length].detach().to(device="cpu", dtype=torch.int32).contiguous()
         prefix_cpu = torch.empty(length + 1, dtype=torch.int32, device="cpu")
         prefix_cpu[0] = 0
         torch.cumsum(values_cpu, dim=0, out=prefix_cpu[1:])
-        return torch.tensor(
-            prefix_cpu.tolist(), dtype=buffer.dtype, device=buffer.device
-        )
+        view[1 : length + 1] = prefix_cpu[1:].to(device=buffer.device, dtype=buffer.dtype)
+        return view
 
     view = buffer[: length + 1]
     if view.numel() > 0:

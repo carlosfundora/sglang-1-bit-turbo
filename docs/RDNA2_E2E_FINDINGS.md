@@ -236,3 +236,24 @@ fixed for cuda-graph serving. Until then the RDNA2 default stays cuda-graph OFF.
 the triton backend init_forward_metadata_replay_cuda_graph / RDNA2 decode_attention replay path sizes/
 fills the captured bs=1 kv_indices/req_to_token/split-KV scratch such that the decode kernel reads OOB;
 needs compute-sanitizer/rocm memcheck to nail the exact tensor. gfxGRAPH makes this iteration safe.
+
+## P0.1 cuda_graph_runner investigation (2026-06-14, inspection pass)
+Inspected the decode capture/replay metadata path (triton_backend
+init_forward_metadata_{capture,replay}_cuda_graph). Findings:
+- The DEFAULT decode path is cuda-graph-correct: capture and replay share the SAME static
+  buffers (`self.cuda_graph_kv_indices`, `self.kv_indptr` view, `cuda_graph_attn_logits/lse`,
+  `cuda_graph_num_kv_splits`); replay refills them in place. Not the bug.
+- FIXED a real cuda-graph landmine: `_fill_prefix_sum_buffer`'s experimental
+  `SGLANG_ROCM_EXPERIMENTAL_PREFIX_CPU=1` path returned a FRESH tensor each call -> a captured
+  graph bakes that transient address and reads it stale on replay (hipErrorIllegalAddress). Now
+  writes into the static buffer view (cuda-graph-safe). Off by default, so not the active crash,
+  but a genuine landmine removed.
+- The active DEFAULT-config server crash (bench_one_batch is fine; only the overlap-scheduler
+  server crashes) is most likely a capture-time buffer address from the radix/overlap path baked
+  into the graph and stale at replay. Pinning the exact tensor needs `compute-sanitizer` /
+  `rocm-memcheck` — NOT installed on this box (only rocgdb, which is async-imprecise). Guess-fixing
+  a GPU memory bug risks SILENT wrong attention, so it is left for a focused session: install
+  compute-sanitizer, run `launch_server` with `SGLANG_RDNA2_FORCE_CUDA_GRAPH=1` under it (it
+  follows the scheduler subprocess), read the faulting kernel+tensor, fix the sizing/lifetime.
+  Until then the RDNA2 default stays cuda-graph OFF (safe) + gfxGRAPH GUARD makes any force-enable
+  diagnosable.
