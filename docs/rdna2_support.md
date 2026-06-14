@@ -92,8 +92,16 @@ On RDNA2, graph capture requires serialization guards:
    hardware. All GEMMs run through scalar/vector ALUs via hipBLASLt.
 2. **12 GB VRAM**: Consumer RDNA2 cards have limited VRAM. Use
    `--mem-fraction-static 0.35` and smaller models.
-3. **Triton attention**: The Triton attention backend is ~7x slower than
-   `torch_native` on gfx1030. Always prefer `torch_native`.
+3. **Triton attention**: On the CURRENT stack (sglang 0.5.6.x + ROCm 7.2,
+   measured 2026-06-14 on RX 6700 XT) the Triton decode backend is actually
+   **~1.6x FASTER** than `torch_native`, not slower: Qwen2.5-0.5B f16, batch 1,
+   input-len 512, `--disable-cuda-graph` → **triton 57.5 tok/s vs torch_native
+   36.0 tok/s** decode. The earlier "Triton ~7x slower, always prefer
+   torch_native" guidance is stale (older Triton/ROCm) — prefer `triton` for
+   decode now. NOTE both are far behind a native HIP flash-decode: llama.cpp's
+   fattn-vec on the same gfx1030 does ~163 tok/s on Qwen2.5-0.5B (q4_k_m) at the
+   same depth, which is why a HIP decode-attention backend (our
+   `rs_rdna2_kernels::flash_decode`) is the planned replacement for the Triton op.
 4. **Flash Attention**: Requires the Triton backend build
    (`FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE`). CK-based flash-attn
    does not support RDNA2.
