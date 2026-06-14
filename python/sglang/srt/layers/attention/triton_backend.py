@@ -1169,6 +1169,30 @@ class TritonAttnBackend(AttentionBackend):
             k_descale = 1.0
             v_descale = 1.0
 
+        # The split-KV scratch buffers (attn_logits/attn_lse/num_kv_splits) are normally provided by
+        # forward_metadata. On an eager re-run of a captured decode (e.g. a cuda-graph eager
+        # fallback such as gfxGRAPH's BridgedCUDAGraph replay), the metadata can lack them; allocate
+        # on the fly so the RDNA2 decode kernel gets valid shapes instead of crashing on None.
+        attn_logits = self.forward_metadata.attn_logits
+        attn_lse = self.forward_metadata.attn_lse
+        num_kv_splits = self.forward_metadata.num_kv_splits
+        if attn_logits is None:
+            nbs = q.view(-1, layer.tp_q_head_num, layer.qk_head_dim).shape[0]
+            attn_logits = torch.empty(
+                (nbs, layer.tp_q_head_num, self.max_kv_splits, layer.v_head_dim),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            attn_lse = torch.empty(
+                (nbs, layer.tp_q_head_num, self.max_kv_splits),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            if num_kv_splits is None:
+                num_kv_splits = torch.full(
+                    (nbs,), self.max_kv_splits, dtype=torch.int32, device=self.device
+                )
+
         self.decode_attention_fwd(
             q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
             forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id),
@@ -1176,9 +1200,9 @@ class TritonAttnBackend(AttentionBackend):
             o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
             kv_indptr,
             kv_indices,
-            self.forward_metadata.attn_logits,
-            self.forward_metadata.attn_lse,
-            self.forward_metadata.num_kv_splits,
+            attn_logits,
+            attn_lse,
+            num_kv_splits,
             self.max_kv_splits,
             layer.scaling,
             k_descale,
