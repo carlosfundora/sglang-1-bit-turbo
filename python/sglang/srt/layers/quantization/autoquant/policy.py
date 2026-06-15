@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional
 
+from ._rs_codec import registry_codecs as _rs_registry_codecs
+
 logger = logging.getLogger(__name__)
 
 POLICY_VERSION = 1
@@ -19,22 +21,27 @@ class Stage(str, Enum):
     DRAFT = "draft"  # speculative draft model
 
 
-# Set of codec names recognised by the runner. These map 1:1 to the
-# kv_cache_dtype strings that MHATokenToKVPool* already accepts.
-_VALID_CODECS = frozenset(
+# Authoritative valid-codec set. The canonical ATOM-RS codecs come from the single Rust source
+# of truth (rs_atom_codec.registry_codecs(), via _rs_codec): tq1/tq2/tq3/tq4/tq8,
+# rq{3,4}_{planar,iso}, fp8_e4m3 — this ADDS the codecs the old hand-rolled set was missing
+# (tq1/tq2/tq8, fp8_e4m3, rq*_iso) and keeps them in lockstep with the engine. The synthetic
+# set below carries sglang-only / passthrough codes that have no ATOM-RS codec equivalent.
+# Rule: **union, never shrink** — nothing the runner already accepts is removed. See _rs_codec
+# + test/srt/test_rs_atom_codec_parity.py (Phase E tranche-2).
+_SYNTHETIC_CODECS = frozenset(
     {
-        # rotor family
-        "rq3", "rq4", "rq4_planar", "rq3_planar",
-        # turbo family
-        "tq3", "tq4",
-        # planar / iso scalar quant (used inside rotor too)
+        # short rotor aliases (normalize to rq3_planar / rq4_planar)
+        "rq3", "rq4",
+        # planar / iso scalar quant sub-modes (used inside rotor too)
         "planar", "iso",
-        # mixed K=TQ V=RQ
+        # mixed K=TQ V=RQ composites
         "kv_mixed", "kv_mixed3", "kv_mixed4",
         # passthrough
         "fp16", "bf16",
     }
 )
+
+_VALID_CODECS = frozenset(_rs_registry_codecs()) | _SYNTHETIC_CODECS
 
 
 @dataclass(frozen=True)
