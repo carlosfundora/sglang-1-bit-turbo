@@ -135,6 +135,59 @@ def test_policy_codec_for_matches_rust():
     assert rust.codec_for(3)["codec"] == "tq4"               # fallback agrees
 
 
+def test_server_args_kv_cache_dtype_normalization_is_behavior_preserving():
+    """Phase E tranche-3: ServerArgs._normalize_kv_cache_dtype routes Rust-known aliases
+    through rs_atom_codec but must reproduce the OLD hand-rolled behavior EXACTLY for every
+    accepted --kv-cache-dtype choice. Critically, bf16 and bfloat16 must stay DISTINCT
+    (trtllm_mla validation accepts 'bf16', rejects 'bfloat16'), and torch.dtype objects must
+    pass through untouched. Skipped (with note) if sglang can't import in this env."""
+    try:
+        from sglang.srt.server_args import ServerArgs
+    except Exception as e:  # pragma: no cover - env-dependent
+        print(f"[skip server_args normalization: {type(e).__name__}: {e}]")
+        return
+    from types import SimpleNamespace
+
+    # input -> expected post-normalization (must equal the pre-tranche-3 behavior)
+    expected = {
+        "auto": "auto",
+        "fp8_e5m2": "fp8_e5m2",
+        "fp8_e4m3": "fp8_e4m3",
+        "atom_fp8": "fp8_e4m3",          # Rust expansion == old map
+        "rq3": "rq3_planar",             # Rust expansion == old _RQ_SHORTHAND
+        "rq4": "rq4_planar",
+        "rq3_planar": "rq3_planar",
+        "rq4_planar": "rq4_planar",
+        "rq3_iso": "rq3_iso",
+        "rq4_iso": "rq4_iso",
+        "tq2": "tq2",
+        "tq3": "tq3",
+        "tq4": "tq4",
+        "bf16": "bf16",                  # MUST stay distinct (site server_args.py:2429)
+        "bfloat16": "bfloat16",          # MUST NOT collapse to bf16
+        "fp4_e2m1": "fp4_e2m1",          # unknown to Rust -> untouched
+        "rq3_hybrid": "rq3_hybrid",      # engine-only composite -> untouched
+        "univ_rq3": "univ_rq3",
+        "kv_mixed": "kv_mixed4",         # retained _MIXED_SHORTHAND
+        "kv_mixed3": "kv_mixed3",
+    }
+    for inp, exp in expected.items():
+        ns = SimpleNamespace(kv_cache_dtype=inp)
+        ServerArgs._normalize_kv_cache_dtype(ns)
+        assert ns.kv_cache_dtype == exp, (inp, ns.kv_cache_dtype, exp)
+
+    # torch.dtype objects pass through untouched (no AttributeError/TypeError crash)
+    try:
+        import torch
+
+        for dt in (torch.float16, torch.bfloat16):
+            ns = SimpleNamespace(kv_cache_dtype=dt)
+            ServerArgs._normalize_kv_cache_dtype(ns)
+            assert ns.kv_cache_dtype is dt, dt
+    except ImportError:
+        pass
+
+
 if __name__ == "__main__":
     test_wheel_present()
     test_fallback_normalize_matches_rust()
@@ -143,4 +196,5 @@ if __name__ == "__main__":
     test_fallback_backend_plan_matches_rust()
     test_policy_valid_codecs_registry_derived_and_never_shrinks()
     test_policy_codec_for_matches_rust()
+    test_server_args_kv_cache_dtype_normalization_is_behavior_preserving()
     print("ALL PARITY CHECKS PASS")

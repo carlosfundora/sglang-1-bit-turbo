@@ -797,6 +797,42 @@ class ServerArgs:
     # For forward hooks
     forward_hooks: Optional[List[dict[str, Any]]] = None
 
+    def _normalize_kv_cache_dtype(self) -> None:
+        """Canonicalize Rust-known KV-codec aliases (rq3->rq3_planar, rq4->rq4_planar,
+        atom_fp8->fp8_e4m3, ...) through the authoritative ATOM-RS binding — the single
+        source of truth shared with the ATOM-RS engine — instead of a hand-rolled map.
+        Engine-only / passthrough values are left untouched.
+
+        Guards (Phase E tranche-3; verified behavior-preserving against the accepted
+        --kv-cache-dtype choices via test/srt/test_rs_atom_codec_parity.py):
+          * isinstance(str): torch.dtype objects must pass through (is_known_codec raises
+            on a non-str).
+          * exclude bf16/bfloat16 (case-insensitively): the binding collapses
+            bfloat16->bf16, but trtllm_mla validation distinguishes the two spellings
+            (accepts 'bf16', rejects 'bfloat16'); leaving both untouched reproduces today.
+          * function-local import: a top-level import would eagerly load autoquant/__init__
+            (policy/fingerprint/shelf) at server_args import time; importing here is
+            cycle-free (the _rs_codec shim itself only imports `logging`).
+          * kv_mixed* has no Rust codec, so it keeps its dedicated shorthand expansion.
+        """
+        from sglang.srt.layers.quantization.autoquant._rs_codec import (
+            is_known_codec,
+            normalize_codec_alias,
+        )
+
+        dt = self.kv_cache_dtype
+        if (
+            isinstance(dt, str)
+            and dt.lower() not in ("bf16", "bfloat16")
+            and is_known_codec(dt)
+        ):
+            self.kv_cache_dtype = normalize_codec_alias(dt)
+
+        # Expand kv_mixed shorthand (TQ K + RQ V mixed compression) — no Rust codec.
+        _MIXED_SHORTHAND = {"kv_mixed": "kv_mixed4", "kv_mixed3": "kv_mixed3"}
+        if self.kv_cache_dtype in _MIXED_SHORTHAND:
+            self.kv_cache_dtype = _MIXED_SHORTHAND[self.kv_cache_dtype]
+
     def __post_init__(self):
         """
         Orchestrates the handling of various server arguments, ensuring proper configuration and validation.
@@ -815,17 +851,10 @@ class ServerArgs:
         # Handle deprecated arguments.
         self._handle_deprecated_args()
 
-        # Expand rq3/rq4 shorthand to recommended default (PlanarQuant = fastest)
-        _RQ_SHORTHAND = {"rq3": "rq3_planar", "rq4": "rq4_planar"}
-        if self.kv_cache_dtype in _RQ_SHORTHAND:
-            self.kv_cache_dtype = _RQ_SHORTHAND[self.kv_cache_dtype]
-        if self.kv_cache_dtype == "atom_fp8":
-            self.kv_cache_dtype = "fp8_e4m3"
-
-        # Expand kv_mixed shorthand (TQ K + RQ V mixed compression)
-        _MIXED_SHORTHAND = {"kv_mixed": "kv_mixed4", "kv_mixed3": "kv_mixed3"}
-        if self.kv_cache_dtype in _MIXED_SHORTHAND:
-            self.kv_cache_dtype = _MIXED_SHORTHAND[self.kv_cache_dtype]
+        # Canonicalize Rust-known KV-codec aliases via the single ATOM-RS source of truth
+        # (rs_atom_codec), replacing the old hand-rolled rq3/rq4/atom_fp8 maps. See
+        # _normalize_kv_cache_dtype for the behavior-preservation guards (Phase E tranche-3).
+        self._normalize_kv_cache_dtype()
 
         # Handle deprecated environment variables for prefill delayer.
         self._handle_prefill_delayer_env_compat()
