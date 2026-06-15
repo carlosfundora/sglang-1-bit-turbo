@@ -176,6 +176,20 @@ def test_server_args_kv_cache_dtype_normalization_is_behavior_preserving():
         ServerArgs._normalize_kv_cache_dtype(ns)
         assert ns.kv_cache_dtype == exp, (inp, ns.kv_cache_dtype, exp)
 
+    # Drift guard: every actual --kv-cache-dtype CLI choice must be covered above, so a
+    # future-added choice forces an explicit normalization decision here.
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    ServerArgs.add_cli_args(parser)
+    cli_choices = next(
+        a.choices
+        for a in parser._actions
+        if "--kv-cache-dtype" in getattr(a, "option_strings", [])
+    )
+    uncovered = set(cli_choices) - set(expected)
+    assert not uncovered, f"new --kv-cache-dtype choices not covered by this test: {uncovered}"
+
     # torch.dtype objects pass through untouched (no AttributeError/TypeError crash)
     try:
         import torch
