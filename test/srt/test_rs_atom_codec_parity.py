@@ -91,6 +91,50 @@ def test_policy_valid_codecs_registry_derived_and_never_shrinks():
         assert extra in valid, extra
 
 
+def test_policy_codec_for_matches_rust():
+    """AutoQuantPolicy decision parity: one JSON loaded into both the Python policy class and
+    the Rust PyAutoQuantPolicy must resolve codec_for(layer, stage) identically — pinning the
+    *policy* half of the single-source-of-truth (not just the codec registry). Skipped (with a
+    note) if sglang's heavy deps can't import in this env."""
+    try:
+        from sglang.srt.layers.quantization.autoquant.policy import (
+            AutoQuantPolicy,
+            CodecChoice,
+            Stage,
+        )
+    except Exception as e:  # pragma: no cover - env-dependent
+        print(f"[skip policy codec_for parity: {type(e).__name__}: {e}]")
+        return
+
+    py = AutoQuantPolicy(
+        fingerprint_digest="digest123",
+        model_family="qwen2",
+        n_layers=4,
+        layer_codecs={
+            0: CodecChoice(codec="tq4", bit_width=4),
+            1: CodecChoice(codec="rq4_planar", bit_width=4),
+            2: CodecChoice(codec="rq3_planar", bit_width=3),
+        },
+        stage_overrides={Stage.DECODE: {1: CodecChoice(codec="tq2", bit_width=2)}},
+    )
+    blob = py.to_json()
+    py_loaded = AutoQuantPolicy.from_json(blob)
+    rust = rc.PyAutoQuantPolicy.from_json(blob)
+
+    for layer in (0, 1, 2, 3):  # 3 is unmapped -> tq4 fallback on both sides
+        for stage in (None, "prefill", "decode", "draft"):
+            pc = py_loaded.codec_for(layer, Stage(stage) if stage else None)
+            rcc = rust.codec_for(layer, stage)
+            assert pc.codec == rcc["codec"], (layer, stage, pc.codec, rcc["codec"])
+            assert pc.bit_width == rcc["bit_width"], (layer, stage)
+            # Python CodecChoice.note defaults to ""; Rust serializes Some("") -> "" too.
+            assert (pc.note or "") == (rcc["note"] or ""), (layer, stage, pc.note, rcc["note"])
+    # spot-check the cross-impl values that matter most
+    assert rust.codec_for(1, "decode")["codec"] == "tq2"     # stage override wins
+    assert rust.codec_for(1, "prefill")["codec"] == "rq4_planar"  # falls through to layer codec
+    assert rust.codec_for(3)["codec"] == "tq4"               # fallback agrees
+
+
 if __name__ == "__main__":
     test_wheel_present()
     test_fallback_normalize_matches_rust()
@@ -98,4 +142,5 @@ if __name__ == "__main__":
     test_fallback_bit_width_matches_rust()
     test_fallback_backend_plan_matches_rust()
     test_policy_valid_codecs_registry_derived_and_never_shrinks()
+    test_policy_codec_for_matches_rust()
     print("ALL PARITY CHECKS PASS")
