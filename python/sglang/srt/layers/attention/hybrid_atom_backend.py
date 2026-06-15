@@ -20,6 +20,8 @@ import logging
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 
+from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,7 +45,7 @@ class HybridAttnProfile:
     fallback_primary: str = "triton"  # Use Triton if both unavailable
     
 
-class HybridAITERTritonBackend:
+class HybridAITERTritonBackend(AttentionBackend):
     """
     Dual-dispatch attention backend combining AITER and Triton.
     
@@ -91,6 +93,39 @@ class HybridAITERTritonBackend:
         except Exception as e:
             logger.warning(f"⊘ Triton init failed: {e}")
     
+    # ── sglang AttentionBackend interface (delegated to the full-interface sub-backend) ──
+    # The model runner drives attention via init_forward_metadata*/forward with the standard
+    # (q, k, v, layer, forward_batch) signature — which this class lacked, causing
+    # `AttributeError: 'HybridAITERTritonBackend' object has no attribute 'init_forward_metadata'`
+    # at decode. The hybrid dispatch (aiter-decode / triton-prefill) is moot on RDNA2 where aiter
+    # routes to triton anyway, so delegate the interface to the full-featured triton backend
+    # (falling back to aiter only if triton failed to init).
+    def _primary(self):
+        primary = self.triton_backend or self.aiter_backend
+        if primary is None:
+            raise RuntimeError(
+                "HybridAITERTritonBackend has no usable sub-backend (both AITER and Triton "
+                "failed to initialize)."
+            )
+        return primary
+
+    def init_forward_metadata(self, forward_batch):
+        return self._primary().init_forward_metadata(forward_batch)
+
+    def init_forward_metadata_capture_cuda_graph(self, *args, **kwargs):
+        return self._primary().init_forward_metadata_capture_cuda_graph(*args, **kwargs)
+
+    def init_forward_metadata_replay_cuda_graph(self, *args, **kwargs):
+        return self._primary().init_forward_metadata_replay_cuda_graph(*args, **kwargs)
+
+    def get_cuda_graph_seq_len_fill_value(self):
+        return self._primary().get_cuda_graph_seq_len_fill_value()
+
+    def forward(self, q, k, v, layer, forward_batch, save_kv_cache: bool = True, **kwargs):
+        return self._primary().forward(
+            q, k, v, layer, forward_batch, save_kv_cache=save_kv_cache, **kwargs
+        )
+
     def select_backend(
         self,
         batch_size: int,
@@ -127,7 +162,7 @@ class HybridAITERTritonBackend:
         # Fallback
         return self.profile.fallback_primary
     
-    def forward(
+    def _legacy_dispatch_forward(
         self,
         query,
         key,
@@ -137,9 +172,10 @@ class HybridAITERTritonBackend:
         is_prefill: bool = False,
         **kwargs
     ):
-        """
-        Hybrid forward pass with automatic backend dispatch.
-        """
+        """Standalone shape-dispatch path (NOT sglang's interface — kept for reference / direct
+        use). sglang drives attention through `forward(q,k,v,layer,forward_batch)` above, which
+        delegates to the full-featured sub-backend. This custom signature would otherwise shadow
+        that and break the model runner."""
         
         batch_size = query.shape[0] if len(query.shape) > 2 else 1
         seq_len = query.shape[1] if len(query.shape) > 2 else query.shape[0]
