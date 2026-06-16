@@ -57,7 +57,7 @@ _ALIAS_TO_CANONICAL = {
 _REGISTRY_CODECS = (
     "tq1", "tq2", "tq3", "tq4", "tq8",
     "rq3_planar", "rq4_planar", "rq3_iso", "rq4_iso",
-    "fp8_e4m3",
+    "fp8_e4m3", "int8",
 )
 _BIT_WIDTH = {
     "auto": None, "bf16": None,
@@ -69,11 +69,11 @@ _FAMILY = {
     "tq1": "turbo", "tq2": "turbo", "tq3": "turbo", "tq4": "turbo", "tq8": "turbo",
     "rq3_planar": "rotor_planar", "rq4_planar": "rotor_planar",
     "rq3_iso": "rotor_iso", "rq4_iso": "rotor_iso",
-    "fp8_e4m3": "fp8",
+    "fp8_e4m3": "fp8", "int8": "int8",
 }
 _PREFERRED_BACKEND = {
     "turbo": "turboquant", "rotor_planar": "rotorquant",
-    "rotor_iso": "rotorquant", "fp8": "fp8",
+    "rotor_iso": "rotorquant", "fp8": "fp8", "int8": "int8",
 }
 
 
