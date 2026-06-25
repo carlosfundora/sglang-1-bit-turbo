@@ -427,6 +427,179 @@ struct Router {
     control_plane_auth: Option<PyControlPlaneAuthConfig>,
 }
 
+#[pyclass]
+#[derive(Debug, Clone)]
+pub struct PyRouterSimpleConfig {
+    #[pyo3(get, set)]
+    pub worker_urls: Vec<String>,
+    #[pyo3(get, set)]
+    pub policy: PolicyType,
+    #[pyo3(get, set)]
+    pub host: String,
+    #[pyo3(get, set)]
+    pub port: u16,
+    #[pyo3(get, set)]
+    pub backend: BackendType,
+    #[pyo3(get, set)]
+    pub history_backend: HistoryBackendType,
+    #[pyo3(get, set)]
+    pub max_concurrent_requests: i32,
+    #[pyo3(get, set)]
+    pub dp_aware: bool,
+    #[pyo3(get, set)]
+    pub api_key: Option<String>,
+    #[pyo3(get, set)]
+    pub log_dir: Option<String>,
+    #[pyo3(get, set)]
+    pub log_level: Option<String>,
+    #[pyo3(get, set)]
+    pub enable_trace: bool,
+    #[pyo3(get, set)]
+    pub otlp_traces_endpoint: String,
+}
+
+#[pymethods]
+impl PyRouterSimpleConfig {
+    #[new]
+    #[pyo3(signature = (
+        worker_urls,
+        policy = PolicyType::RoundRobin,
+        host = String::from("0.0.0.0"),
+        port = 3001u16,
+        backend = BackendType::Sglang,
+        history_backend = HistoryBackendType::Memory,
+        max_concurrent_requests = -1i32,
+        dp_aware = false,
+        api_key = None,
+        log_dir = None,
+        log_level = None,
+        enable_trace = false,
+        otlp_traces_endpoint = String::from("localhost:4317"),
+    ))]
+    fn new(
+        worker_urls: Vec<String>,
+        policy: PolicyType,
+        host: String,
+        port: u16,
+        backend: BackendType,
+        history_backend: HistoryBackendType,
+        max_concurrent_requests: i32,
+        dp_aware: bool,
+        api_key: Option<String>,
+        log_dir: Option<String>,
+        log_level: Option<String>,
+        enable_trace: bool,
+        otlp_traces_endpoint: String,
+    ) -> Self {
+        PyRouterSimpleConfig {
+            worker_urls,
+            policy,
+            host,
+            port,
+            backend,
+            history_backend,
+            max_concurrent_requests,
+            dp_aware,
+            api_key,
+            log_dir,
+            log_level,
+            enable_trace,
+            otlp_traces_endpoint,
+        }
+    }
+
+    /// Convert the simple config into the full Router struct, filling other fields with sensible defaults.
+    pub fn to_router(&self) -> Router {
+        Router {
+            host: self.host.clone(),
+            port: self.port,
+            worker_urls: self.worker_urls.clone(),
+            policy: self.policy.clone(),
+            worker_startup_timeout_secs: 600,
+            worker_startup_check_interval: 30,
+            cache_threshold: 0.3,
+            balance_abs_threshold: 64,
+            balance_rel_threshold: 1.5,
+            eviction_interval_secs: 120,
+            max_tree_size: 2usize.pow(26),
+            max_idle_secs: 14400,
+            assignment_mode: String::from("random"),
+            max_payload_size: 512 * 1024 * 1024,
+            dp_aware: self.dp_aware,
+            api_key: self.api_key.clone(),
+            log_dir: self.log_dir.clone(),
+            log_level: self.log_level.clone(),
+            json_log: false,
+            service_discovery: false,
+            selector: HashMap::new(),
+            service_discovery_port: 80,
+            service_discovery_namespace: None,
+            prefill_selector: HashMap::new(),
+            decode_selector: HashMap::new(),
+            bootstrap_port_annotation: String::from("sglang.ai/bootstrap-port"),
+            prometheus_port: None,
+            prometheus_host: None,
+            prometheus_duration_buckets: None,
+            request_timeout_secs: 1800,
+            shutdown_grace_period_secs: 180,
+            request_id_headers: None,
+            pd_disaggregation: false,
+            bucket_adjust_interval_secs: 5,
+            prefill_urls: None,
+            decode_urls: None,
+            prefill_policy: None,
+            decode_policy: None,
+            max_concurrent_requests: self.max_concurrent_requests,
+            cors_allowed_origins: vec![],
+            retry_max_retries: 5,
+            retry_initial_backoff_ms: 50,
+            retry_max_backoff_ms: 30_000,
+            retry_backoff_multiplier: 1.5,
+            retry_jitter_factor: 0.2,
+            disable_retries: false,
+            cb_failure_threshold: 10,
+            cb_success_threshold: 3,
+            cb_timeout_duration_secs: 60,
+            cb_window_duration_secs: 120,
+            disable_circuit_breaker: false,
+            health_failure_threshold: 3,
+            health_success_threshold: 2,
+            health_check_timeout_secs: 5,
+            health_check_interval_secs: 60,
+            health_check_endpoint: String::from("/health"),
+            disable_health_check: false,
+            enable_igw: false,
+            queue_size: 100,
+            queue_timeout_secs: 60,
+            rate_limit_tokens_per_second: None,
+            connection_mode: Router::determine_connection_mode(&self.worker_urls),
+            model_path: None,
+            tokenizer_path: None,
+            chat_template: None,
+            tokenizer_cache_enable_l0: false,
+            tokenizer_cache_l0_max_entries: 10000,
+            tokenizer_cache_enable_l1: false,
+            tokenizer_cache_l1_max_memory: 52428800,
+            reasoning_parser: None,
+            tool_call_parser: None,
+            mcp_config_path: None,
+            backend: self.backend.clone(),
+            history_backend: self.history_backend.clone(),
+            oracle_config: None,
+            postgres_config: None,
+            redis_config: None,
+            client_cert_path: None,
+            client_key_path: None,
+            ca_cert_paths: Vec::new(),
+            server_cert_path: None,
+            server_key_path: None,
+            enable_trace: self.enable_trace,
+            otlp_traces_endpoint: self.otlp_traces_endpoint.clone(),
+            control_plane_auth: None,
+        }
+    }
+}
+
 impl Router {
     fn determine_connection_mode(worker_urls: &[String]) -> core::ConnectionMode {
         for url in worker_urls {
