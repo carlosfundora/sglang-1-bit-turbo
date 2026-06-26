@@ -180,7 +180,7 @@ fn bench_concurrent(c: &mut Criterion) {
                                 let workers = Arc::clone(&workers);
                                 tokio::spawn(async move {
                                     for i in 0..500 {
-                                        let key = if i % 5 == 0 {
+                                        let key = if i.is_multiple_of(5) {
                                             format!("thread{}_user{}", t, i)
                                         } else {
                                             format!("shared_user{}", i % 50)

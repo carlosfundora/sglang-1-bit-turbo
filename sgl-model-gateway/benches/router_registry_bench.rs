@@ -11,7 +11,7 @@ fn setup_registry(count: usize) -> Arc<WorkerRegistry> {
         let mut labels = HashMap::new();
         labels.insert("model_id".to_string(), "benchmark-model".to_string());
 
-        let worker_type = if i % 2 == 0 {
+        let worker_type = if i.is_multiple_of(2) {
             WorkerType::Regular
         } else {
             WorkerType::Decode

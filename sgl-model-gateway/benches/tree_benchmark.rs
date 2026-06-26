@@ -366,7 +366,7 @@ fn bench_concurrent_operations(c: &mut Criterion) {
                                             t,
                                             i
                                         );
-                                        if i % 3 == 0 {
+                                        if i.is_multiple_of(3) {
                                             tree.prefix_match(&text);
                                         } else {
                                             tree.insert(&text, tenant);
@@ -768,7 +768,7 @@ fn bench_multi_tenant(c: &mut Criterion) {
 fn generate_worker_endpoints(count: usize) -> Vec<String> {
     (0..count)
         .map(|i| {
-            if i % 4 == 0 {
+            if i.is_multiple_of(4) {
                 format!("grpc://worker-{}.sglang.svc.cluster.local:50051", i)
             } else {
                 format!("http://worker-{}.sglang.svc.cluster.local:8000", i)
@@ -956,7 +956,7 @@ fn bench_summary(c: &mut Criterion) {
                                         t,
                                         i
                                     );
-                                    if i % 3 == 0 {
+                                    if i.is_multiple_of(3) {
                                         tree.prefix_match(&text);
                                     } else {
                                         tree.insert(&text, &worker);

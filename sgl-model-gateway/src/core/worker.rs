@@ -1568,7 +1568,7 @@ mod tests {
         for i in 0..100 {
             let worker_clone = Arc::clone(&worker);
             let handle = tokio::spawn(async move {
-                worker_clone.set_healthy(i % 2 == 0);
+                worker_clone.set_healthy(i.is_multiple_of(2));
                 time::sleep(Duration::from_micros(10)).await;
             });
             handles.push(handle);
