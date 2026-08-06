@@ -24,7 +24,7 @@ Pure-Rust shared contracts for the **gfxGRAPH** ecosystem. Defines lightweight, 
 └──────────────┘ └───────────────┘
 ```
 
-### Federation Crate Naming Convention
+### Collective Crate Naming Convention
 
 | Suffix | Role | Example |
 |---|---|---|
