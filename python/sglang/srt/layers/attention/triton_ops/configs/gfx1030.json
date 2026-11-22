@@ -1,0 +1,33 @@
+{
+  "_description": "Triton attention configs for RDNA2 (gfx1030). Wave32, 64KB LDS, no matrix cores.",
+  "_target": "gfx1030 (RX 6700 XT, RX 6800, RX 6900 XT and all gfx103x variants)",
+  "decode_attention": {
+    "BLOCK_N": 64,
+    "num_warps": 2,
+    "num_stages": 1,
+    "waves_per_eu": 2,
+    "notes": "Wave32 = half threads per warp vs CDNA. 2 warps keeps occupancy high without LDS pressure."
+  },
+  "extend_attention": {
+    "head_dim_le_128": {
+      "BLOCK_M": 32,
+      "BLOCK_N": 64,
+      "num_warps": 2
+    },
+    "head_dim_le_256": {
+      "BLOCK_M": 32,
+      "BLOCK_N": 32,
+      "num_warps": 2
+    },
+    "head_dim_gt_256": {
+      "BLOCK_M": 16,
+      "BLOCK_N": 32,
+      "num_warps": 2
+    }
+  },
+  "kv_splits": 8,
+  "wave_size": 32,
+  "lds_size_kb": 64,
+  "fp8_hw": false,
+  "matrix_cores": false
+}

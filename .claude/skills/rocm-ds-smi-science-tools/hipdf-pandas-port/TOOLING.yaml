@@ -1,0 +1,27 @@
+toolification:
+  callable: true
+  safe_to_parallelize: false
+  preferred_runtimes:
+    - bash
+    - python
+  entrypoints:
+    - SKILL.md
+  wrappers:
+    sglang:
+      tool_name: rocm_ds_skill
+      mode: routed
+      io: json
+    langchain:
+      tool_name: rocm_ds_skill
+      mode: structured
+      io: pydantic
+    mcp:
+      tool_name: rocm_ds_skill
+      mode: stdio
+      io: jsonrpc
+  approval_gates:
+    required_for:
+      - destructive file changes
+      - dependency pin changes
+      - unsupported GPU claims
+      - benchmark claims without evidence
